@@ -586,3 +586,35 @@ The middle one (the third), by program:
 
 **Next.** The JIT's design (ADR 0014), which is where QEMU's 1,267 M/s is to be met:
 that figure is a JIT's, and an interpreter is not expected to come near it.
+
+## R008: the first blocks, timed (2026-11-24)
+
+The card, written before the run.
+
+- **Hypothesis**: the first translator covers 35% of the primitives' instructions, and
+  four primitives nearly wholly (`p_loop`, `p_if`, `p_pointer`, `p_recursion`: over
+  99.5% in blocks). Every block still comes out to Rust and is found again by a look
+  in a hash table before the next goes in, and every instruction that sets the flags
+  writes its record (two or three host instructions more). So those four are guessed
+  to run at some hundreds of millions of instructions a second: several times the
+  interpreter's 72, and well under QEMU's 1,267. The primitives that are mostly not
+  translated yet are guessed to be no faster than interpreted, or a little slower (the
+  count of arrivals, the looking up).
+- **What is changed from before**: R007 timed the interpreter alone. Here the same
+  programs run with `--jit`.
+- **Next move for each result**:
+  - The four are at hundreds of millions and held back by the coming out and going in
+    (a profile says: time in `run`, the hash table, `enter`) → blocks joined to one
+    another is the next thing built (ADR 0014's first "not yet")
+  - The four are held back by something else (the record of the flags, the code
+    itself) → that first, and said
+  - A primitive is slower with `--jit` than without by more than a tenth → why is
+    found before going on: a JIT that loses to its own interpreter anywhere is not
+    switched on by default
+  - Whatever the four do, what the other 19 are not translated for is counted next
+    (which instructions end their blocks), since 65% of the instructions are still the
+    interpreter's
+- **Cut-off**: one race: each primitive at one round, interpreted and with `--jit`,
+  the two at once, five runs, the least, less a program that does nothing; and one
+  profile of `p_loop` with `--jit`. On the Mac only. No change to the code in this
+  entry.
