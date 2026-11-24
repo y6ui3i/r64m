@@ -1721,3 +1721,50 @@ The card, written before the run.
     millisecond now) → looked into before the commit
 - **Cut-off**: one count, one shorter race (three at once: this build, R020's, g64m's
   JIT), after every test passes on both hosts.
+
+The count (p_simd, one round, the instructions the interpreter ran, by opcode): PMULUDQ
+2,359,296; PSHUFD 1,966,088; PSRLQ by a constant 1,441,792; PSRLD 1,179,664; PADDD
+917,504; PUNPCKLDQ 802,816; PSLLD 393,224; SHUFPS 393,216; PSUBD 262,152; PCMPGTD
+131,072; PADDQ 32,769; PUNPCKHDQ 16,384. The shuffles' constants in its code: PSHUFD
+by 08h (twelve places), D8h and 00h; SHUFPS by DDh. The C cases execute a few hundred
+of the same kinds (PUNPCKLBW, PADDB, PCMPEQ among them) and nothing else that is
+packed.
+
+What was translated: those twelve, and with each its like in the other sizes where
+the host's instruction differs only in a field (PADD, PSUB, PCMPEQ, PCMPGT, PUNPCKL
+and PUNPCKH of every size; the shifts of 16, 32 and 64 bits). All straight: none has
+a way out. PMULUDQ is three of the host's (two narrowings and a widening multiply).
+A shuffle by any constant is right: PSHUFD is one instruction where all four are the
+same element and else four moves of an element; SHUFPS by DDh and by 88h is one (the
+odd, the even elements of both), else four moves. A shift by the element's width or
+more is x86's nothing, or the sign everywhere, made without the host's shift. The
+shifts of the whole register by bytes are left to the interpreter: one place in
+p_simd's code, not in its count.
+
+The result (MacBook Air, Apple M1; three at once: this build, R020's, g64m with its
+JIT; the least of three, less a program that does nothing; QEMU's times are R008's).
+
+**As guessed.**
+
+| | in blocks | r64m | R020 | g64m's JIT | QEMU | QEMU / r64m |
+|---|---|---|---|---|---|---|
+| p_simd, one round | 99.98% (40.2%) | 0.003 s | 0.299 s | | | |
+| p_simd, 200 rounds | | 0.473 s | over 15 s | 1.649 s | 2.060 s | 4.35 |
+
+Twenty-one of the 23 primitives are past QEMU, thirteen of them at twice QEMU or past
+it, and on eighteen of the twenty-one r64m's JIT is level with g64m's or ahead. Not
+past QEMU: p_ldbl (the x87, not in blocks by ADR 0015) and p_sha (stores beside code).
+
+The other primitives are within 0.5% of R020's build but for p_fill, 1.3% to 1.9%
+slower in four races (the card's line is 1%). Looked into: its generated code is the
+same word for word in the two builds, and the interpreter alone is the same speed
+(1.004); the difference is 15 ms over 32 million entries, a cycle and a half each, in
+compiled Rust that this change did not touch (the runner's loop), so it is where the
+compiler put that code. Not chased. (The commit of the translation was made before
+the race, not after the look as the card said; the look changed nothing in it.)
+
+All 62 programs give the interpreter's output, exit code and count in the four JIT
+modes, on macOS and in the Linux container; 89 unit tests on both, three of them new:
+every opcode from a register, from memory, with itself and with the upper eight
+registers on operands chosen for signs and carries; both shuffles by each of the 256
+constants; every shift by 16 counts from nothing to 255.
