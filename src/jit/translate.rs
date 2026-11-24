@@ -13,9 +13,12 @@
 //! - the record of the flags (x21 to x23) is what the last instruction that set them
 //!   left: written when that instruction is done, not before.
 //! - x16, x17, x25 and x26 are scratch within one instruction.
+//! - x27 counts the instructions of blocks run to their ends: each way out of a block
+//!   adds the block's to it, so that a block may go on to the next without Rust
+//!   between (R009).
 
 use super::a64::{self, Cond, Logic, Mem as Op, Size};
-use super::{BASE, CPU, LEFT_AT_END, OUT, REASON};
+use super::{BASE, CPU, LEFT_AT_END, OUT, RAN, REASON};
 use crate::cpu::{Cpu, REC_ADD, REC_LOGIC, REC_SUB};
 use crate::mem::Mem;
 use std::mem::offset_of;
@@ -317,14 +320,28 @@ impl Emit {
         }
     }
 
-    /// The way out with RIP a constant.
-    fn leave(&mut self, rip: u64) {
+    /// A way out to a constant address, after `n` instructions of this block: a jump
+    /// that goes at first to the code after it, which leaves for Rust saying which
+    /// jump it was; Rust rewrites the jump to go to the block at that address once
+    /// there is one, and from then on this is one jump.
+    fn leave(&mut self, rip: u64, n: usize) {
+        self.put(a64::arith_imm(true, false, false, RAN, RAN, n as u32, false));
+        self.put(a64::b(1));
+        self.put(a64::adr(T1, -4));
+        self.put(a64::mem_imm(Size::X, Op::Store, T1, CPU, offset_of!(Cpu, left_from) as u32));
         self.constant(T0, rip);
-        self.leave_at_t0();
+        self.out();
     }
 
-    /// The way out with RIP in `T0`.
-    fn leave_at_t0(&mut self) {
+    /// A way out with RIP in `T0`, which is not known until it is run: nothing to
+    /// join.
+    fn leave_at_t0(&mut self, n: usize) {
+        self.put(a64::arith_imm(true, false, false, RAN, RAN, n as u32, false));
+        self.put(a64::mem_imm(Size::X, Op::Store, a64::ZR, CPU, offset_of!(Cpu, left_from) as u32));
+        self.out();
+    }
+
+    fn out(&mut self) {
         self.put(a64::mem_imm(Size::X, Op::Store, T0, CPU, offset_of!(Cpu, rip) as u32));
         self.put(a64::movz(true, REASON, LEFT_AT_END as u16, 0));
         self.put(a64::br(OUT));
@@ -350,7 +367,7 @@ pub fn translate(m: &Mem, rip: u64) -> Option<Built> {
             if starts.is_empty() {
                 return None;
             }
-            e.leave(at);
+            e.leave(at, starts.len());
             break;
         };
         let before = e.w.len();
@@ -441,19 +458,19 @@ pub fn translate(m: &Mem, rip: u64) -> Option<Built> {
             }
             0x90 | 0x11f => {}
             0xe9 | 0xeb => {
-                e.leave(ins.imm as u64);
+                e.leave(ins.imm as u64, starts.len());
                 ended = true;
             }
             0xe8 => {
                 e.constant(T0, next);
                 e.push(T0);
-                e.leave(ins.imm as u64);
+                e.leave(ins.imm as u64, starts.len());
                 ended = true;
             }
             0xc3 => {
                 e.put(a64::mem_reg(Size::X, Op::Load, T0, BASE, RSP));
                 e.put(a64::arith_imm(true, false, false, RSP, RSP, 8, false));
-                e.leave_at_t0();
+                e.leave_at_t0(starts.len());
                 ended = true;
             }
             0x70..=0x7f | 0x180..=0x18f => {
@@ -465,19 +482,21 @@ pub fn translate(m: &Mem, rip: u64) -> Option<Built> {
                     if starts.is_empty() {
                         return None;
                     }
-                    e.leave(at);
+                    e.leave(at, starts.len());
                     break;
                 };
+                let n = starts.len();
                 match jump {
-                    Jump::Always => e.leave(ins.imm as u64),
-                    Jump::Never => e.leave(next),
+                    Jump::Always => e.leave(ins.imm as u64, n),
+                    Jump::Never => e.leave(next, n),
                     Jump::If(cond) => {
-                        // Over the way out for "not taken" to the one for "taken".
-                        let mut not_taken = Emit { w: Vec::new(), flags: None };
-                        not_taken.leave(next);
-                        e.put(a64::b_cond(cond, not_taken.w.len() as i32 + 1));
-                        e.w.extend(not_taken.w);
-                        e.leave(ins.imm as u64);
+                        // Over the way out for "not taken" to the one for "taken": the
+                        // jump is written when it is known how far that is.
+                        let jump_at = e.w.len();
+                        e.put(a64::nop());
+                        e.leave(next, n);
+                        e.w[jump_at] = a64::b_cond(cond, (e.w.len() - jump_at) as i32);
+                        e.leave(ins.imm as u64, n);
                     }
                 }
                 ended = true;

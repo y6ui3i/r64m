@@ -15,7 +15,9 @@
 //! | x20 | the base of the guest's memory |
 //! | x21 to x23 | the record of the flags |
 //! | x24 | the address of the way out |
-//! | x25 to x28 | scratch that the way in saves |
+//! | x25, x26 | scratch that the way in saves |
+//! | x27 | how many instructions the blocks run to their ends have run |
+//! | x28 | not used yet |
 
 // Some of its forms wait for the instructions that will use them.
 #[allow(dead_code)]
@@ -33,6 +35,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 pub const CPU: u8 = 19;
 pub const BASE: u8 = 20;
 pub const OUT: u8 = 24;
+/// The host register that counts the instructions of the blocks run to their ends.
+pub const RAN: u8 = 27;
 /// Where generated code puts why it leaves.
 pub const REASON: u8 = 16;
 
@@ -72,6 +76,7 @@ pub unsafe extern "C" fn enter(cpu: *mut Cpu, code: *const u8, base: *mut u8) ->
         "ldp x10, x11, [x19, #{reg} + 80]",
         "ldp x12, x13, [x19, #{reg} + 96]",
         "ldp x14, x15, [x19, #{reg} + 112]",
+        "mov x27, #0",
         "br x17",
         // The way out.
         "2:",
@@ -85,6 +90,7 @@ pub unsafe extern "C" fn enter(cpu: *mut Cpu, code: *const u8, base: *mut u8) ->
         "stp x14, x15, [x19, #{reg} + 112]",
         "stp x21, x22, [x19, #{rec}]",
         "str x23, [x19, #{rec} + 16]",
+        "str x27, [x19, #{ran}]",
         "mov x0, x16",
         "ldp x19, x20, [sp]",
         "ldp x21, x22, [sp, #16]",
@@ -96,6 +102,7 @@ pub unsafe extern "C" fn enter(cpu: *mut Cpu, code: *const u8, base: *mut u8) ->
         "ret",
         reg = const offset_of!(Cpu, reg),
         rec = const offset_of!(Cpu, flag_rec),
+        ran = const offset_of!(Cpu, ran),
     )
 }
 
@@ -168,6 +175,19 @@ impl Code {
         }
         self.used += words.len();
         Some(at as *const u8)
+    }
+
+    /// Writes one instruction over one written before.
+    ///
+    /// # Safety
+    /// `at` must be an instruction of this piece, and no thread may be running it.
+    pub unsafe fn rewrite(&mut self, at: *const u8, word: u32) {
+        unsafe {
+            writable(true);
+            (at as *mut u32).write(word);
+            writable(false);
+            told(at as *mut u8, 4);
+        }
     }
 
     /// Forgets everything written: the next is written at the start again.

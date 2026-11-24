@@ -178,6 +178,12 @@ pub fn cbz(wide: bool, nonzero: bool, rt: u8, words: i32) -> u32 {
     sf(wide) | 0x3400_0000 | (nonzero as u32) << 24 | (words as u32 & 0x7_ffff) << 5 | r(rt)
 }
 
+/// The address `bytes` from this instruction, into a register.
+pub fn adr(rd: u8, bytes: i32) -> u32 {
+    debug_assert!((-(1 << 20)..1 << 20).contains(&bytes));
+    0x1000_0000 | (bytes as u32 & 3) << 29 | (bytes as u32 >> 2 & 0x7_ffff) << 5 | r(rd)
+}
+
 pub fn br(rn: u8) -> u32 {
     0xd61f_0000 | r(rn) << 5
 }
@@ -314,6 +320,12 @@ mod tests {
             (cbz(true, false, 3, 4), 0xb4000083, "cbz x3, .+0x10"),
             (cbz(false, true, 3, -4), 0x35ffff83, "cbnz w3, .-0x10"),
             (br(16), 0xd61f0200, "br x16"),
+            (adr(17, 0), 0x10000011, "l: adr x17, l"),
+            (adr(17, -4), 0x10fffff1, "adr x17, .-4"),
+            (adr(1, 0x1004), 0x10008021, "adr x1, .+0x1004"),
+            (mem_imm(Size::X, Mem::Store, ZR, 19, 0xb8), 0xf9005e7f, "str xzr, [x19, #0xb8]"),
+            (arith_imm(true, false, false, 27, 27, 64, false), 0x9101037b, "add x27, x27, #64"),
+            (movz(true, 27, 0, 0), 0xd280001b, "mov x27, #0"),
             (ret(), 0xd65f03c0, "ret"),
             (csel(true, 1, 2, 3, Cond::Eq), 0x9a830041, "csel x1, x2, x3, eq"),
             (csel(false, 1, 2, 3, Cond::Lt), 0x1a83b041, "csel w1, w2, w3, lt"),
@@ -325,7 +337,7 @@ mod tests {
         for (ours, theirs, name) in cases {
             assert_eq!(ours, theirs, "{name}: {ours:08x}, the assembler {theirs:08x}");
         }
-        assert_eq!(cases.len(), 88);
+        assert_eq!(cases.len(), 94);
     }
 
     #[test]

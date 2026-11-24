@@ -54,6 +54,12 @@ pub struct Cpu {
     pub flag_rec: [u64; 3],
     /// Where in generated code the host faulted, when a block was left that way.
     pub fault_pc: u64,
+    /// The jump generated code was left by, if it is one that can be rewritten to go
+    /// to its target's block; zero if it was left some other way.
+    pub left_from: u64,
+    /// How many instructions the blocks ran that were run to their ends, since
+    /// generated code was last gone into.
+    pub ran: u64,
     /// The XMM registers, two words each, low then high.
     pub xmm: [u64; 32],
     pub mxcsr: u32,
@@ -77,6 +83,8 @@ impl Cpu {
             steps: 0,
             flag_rec: [0; 3],
             fault_pc: 0,
+            left_from: 0,
+            ran: 0,
             xmm: [0; 32],
             mxcsr: 0x1f80,
             x87: x87::X87::new(),

@@ -3,7 +3,7 @@
 //! interpreter (ADR 0014, points 2, 7, 8 and 11).
 
 use super::translate::{translate, Built};
-use super::{enter, Code, LEFT_AT_END};
+use super::{a64, enter, Code, LEFT_AT_END};
 use crate::cpu::{self, Cpu, Step, Stop};
 use crate::mem::{Access, Mem};
 use std::collections::HashMap;
@@ -24,6 +24,8 @@ struct Block {
     starts: Vec<(u32, u64)>,
     /// The host pages of the guest's memory its instructions lie in.
     pages: (u64, u64),
+    /// The jumps in other blocks (or in this one) that were rewritten to come here.
+    incoming: Vec<u64>,
 }
 
 /// What is counted for `--jit-stats`.
@@ -36,6 +38,7 @@ pub struct Stats {
     pub forgotten: u64,
     pub emptied: u64,
     pub checked: u64,
+    pub joined: u64,
 }
 
 pub struct Jit {
@@ -51,6 +54,9 @@ pub struct Jit {
     check: bool,
     /// How often an address is arrived at before its block is made.
     hot: u8,
+    /// The jump the last block was left by, if it can be rewritten to go to the block
+    /// at the address it left for; zero if there is none to rewrite.
+    from: u64,
     pub stats: Stats,
 }
 
@@ -72,6 +78,7 @@ impl Jit {
             writes: HashMap::new(),
             check,
             hot: hot.max(1),
+            from: 0,
             stats: Stats::default(),
         })
     }
@@ -81,9 +88,15 @@ impl Jit {
     pub fn run(&mut self, c: &mut Cpu, m: &mut Mem) -> Event {
         // A block begins only where a jump arrives; after one the address is looked up.
         let mut arrived = true;
+        self.from = 0;
         loop {
             if arrived {
                 if let Some(&id) = self.at.get(&c.rip) {
+                    // The block before left by a jump to this address: from now on it
+                    // comes here by itself. (Not when each block is to be checked.)
+                    if self.from != 0 && !self.check {
+                        self.join(self.from, id);
+                    }
                     match self.run_block(id, c, m) {
                         Ok(whole) => arrived = whole,
                         Err(differs) => return Event::Differs(differs),
@@ -91,6 +104,7 @@ impl Jit {
                     // Left by a fault: the interpreter meets the instruction next,
                     // whatever block may begin there.
                     if arrived {
+                        self.from = c.left_from;
                         continue;
                     }
                 } else {
@@ -101,6 +115,12 @@ impl Jit {
                     }
                 }
             }
+            // The interpreter reads the flags: they are worked out from what generated
+            // code left of them, which is not done after every block (R009). And a jump
+            // that left a block for here is not one to the block that comes after this
+            // instruction.
+            self.from = 0;
+            cpu::settle(c);
             let before = c.rip;
             match cpu::step(c, m) {
                 Ok(Step::Next) => arrived = c.rip < before || c.rip > before.wrapping_add(15),
@@ -116,17 +136,30 @@ impl Jit {
         }
     }
 
-    /// Runs one block. `Ok(true)` if it ran to its end; `Ok(false)` if the host
-    /// faulted in it, and then RIP is on the instruction that did.
+    /// Rewrites the jump at `site` to go to a block's code.
+    fn join(&mut self, site: u64, id: usize) {
+        let words = (self.blocks[id].code as i64 - site as i64) / 4;
+        unsafe { self.code.rewrite(site as *const u8, a64::b(words as i32)) };
+        self.blocks[id].incoming.push(site);
+        self.stats.joined += 1;
+    }
+
+    /// Goes into generated code at one block, which may go on to others joined to it.
+    /// `Ok(true)` if it was left at a block's end; `Ok(false)` if the host faulted,
+    /// and then RIP is on the instruction that did.
     fn run_block(&mut self, id: usize, c: &mut Cpu, m: &mut Mem) -> Result<bool, String> {
         let expected = if self.check { self.interpreted(id, c, m) } else { None };
-        let block = &self.blocks[id];
-        let reason = unsafe { enter(c, block.code, m.base()) };
-        cpu::settle(c);
+        let reason = unsafe { enter(c, self.blocks[id].code, m.base()) };
+        // What the blocks that were run to their ends ran.
+        c.steps += c.ran;
+        self.stats.in_blocks += c.ran;
         self.stats.entered += 1;
         if reason != LEFT_AT_END {
-            // Which instruction: the last that begins at or before where the host was.
-            let word = ((c.fault_pc - block.code as u64) / 4) as u32;
+            // Which block: they lie in the order they were made. Which instruction:
+            // the last that begins at or before where the host was.
+            let pc = c.fault_pc;
+            let block = &self.blocks[self.blocks.partition_point(|b| b.code as u64 <= pc) - 1];
+            let word = ((pc - block.code as u64) / 4) as u32;
             let i = block.starts.partition_point(|&(start, _)| start <= word) - 1;
             c.rip = block.starts[i].1;
             c.steps += i as u64;
@@ -134,13 +167,12 @@ impl Jit {
             self.stats.faults += 1;
             return Ok(false);
         }
-        let n = block.starts.len() as u64;
-        c.steps += n;
-        self.stats.in_blocks += n;
         if let Some((want, written)) = expected {
             self.stats.checked += 1;
+            cpu::settle(c);
             if let Some(what) = differs(&want, c, &written, m) {
-                let from = block.starts[0].1;
+                let block = &self.blocks[id];
+                let (n, from) = (block.starts.len(), block.starts[0].1);
                 return Err(format!("the block of {n} instructions at {from:#x}: {what}"));
             }
         }
@@ -192,22 +224,33 @@ impl Jit {
             return false;
         }
         self.at.insert(rip, self.blocks.len());
-        self.blocks.push(Block { code, starts, pages });
+        self.blocks.push(Block { code, starts, pages, incoming: Vec::new() });
         self.stats.blocks += 1;
         true
     }
 
     /// Forgets every block with an instruction in the host page that holds `addr`, and
-    /// lets the page be written again.
+    /// lets the page be written again. The jumps that were rewritten to come to those
+    /// blocks go to their own ways out again.
     fn forget(&mut self, addr: u64, m: &mut Mem) {
         let (start, end) = m.host_pages(addr, addr + 1);
         let blocks = &self.blocks;
         // A block that reaches into the page from a neighbour keeps the neighbour
         // marked: only this page is let go, and only blocks that touch it are dropped.
+        let mut dropped = Vec::new();
         self.at.retain(|_, id| {
             let (from, to) = blocks[*id].pages;
-            to <= start || from >= end
+            let kept = to <= start || from >= end;
+            if !kept {
+                dropped.push(*id);
+            }
+            kept
         });
+        for id in dropped {
+            for site in std::mem::take(&mut self.blocks[id].incoming) {
+                unsafe { self.code.rewrite(site as *const u8, a64::b(1)) };
+            }
+        }
         let _ = m.mark_code(start, end, false);
         *self.writes.entry(start).or_insert(0) += 1;
         self.stats.forgotten += 1;
@@ -221,6 +264,7 @@ impl Jit {
         self.blocks.clear();
         self.at.clear();
         self.heat.clear();
+        self.from = 0;
         self.code.empty();
         self.stats.emptied += 1;
     }
@@ -305,12 +349,18 @@ mod tests {
         c
     }
 
-    /// One program, checked; and it must have been run by at least one block.
+    /// One program, by blocks each checked and then, from the beginning again in a
+    /// memory of its own, by blocks joined to one another; and it must have been run
+    /// by at least one block. What comes back is the joined run's.
     fn checked(code: &[u8], data: &[u8], set: &dyn Fn(&mut Cpu)) -> (Cpu, Mem) {
         let mut m = guest(code, data);
         let mut jit = Jit::new(true, 1).unwrap();
-        let c = both(&mut jit, &mut m, CODE, set);
+        both(&mut jit, &mut m, CODE, set);
         assert!(jit.stats.checked >= 1, "no block was run for {code:02x?}");
+        let mut m = guest(code, data);
+        let mut jit = Jit::new(false, 1).unwrap();
+        let c = both(&mut jit, &mut m, CODE, set);
+        assert!(jit.stats.entered >= 1);
         (c, m)
     }
 
@@ -344,16 +394,23 @@ mod tests {
         }
         let mut m = guest(&code, &[]);
         let mut jit = Jit::new(true, 1).unwrap();
+        // And the same by blocks joined to one another, in a memory of their own.
+        let mut joined_m = guest(&code, &[]);
+        let mut joined = Jit::new(false, 1).unwrap();
         let mut taken = 0;
         for &(a, b) in pairs {
             for &rip in &programs {
-                let c = both(&mut jit, &mut m, rip, &|c| {
+                let set = |c: &mut Cpu| {
                     c.reg[RAX] = a;
                     c.reg[RBX] = b;
-                });
+                };
+                let c = both(&mut jit, &mut m, rip, &set);
                 taken += (c.reg[RDX] == 2) as u32;
+                assert_eq!(both(&mut joined, &mut joined_m, rip, &set).reg[RDX], c.reg[RDX]);
             }
         }
+        // Each program is three blocks; both ways out of each first were joined.
+        assert!(joined.stats.joined as usize >= programs.len(), "{} joined", joined.stats.joined);
         let all = (pairs.len() * programs.len()) as u32;
         // Both ways were gone, and often: a condition and its opposite are each other's.
         assert_eq!(taken * 2, all);
@@ -500,21 +557,24 @@ mod tests {
         code.extend([0x83, 0x3e, 0x03, 0x75]);
         code.push((-(code.len() as i32 + 1)) as u8);
         code.extend([0x0f, 0x05]);
-        // The code must be writable to the guest for it to write itself.
-        let mut m = Mem::reserve().unwrap();
-        m.map(CODE, 4096, R | W | X).unwrap();
-        m.write_bytes(CODE, &code).unwrap();
-        m.map(DATA, 4096, R | W).unwrap();
-        let mut jit = Jit::new(true, 1).unwrap();
-        let c = both(&mut jit, &mut m, CODE, &|c| c.reg[RSI] = DATA);
-        // Three times round; the second and third with the constant as written.
-        assert_eq!(c.reg[RAX], 9);
-        assert_eq!(m.read_u32(DATA), Ok(3));
-        assert_eq!(m.read_u32(CODE + 1), Ok(9));
-        // The store from a block was a fault that left the block; the page's blocks
-        // were forgotten each time and made again.
-        assert!(jit.stats.faults >= 1 && jit.stats.forgotten >= 1, "faults {}, forgotten {}", jit.stats.faults, jit.stats.forgotten);
-        assert!(!m.is_code(DATA));
+        // The code must be writable to the guest for it to write itself. Checked block
+        // by block, and joined.
+        for check in [true, false] {
+            let mut m = Mem::reserve().unwrap();
+            m.map(CODE, 4096, R | W | X).unwrap();
+            m.write_bytes(CODE, &code).unwrap();
+            m.map(DATA, 4096, R | W).unwrap();
+            let mut jit = Jit::new(check, 1).unwrap();
+            let c = both(&mut jit, &mut m, CODE, &|c| c.reg[RSI] = DATA);
+            // Three times round; the second and third with the constant as written.
+            assert_eq!(c.reg[RAX], 9);
+            assert_eq!(m.read_u32(DATA), Ok(3));
+            assert_eq!(m.read_u32(CODE + 1), Ok(9));
+            // The store from a block was a fault that left the block; the page's
+            // blocks were forgotten each time and made again.
+            assert!(jit.stats.faults >= 1 && jit.stats.forgotten >= 1, "faults {}, forgotten {}", jit.stats.faults, jit.stats.forgotten);
+            assert!(!m.is_code(DATA));
+        }
     }
 
     #[test]
@@ -533,5 +593,103 @@ mod tests {
         assert_eq!((c.rip, c.steps, c.reg[RAX], c.reg[RBX]), (CODE + 3, 1, 0x8000_0000, 0));
         assert_eq!(c.rflags & 0x8d5, 0x894);
         assert_eq!(jit.stats.faults, 1);
+    }
+
+    #[test]
+    fn a_loop_of_joined_blocks_stays_in_generated_code() {
+        // mov edx, 0; again: add edx, 3; sub ebx, 1; jne again; syscall
+        let code = [0xba, 0, 0, 0, 0, 0x83, 0xc2, 0x03, 0x83, 0xeb, 0x01, 0x75, 0xf8, 0x0f, 0x05];
+        let rounds = 100_000u64;
+        let mut m = guest(&code, &[]);
+        let mut jit = Jit::new(false, 1).unwrap();
+        let c = both(&mut jit, &mut m, CODE, &|c| c.reg[RBX] = rounds);
+        assert_eq!(c.reg[RDX], 3 * rounds);
+        // The count is every instruction's: the first, three a round, and the SYSCALL.
+        assert_eq!(c.steps, 1 + 3 * rounds + 1);
+        // Generated code was gone into a few times, not once a round: the loop's jump
+        // back was joined to the loop's own block.
+        assert!(jit.stats.entered < 10, "entered {} times", jit.stats.entered);
+        assert!(jit.stats.joined >= 1);
+        assert_eq!(jit.stats.in_blocks, 1 + 3 * rounds);
+    }
+
+    #[test]
+    fn a_fault_after_joined_blocks_counts_what_ran() {
+        // again: add edx, 1; sub ebx, 1; jne again; mov eax, [rsi]; syscall, with RSI
+        // nowhere: the load is in a block of its own, come to by a joined jump.
+        let code = [0x83, 0xc2, 0x01, 0x83, 0xeb, 0x01, 0x75, 0xf8, 0x8b, 0x06, 0x0f, 0x05];
+        let mut m = guest(&code, &[]);
+        let mut jit = Jit::new(false, 1).unwrap();
+        // Twice: the second time the loop's block is gone into with the load's block
+        // already joined behind it, so the fault is in a block that was not the one
+        // gone into.
+        for _ in 0..2 {
+            let mut c = Cpu::new(CODE, DATA + 4096);
+            c.reg[RBX] = 50;
+            c.reg[RSI] = 0x90_0000;
+            let Event::Stop(stop) = jit.run(&mut c, &mut m) else { panic!("it went on") };
+            assert_eq!(stop, Stop::Fault(crate::mem::Fault { addr: 0x90_0000, access: Access::Read }));
+            // Fifty rounds of three, and RIP on the load, with the flags of the last
+            // SUB (zero, parity) settled for whoever looks.
+            assert_eq!((c.rip, c.steps, c.reg[RDX]), (CODE + 8, 150, 50));
+            assert_eq!(c.rflags & 0x8d5, 0x44);
+        }
+        assert_eq!(jit.stats.faults, 2);
+    }
+
+    #[test]
+    fn a_block_is_not_joined_over_what_the_interpreter_runs_between() {
+        // again: add edx, 1; add dx, 0x10 (16 bits: the interpreter's); jmp next;
+        // next: sub ebx, 1; jne again; syscall. The first block's way out is to the
+        // 16-bit instruction, not to the block at `next` that is arrived at after it.
+        let code = [0x83, 0xc2, 0x01, 0x66, 0x83, 0xc2, 0x10, 0xeb, 0x00, 0x83, 0xeb, 0x01, 0x75, 0xf2, 0x0f, 0x05];
+        let mut m = guest(&code, &[]);
+        let mut jit = Jit::new(false, 1).unwrap();
+        let c = both(&mut jit, &mut m, CODE, &|c| c.reg[RBX] = 20);
+        assert_eq!(c.reg[RDX], 20 * 0x11);
+        assert_eq!(c.steps, 20 * 5 + 1);
+    }
+
+    #[test]
+    fn a_call_in_a_loop_goes_to_its_function_every_time() {
+        // again: call f; sub ebx, 1; jne again; syscall;  f: add edx, 5; ret
+        // A return's target is not a constant: the jump the call left by must not be
+        // taken for one to wherever the return then goes.
+        let code = [0xe8, 0x07, 0, 0, 0, 0x83, 0xeb, 0x01, 0x75, 0xf6, 0x0f, 0x05, 0x83, 0xc2, 0x05, 0xc3];
+        let mut m = guest(&code, &[]);
+        let mut jit = Jit::new(false, 1).unwrap();
+        let c = both(&mut jit, &mut m, CODE, &|c| c.reg[RBX] = 30);
+        assert_eq!(c.reg[RDX], 150);
+        assert_eq!(c.reg[crate::cpu::RSP], DATA + 4096);
+        assert_eq!(c.steps, 30 * 5 + 1);
+    }
+
+    #[test]
+    fn a_jump_joined_to_a_block_that_is_forgotten_is_not_taken_again() {
+        // On one page:   again: jmp far
+        //                back:  mov dword [far + 1], 9   (writes the other page's code)
+        //                       add edx, eax; sub ebx, 1; jne again; syscall
+        // On another:    far:   mov eax, 7; jmp back
+        // The block at `again` stays (its page is not written); the jump in it was
+        // joined to the block at `far`, which is forgotten when its page is written.
+        const FAR: u64 = CODE + 0x1_0000;
+        let mut near = vec![0xe9, 0, 0, 0, 0, 0xc7, 0x05, 0, 0, 0, 0, 9, 0, 0, 0, 0x01, 0xc2, 0x83, 0xeb, 0x01, 0x75, 0xea, 0x0f, 0x05];
+        near[1..5].copy_from_slice(&((FAR - (CODE + 5)) as i32).to_le_bytes());
+        near[7..11].copy_from_slice(&((FAR + 1 - (CODE + 15)) as i32).to_le_bytes());
+        let mut far = vec![0xb8, 7, 0, 0, 0, 0xe9, 0, 0, 0, 0];
+        far[6..10].copy_from_slice(&((CODE as i64 + 5 - (FAR as i64 + 10)) as i32).to_le_bytes());
+        for check in [true, false] {
+            let mut m = Mem::reserve().unwrap();
+            m.map(CODE, 4096, R | W | X).unwrap();
+            m.write_bytes(CODE, &near).unwrap();
+            m.map(FAR, 4096, R | W | X).unwrap();
+            m.write_bytes(FAR, &far).unwrap();
+            m.map(DATA, 4096, R | W).unwrap();
+            let mut jit = Jit::new(check, 1).unwrap();
+            let c = both(&mut jit, &mut m, CODE, &|c| c.reg[RBX] = 4);
+            // Seven the first time round, nine the three after.
+            assert_eq!(c.reg[RDX], 7 + 3 * 9);
+            assert!(jit.stats.forgotten >= 1);
+        }
     }
 }
