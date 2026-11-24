@@ -1631,3 +1631,66 @@ The card, written before the run.
 - **Cut-off**: one shorter race (one round first; the 200-round build only where one
   round is under 0.1 s; no run over 15 s), after all 62 programs give the
   interpreter's results in the four modes on both hosts.
+
+The result (MacBook Air, Apple M1; three at once: this build, R018's build from its
+commit, g64m with its JIT; the least of three, less a program that does nothing; QEMU's
+times are R008's).
+
+**As guessed for the four; the integer primitives showed the loads after all, in one
+place, and the card's next move for that was taken here.**
+
+| 200 rounds | in blocks | r64m | R018 | g64m's JIT | QEMU | QEMU / r64m |
+|---|---|---|---|---|---|---|
+| p_float | 100% | 2.602 s | over 15 s | 3.925 s | 8.283 s | 3.18 |
+| p_dbl_arith | 100% | 2.842 s | over 15 s | 4.077 s | 7.847 s | 2.76 |
+| p_dbl_cmp | 100% | 1.524 s | over 15 s | 2.094 s | 8.367 s | 5.49 |
+| p_dbl_conv | 100% | 2.689 s | over 15 s | 1.799 s | 22.810 s | 8.48 |
+
+At one round the four went from 0.40 to 0.58 s to 0.008 to 0.017 s. The sixteen
+integer primitives that were in blocks are each within 0.4% of R018's build (0.998 to
+1.004). Twenty of the 23 primitives are now past QEMU, twelve of them at twice QEMU
+or past it, and on seventeen of the twenty r64m's JIT is level with g64m's or ahead
+(behind: p_loop, p_ternary, and p_dbl_conv by 1.5 times, which is not looked into
+here). p_ldbl (x87), p_simd (packed integers: 40% in blocks, 0.417 s to 0.311 s a
+round) and p_sha are where they were.
+
+All 62 programs give the interpreter's output, exit code and count in the four JIT
+modes, on macOS and in the Linux container; 86 unit tests on both, eleven of them new:
+every scalar instruction beside the interpreter on R019's operands in both sizes, from
+a register and from memory, each asserted to be in a block.
+
+What happened on the way, in its order:
+
+1. **The cut-off conversion was built without a way out**, not as ADR 0015's point 5
+   had it. p_dbl_conv was 86% in blocks at first: a third of its conversions do not
+   fit 32 bits (it is `(i32)(x * 1.5)`), and each left for the interpreter. x86's one
+   answer for all that does not fit is the smallest integer, which a comparison and a
+   conditional choice make in the block. The ADR has a note.
+2. **The integer primitives were not slower, but for p_fill: 7.6%** (1.130 s for
+   1.050 s). It has a tenth of its instructions in blocks and comes and goes 160,000
+   times a round.
+3. **A first guess at the cure was wrong.** The XMM registers were loaded and stored
+   only once some block of the program used them. p_fill was still 10% slower. A
+   second guess (the host's d8 to d15 kept only then) changed nothing either. Sampling
+   the two builds showed the way in and out at 18% of the time for 7% before: p_fill
+   has a block that uses an XMM register, so "some block uses them" was true for it,
+   and every entry paid. This should have been asked of the program before the first
+   cure was written, not after the second.
+4. **The cure that worked is the card's own**: a block that uses the XMM registers
+   begins with a test of a word in the way in's frame, and loads them (and keeps the
+   host's d8 to d15) if no block has since the way in; the way out stores them only
+   then. A block without SSE begins as before. p_fill: 1.074 s for 1.069 s.
+
+Two things found about the measuring:
+
+- **The races since R017 timed to the nearest 50 ms at worst.** The scratch script
+  waited for each program with a timeout, and Python's wait with a timeout polls,
+  sleeping up to 50 ms between looks. It showed here as the new and the old build
+  taking the same time to the millisecond on most lines. The wait is now without a
+  timeout, with a timer that kills. R017's and R018's ratios stand to about 5% on a
+  run of a second and are not otherwise put right; this race's are to the
+  millisecond. One more reason for the race to be `cargo xtask`, which is still owed.
+- **The primitives have their names in the repository now** (`tests/prim.rs`, asked
+  for by the owner): each with what its C is made of, and five tests each, the
+  interpreter against what is right and the JIT's four ways against the interpreter.
+  What the scratch script `jitall` did for them is done by `cargo test`.

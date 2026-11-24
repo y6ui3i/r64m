@@ -20,7 +20,7 @@
 //!   between (R009).
 
 use super::a64::{self, Cond, Fp, FpSize, Logic, Mem as Op, Shift, Size, VLogic};
-use super::{BASE, CPU, LEFT_AT_END, LEFT_FOR_THE_INTERPRETER, OUT, RAN, REASON, TABLE, TABLE_BITS};
+use super::{BASE, CPU, KEPT_D8, LEFT_AT_END, LEFT_FOR_THE_INTERPRETER, OUT, RAN, REASON, TABLE, TABLE_BITS, XMM_LOADED};
 use crate::cpu::{Cpu, REC_ADC, REC_ADD, REC_ADD_BY_RESULT, REC_BSF, REC_BSR, REC_FLOAT, REC_IMUL, REC_LOGIC, REC_MUL, REC_SBB, REC_SHIFT, REC_SUB, REC_SUB_BY_RESULT};
 use crate::mem::Mem;
 use std::mem::offset_of;
@@ -56,6 +56,27 @@ pub struct Built {
     /// of the flags need not be written (R013). A store there forgets the block as a
     /// store to its own instructions does.
     pub seen: Option<(u64, u64)>,
+}
+
+/// What a block that uses the XMM registers begins with: if none has loaded them since
+/// the way in, they are loaded (the lower halves of the host's v8 to v15, which are
+/// its caller's, kept first), and the way out is told to store them (ADR 0015, point
+/// 1, as built in R020).
+fn load_xmm() -> Vec<u32> {
+    const SP: u8 = 31;
+    let mut w = vec![a64::mem_imm(Size::X, Op::Load, T0, SP, XMM_LOADED), 0];
+    for i in 0..4 {
+        w.push(a64::stp_d(8 + 2 * i, 9 + 2 * i, SP, KEPT_D8 + 16 * i as u32));
+    }
+    w.push(a64::arith_imm(true, false, false, T0, CPU, offset_of!(Cpu, xmm) as u32, false));
+    for i in 0..8 {
+        w.push(a64::ldp_q(2 * i, 2 * i + 1, T0, 32 * i as u32));
+    }
+    w.push(a64::movz(true, T0, 1, 0));
+    w.push(a64::mem_imm(Size::X, Op::Store, T0, SP, XMM_LOADED));
+    // Over all of it, if they are loaded.
+    w[1] = a64::cbz(true, true, T0, w.len() as i32 - 1);
+    w
 }
 
 /// An operand that is a register or memory.
@@ -1264,6 +1285,7 @@ pub fn translate(m: &Mem, rip: u64, exact: bool) -> Option<Built> {
     let mut e = Emit { w: Vec::new(), flags: None, m, rip, exact, skip: false, seen: None, later: None, host: true, bails: Vec::new() };
     let mut starts = Vec::new();
     let mut taken: Vec<Taken> = Vec::new();
+    let mut sse = false;
     let mut at = rip;
     loop {
         let (code, have) = m.code_at(at);
@@ -1723,7 +1745,10 @@ pub fn translate(m: &Mem, rip: u64, exact: bool) -> Option<Built> {
                 }
                 ended = true;
             }
-            op if is_sse(op) => e.sse(&ins, at, starts.len() - 1),
+            op if is_sse(op) => {
+                sse = true;
+                e.sse(&ins, at, starts.len() - 1);
+            }
             _ => unreachable!("read gave an instruction that is not translated"),
         }
         // What was asked about the flags before this instruction was written was asked
@@ -1761,7 +1786,19 @@ pub fn translate(m: &Mem, rip: u64, exact: bool) -> Option<Built> {
         e.w[jump] |= ((e.w.len() - jump) as u32 & 0x7_ffff) << 5;
         e.bail_out(at, n);
     }
-    Some(Built { words: e.w, starts, end: at, seen: e.seen })
+    // A block that uses the XMM registers loads them first. What was written for it
+    // comes after: its jumps to itself are to where it was to begin, past the loading
+    // (a loop of one block has loaded them).
+    let mut words = e.w;
+    if sse {
+        let mut first = load_xmm();
+        for start in &mut starts {
+            start.0 += first.len() as u32;
+        }
+        first.append(&mut words);
+        words = first;
+    }
+    Some(Built { words, starts, end: at, seen: e.seen })
 }
 
 impl Emit<'_> {

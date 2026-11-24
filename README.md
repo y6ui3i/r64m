@@ -15,14 +15,16 @@ M1), 1.27 times g64m's interpreter and ahead of it on every primitive (R007); QE
 which is a JIT, runs the same primitives at 1,267 million. r64m's own JIT
 ([0014](docs/adr/0014-the-jit.md)) translates blocks of integer instructions (moves,
 arithmetic and logic on 8 to 64 bits, with and without the carry, multiplication and
-division, shifts, rotations, bit scans, conditional moves and sets, the stack, jumps),
-joins them to one another, finds a return's block without leaving generated code, and
+division, shifts, rotations, bit scans, conditional moves and sets, the stack, jumps)
+and of the scalar SSE instructions ([0015](docs/adr/0015-sse-in-blocks.md): moves,
+arithmetic, comparisons and conversions of floats and doubles, the XMM registers in
+the host's vector registers), joins them to one another, finds a return's block without leaving generated code, and
 checks each block against the interpreter when asked (`--jit-check`). It is asked for
-with `--jit` and is not yet what r64m does by itself. Of the 23 primitives sixteen are
-past QEMU on this Mac (1.06 to 4.97 times), eight of them at twice QEMU or past it,
-and on fourteen r64m's JIT is level with g64m's or ahead (R018). One integer primitive
-is behind QEMU for its stores to data that shares a 16 KB host page with its code; the
-six floating-point ones are still mostly interpreted: SSE and the x87 are not
+with `--jit` and is not yet what r64m does by itself. Of the 23 primitives (named, with what each is made of, in `tests/prim.rs`) twenty are
+past QEMU on this Mac (1.04 to 8.48 times), twelve of them at twice QEMU or past it,
+and on seventeen r64m's JIT is level with g64m's or ahead (R020). One integer primitive
+is behind QEMU for its stores to data that shares a 16 KB host page with its code, and
+two are still mostly interpreted: the packed integer instructions and the x87 are not
 translated. There is no dynamic linking,
 no system call beyond `write` and `exit`, and no machine yet.
 
@@ -94,8 +96,9 @@ real CPU does.
    block; a store to translated code, and to data beside it; blocks joined; returns
    and jumps through an operand found in a table. The record of the flags is written only where
    something can read it (R013 to R015); the integer instructions the primitives use
-   (R016, R017); a block goes on past a conditional jump (R018). Next: SSE; stores
-   beside code on 16 KB pages.
+   (R016, R017); a block goes on past a conditional jump (R018); the scalar SSE
+   instructions (R020). Next: the packed integer instructions; stores beside code on
+   16 KB pages.
 
 One case is owed: the x87's square root when what is left over equals the root (the
 rounding there is not touched by any of g64m's cases; found by breaking it on purpose).

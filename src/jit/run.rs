@@ -2483,4 +2483,22 @@ mod tests {
             assert_eq!(jit.stats.faults, 1);
         }
     }
+    #[test]
+    fn a_block_without_sse_made_first_goes_on_to_one_with() {
+        // again: add edx, 1; jmp on; on: addsd xmm1, xmm2; sub ebx, 1; jne again; syscall
+        // The way in is through the first block, which does not use the XMM registers,
+        // and they are not loaded there; the second loads them when it is first come
+        // to, and not again while the loop goes round in generated code.
+        let code = [0x83, 0xc2, 0x01, 0xeb, 0x00, 0xf2, 0x0f, 0x58, 0xca, 0x83, 0xeb, 0x01, 0x75, 0xf2, 0x0f, 0x05];
+        let (c, _) = checked(&code, &[], &|c| {
+            (c.xmm[2], c.xmm[3], c.xmm[4]) = (1.0f64.to_bits(), 9, 0.5f64.to_bits());
+            c.reg[RBX] = 1000;
+        });
+        assert_eq!((c.xmm[2], c.xmm[3], c.reg[RDX]), (501.0f64.to_bits(), 9, 1000));
+        // A block with no SSE in it does not begin with the loading, and one with does.
+        let begins = |code: &[u8]| translate(&guest(code, &[]), CODE, false).unwrap().words[0];
+        let loading = a64::mem_imm(a64::Size::X, a64::Mem::Load, 16, 31, crate::jit::XMM_LOADED);
+        assert_ne!(begins(&[0x83, 0xc2, 0x01, 0x0f, 0x05]), loading);
+        assert_eq!(begins(&[0xf2, 0x0f, 0x58, 0xca, 0x0f, 0x05]), loading);
+    }
 }

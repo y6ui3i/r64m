@@ -31,6 +31,9 @@ decision changes neither; both are named under "Not yet".
    - The other way is to leave them in the state and load and store around each
      instruction. A `double` loop is then two loads and a store for each `addsd`, the
      cost g64m's ledger counted for integers before its registers were pinned.
+   - (As built, R020: they are loaded by the first block that uses them after the
+     way in, and stored on the way out only then. Loaded at every entry they cost
+     p_fill a tenth.)
    - The price of this way is paid by every entry, with or without SSE in the block:
      sixteen host instructions that touch 256 bytes, and four each way for d8 to d15.
      Entries are rare where blocks are joined (R012); the race says whether it shows.

@@ -423,6 +423,18 @@ pub fn fp_mem(size: FpSize, load: bool, rt: u8, rn: u8, rm: u8) -> u32 {
     form | (load as u32) << 22 | r(rm) << 16 | r(rn) << 5 | r(rt)
 }
 
+/// A store of the lower halves of two vector registers, and a load of all of two, at a
+/// register (31: the stack pointer) and a constant that is a multiple of their size.
+pub fn stp_d(rt: u8, rt2: u8, rn: u8, offset: u32) -> u32 {
+    debug_assert!(offset % 8 == 0 && offset < 512);
+    0x6d00_0000 | offset / 8 << 15 | r(rt2) << 10 | r(rn) << 5 | r(rt)
+}
+
+pub fn ldp_q(rt: u8, rt2: u8, rn: u8, offset: u32) -> u32 {
+    debug_assert!(offset % 16 == 0 && offset < 1024);
+    0xad40_0000 | offset / 16 << 15 | r(rt2) << 10 | r(rn) << 5 | r(rt)
+}
+
 /// A compare of a register with the negative of a small constant if the condition
 /// holds; else the flags are `nzcv`.
 pub fn ccmn_imm(wide: bool, rn: u8, imm: u32, nzcv: u32, cond: Cond) -> u32 {
@@ -634,11 +646,17 @@ mod tests {
             (fp_mem(FpSize::Q, false, 3, 20, 4), 0x3ca46a83, "str q3, [x20, x4]"),
             (ccmn_imm(false, 16, 1, 1, Cond::Vc), 0x3a417a01, "ccmn w16, #1, #1, vc"),
             (ccmn_imm(true, 16, 1, 1, Cond::Vc), 0xba417a01, "ccmn x16, #1, #1, vc"),
+            (stp_d(8, 9, 31, 96), 0x6d0627e8, "stp d8, d9, [sp, #96]"),
+            (stp_d(14, 15, 31, 144), 0x6d093fee, "stp d14, d15, [sp, #144]"),
+            (ldp_q(0, 1, 16, 0), 0xad400600, "ldp q0, q1, [x16]"),
+            (ldp_q(14, 15, 16, 224), 0xad473e0e, "ldp q14, q15, [x16, #224]"),
+            (mem_imm(Size::X, Mem::Load, 16, 31, 160), 0xf94053f0, "ldr x16, [sp, #160]"),
+            (mem_imm(Size::X, Mem::Store, 17, 31, 160), 0xf90053f1, "str x17, [sp, #160]"),
         ];
         for (ours, theirs, name) in cases {
             assert_eq!(ours, theirs, "{name}: {ours:08x}, the assembler {theirs:08x}");
         }
-        assert_eq!(cases.len(), 195);
+        assert_eq!(cases.len(), 201);
     }
 
     #[test]

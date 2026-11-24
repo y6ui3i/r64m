@@ -18,7 +18,7 @@
 //! | x25, x26 | scratch that the way in saves |
 //! | x27 | how many instructions the blocks run to their ends have run |
 //! | x28 | the address of the table of blocks (`TABLE_BITS`) |
-//! | v0 to v15 | the guest's sixteen XMM registers (ADR 0015) |
+//! | v0 to v15 | the guest's sixteen XMM registers (ADR 0015), once a block that uses them has loaded them (`XMM_LOADED`) |
 //! | v16 to v31 | scratch |
 
 // Some of its forms wait for the instructions that will use them.
@@ -45,6 +45,11 @@ pub const RAN: u8 = 27;
 /// address in the guest and where the code of its block is.
 pub const TABLE: u8 = 28;
 pub const TABLE_BITS: u32 = 14;
+/// In the way in's frame, from the stack pointer as generated code has it: whether the
+/// XMM registers were loaded since the way in (not zero), and where the lower halves
+/// of the caller's v8 to v15 are kept when they were.
+pub const XMM_LOADED: u32 = 160;
+pub const KEPT_D8: u32 = 96;
 /// Where generated code puts why it leaves.
 pub const REASON: u8 = 16;
 
@@ -65,21 +70,21 @@ pub const LEFT_FOR_THE_INTERPRETER: u64 = 2;
 /// `code` must be code written for this convention, `base` the base of the guest's
 /// memory it was written for, and `table` a table of two to the `TABLE_BITS` places
 /// whose every place holds an address and code that may be jumped to.
+///
+/// The XMM registers are not loaded here: a block that uses them loads them where it
+/// begins, if no block has since the way in (`XMM_LOADED`), and only then does the way
+/// out store them. (R020: loaded and stored every time, they cost p_fill, which comes
+/// and goes 160 times for every thousand of its instructions in blocks, a tenth.)
 #[unsafe(naked)]
 pub unsafe extern "C" fn enter(cpu: *mut Cpu, code: *const u8, base: *mut u8, table: *const [u64; 2]) -> u64 {
     core::arch::naked_asm!(
-        "sub sp, sp, #160",
+        "sub sp, sp, #176",
         "stp x19, x20, [sp]",
         "stp x21, x22, [sp, #16]",
         "stp x23, x24, [sp, #32]",
         "stp x25, x26, [sp, #48]",
         "stp x27, x28, [sp, #64]",
         "stp x29, x30, [sp, #80]",
-        // The lower halves of v8 to v15 are the caller's to find again.
-        "stp d8, d9, [sp, #96]",
-        "stp d10, d11, [sp, #112]",
-        "stp d12, d13, [sp, #128]",
-        "stp d14, d15, [sp, #144]",
         "mov x19, x0",
         "mov x20, x2",
         "mov x28, x3",
@@ -95,15 +100,7 @@ pub unsafe extern "C" fn enter(cpu: *mut Cpu, code: *const u8, base: *mut u8, ta
         "ldp x10, x11, [x19, #{reg} + 80]",
         "ldp x12, x13, [x19, #{reg} + 96]",
         "ldp x14, x15, [x19, #{reg} + 112]",
-        "add x16, x19, #{xmm}",
-        "ldp q0, q1, [x16]",
-        "ldp q2, q3, [x16, #32]",
-        "ldp q4, q5, [x16, #64]",
-        "ldp q6, q7, [x16, #96]",
-        "ldp q8, q9, [x16, #128]",
-        "ldp q10, q11, [x16, #160]",
-        "ldp q12, q13, [x16, #192]",
-        "ldp q14, q15, [x16, #224]",
+        "str xzr, [sp, #{loaded}]",
         "mov x27, #0",
         "br x17",
         // The way out.
@@ -119,6 +116,9 @@ pub unsafe extern "C" fn enter(cpu: *mut Cpu, code: *const u8, base: *mut u8, ta
         "stp x21, x22, [x19, #{rec}]",
         "str x23, [x19, #{rec} + 16]",
         "str x27, [x19, #{ran}]",
+        // If a block loaded the XMM registers (and kept the caller's d8 to d15).
+        "ldr x17, [sp, #{loaded}]",
+        "cbz x17, 3f",
         "add x17, x19, #{xmm}",
         "stp q0, q1, [x17]",
         "stp q2, q3, [x17, #32]",
@@ -128,6 +128,11 @@ pub unsafe extern "C" fn enter(cpu: *mut Cpu, code: *const u8, base: *mut u8, ta
         "stp q10, q11, [x17, #160]",
         "stp q12, q13, [x17, #192]",
         "stp q14, q15, [x17, #224]",
+        "ldp d8, d9, [sp, #{kept}]",
+        "ldp d10, d11, [sp, #{kept} + 16]",
+        "ldp d12, d13, [sp, #{kept} + 32]",
+        "ldp d14, d15, [sp, #{kept} + 48]",
+        "3:",
         "mov x0, x16",
         "ldp x19, x20, [sp]",
         "ldp x21, x22, [sp, #16]",
@@ -135,16 +140,14 @@ pub unsafe extern "C" fn enter(cpu: *mut Cpu, code: *const u8, base: *mut u8, ta
         "ldp x25, x26, [sp, #48]",
         "ldp x27, x28, [sp, #64]",
         "ldp x29, x30, [sp, #80]",
-        "ldp d8, d9, [sp, #96]",
-        "ldp d10, d11, [sp, #112]",
-        "ldp d12, d13, [sp, #128]",
-        "ldp d14, d15, [sp, #144]",
-        "add sp, sp, #160",
+        "add sp, sp, #176",
         "ret",
         reg = const offset_of!(Cpu, reg),
         rec = const offset_of!(Cpu, flag_rec),
         ran = const offset_of!(Cpu, ran),
         xmm = const offset_of!(Cpu, xmm),
+        loaded = const XMM_LOADED,
+        kept = const KEPT_D8,
     )
 }
 
