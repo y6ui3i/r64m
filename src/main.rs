@@ -4,6 +4,7 @@
 
 mod cpu;
 mod elf;
+mod jit;
 // Some of it waits for the calls that map and unmap.
 #[allow(dead_code)]
 mod mem;
