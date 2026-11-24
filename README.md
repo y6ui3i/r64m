@@ -4,12 +4,13 @@ An x86-64 emulator with a JIT for arm64 hosts, in Rust: a rebuild of
 [g64m](https://github.com/y6ui3i/g64m), which is written in Goose. Not a port of its
 code: what g64m found out is used, and the design begins again (`docs/adr/`).
 
-**Static programs of integer instructions run, interpreted.** This repository was
+**Static programs run, interpreted, if they do not use the x87.** This repository was
 started on 2026-11-24. So far: the guest's memory (`src/mem.rs`), the loader of a static
 program with its first stack (`src/elf.rs`), an interpreter for the integer instructions
-(`src/cpu.rs`) and three system calls (`src/sys.rs`). Of g64m's 39 cases with a trace
-from the real CPU, the 26 that use neither the x87 nor SSE give that trace. There is no
-JIT, no x87, no SSE, no dynamic linking and no machine yet.
+and SSE and SSE2 (`src/cpu.rs`, `src/cpu/sse.rs`) and three system calls (`src/sys.rs`).
+Of g64m's 39 cases with a trace from the real CPU, 34 give that trace; the five others
+wait for the x87. Of its 23 primitives, 22 print what they should (the other is long
+double). There is no JIT, no x87, no dynamic linking and no machine yet.
 
 ## The goal
 
@@ -68,10 +69,10 @@ real CPU does.
    no second design.
 2. Done (R002, ADR 0008, `src/mem.rs`): a program's memory is a reservation of the
    host's address space, protected by the host.
-3. Done for the integer instructions: a static program loaded and run by the
+3. Done for the integer instructions and SSE: a static program loaded and run by the
    interpreter on that memory, its trace the real CPU's.
-4. The x87 and SSE, to the same traces; then the primitives (`tests/prim64` of g64m),
-   which print what they compute.
+4. The x87, to the same traces.
+5. The first translated block.
 
 ## Rules of this repository
 

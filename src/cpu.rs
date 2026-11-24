@@ -5,13 +5,15 @@
 //! did (the traces under g64m's `tests/expected64`); where the manual leaves a flag
 //! undefined, what is here is what that CPU does, as g64m found it.
 //!
-//! So far the integer instructions. The x87 and SSE are not written yet.
+//! So far the integer instructions and SSE and SSE2 (`sse`). The x87 is not written yet.
 //!
 //! An instruction that cannot go on gives a `Stop` and leaves RIP on itself. It may
 //! have changed registers or memory before it stopped: nothing is delivered to the
 //! guest yet, so a stop is the end of the program.
 
 use crate::mem::{Access, Fault, Mem};
+
+mod sse;
 
 pub const CF: u64 = 0x0001;
 pub const PF: u64 = 0x0004;
@@ -42,6 +44,9 @@ pub struct Cpu {
     pub gs_base: u64,
     /// Instructions run so far. RDTSC reads it, so that a run is the same every time.
     pub steps: u64,
+    /// The XMM registers, two words each, low then high.
+    pub xmm: [u64; 32],
+    pub mxcsr: u32,
 }
 
 impl Cpu {
@@ -49,7 +54,7 @@ impl Cpu {
     pub fn new(rip: u64, rsp: u64) -> Cpu {
         let mut reg = [0; 16];
         reg[RSP] = rsp;
-        Cpu { reg, rip, rflags: 0x202, fs_base: 0, gs_base: 0, steps: 0 }
+        Cpu { reg, rip, rflags: 0x202, fs_base: 0, gs_base: 0, steps: 0, xmm: [0; 32], mxcsr: 0x1f80 }
     }
 }
 
@@ -1028,6 +1033,7 @@ impl Run<'_> {
                 let op2 = self.fb()? as u8;
                 let w2 = if op2 & 1 == 0 { 8 } else { osz };
                 match op2 {
+                    _ if sse::is(op2) => self.sse(op2)?,
                     0x05 => {
                         self.c.reg[RCX] = self.ip;
                         self.c.reg[11] = self.c.rflags;

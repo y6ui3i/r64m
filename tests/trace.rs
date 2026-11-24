@@ -14,14 +14,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Cases by the first letters of their names, and what each waits for.
-const NOT_YET: [(&str, &str); 7] = [
+const NOT_YET: [(&str, &str); 5] = [
     ("a_prefix", "the x87"),
-    ("j_misc", "SSE"),
+    ("x_fxsave", "the x87, whose state FXSAVE keeps"),
     ("f_", "the x87"),
     ("j_x87", "the x87"),
     ("c_ld", "the x87 (long double)"),
-    ("x_", "SSE"),
-    ("cx_", "SSE"),
 ];
 
 fn g64m() -> PathBuf {
@@ -73,7 +71,8 @@ fn case(g64m: &Path, name: &str, asm: Option<&Path>) -> Result<(), Failed> {
         .arg("-dc")
         .arg(g64m.join("tests/expected64").join(format!("{name}.trace.gz"))))?;
     let out = Command::new(env!("CARGO_BIN_EXE_r64m"))
-        .arg("--trace")
+        // The cases named x_ and cx_ use SSE: their traces have the XMM registers too.
+        .arg(if name.starts_with("x_") || name.starts_with("cx_") { "--trace-xmm" } else { "--trace" })
         .arg(&program)
         .output()
         .map_err(|e| format!("r64m: {e}"))?;
