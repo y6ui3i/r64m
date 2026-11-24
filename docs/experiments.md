@@ -2007,3 +2007,35 @@ Not shown, and owed to the steps that will meet them: a mapping of a file that i
 shared and written; an address freed by `munmap` given out again (they are not: the
 reservation is 2^39 bytes below the interpreter, and a long-lived program could use
 it up); a handler called; `set_tid_address`'s word cleared at a thread's end.
+
+## R026: the shell, a pipe, files (2026-11-25)
+
+ADR 0017's second step.
+
+The card, written before the run.
+
+- **Hypothesis**: with the calls for files handed to the host's kernel (the x86-64
+  forms without a directory made into arm64's with one; `stat`'s structure written
+  over), `fork` and `clone` as the host's `fork`, `execve` as r64m started again with
+  the new program, and `wait4`, busybox's shell runs commands joined by pipes, and
+  its programs read and write files, as on the real machine. What busybox asks for
+  beyond R024's lists is not known and is found by running: each call r64m names as
+  not known is added if it is of a kind already decided (handed on, or memory), and
+  the list is recorded.
+- **What is changed from before** (R025): `src/sys.rs` gains the file calls, the
+  process calls, time, identity and the terminal's `ioctl`s; r64m takes `--argv0` (a
+  program's own name for itself is not always its path) and reads a `#!` line;
+  `mremap`.
+- **Next move for each result**:
+  - The cases are as hal's in the three ways → step 3: GCC compiling and linking one
+    file (R024's 33 calls, most of them here by then)
+  - A call that is neither handed on as it is nor memory (a structure that differs,
+    as `stat`'s does, or something the kernel cannot be asked on the guest's behalf)
+    → named in the result, and built if small
+  - A child that does not behave (a `fork` with blocks, a pipe that does not close)
+    → the finding; `--jit-check` in the child says whether it is the JIT's
+  - A case differs from hal's only in what the host is (`uname -m`, the clock) → it
+    is not a case; said so
+- **Cut-off**: the cases chosen before the run (files read and listed, files
+  written and removed, the shell with a loop, a pipe of three programs, a command's
+  exit code, a script with `#!`), in the container.
