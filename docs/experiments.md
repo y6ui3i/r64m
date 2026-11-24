@@ -328,3 +328,85 @@ The card, written before the run.
 - **Cut-off**: the three changes above and no more in this entry. `p_fill`'s `rep stos`
   (15 times slower than g64m's, R004) is counted in the total but is not what this is
   about: if it alone keeps the total behind, that is said and it gets its own change.
+
+**Result: past g64m's interpreter by a fifth, without a memory of decoded instructions.
+The simple form is kept.**
+
+On a MacBook Air (Apple M1), macOS 27; the 23 primitives, 737.8 M instructions.
+
+The profile first (`sample`, `p_rotate` and `p_index`): over half of all samples were in
+`step` itself, which is the fetch (the search of the list and the copy of fifteen bytes)
+and the setting up; a quarter in `exec`. So the first guess was the largest, as guessed.
+
+Three changes, each raced against the build before it and against g64m's interpreter,
+all three running at once (three runs, the least of each):
+
+| | before | after | g64m beside them |
+|---|---|---|---|
+| 1. The last region found is remembered, one for each kind of access (`Mem::check`) | 34.2 M/s | 52.2 M/s | 56.3 M/s |
+| 2. An instruction's bytes are read where they lie, not copied (`Mem::code_at`) | 46.6 M/s | 48.1 M/s | 49.3 M/s |
+| 3. The small helpers put in line (`#[inline(always)]`), `check`'s search apart and cold | 48.7 M/s | 60.3 M/s | 50.4 M/s |
+
+(The rows are not to be read down: the machine ran warmer from one race to the next, as
+g64m's own column shows. Each row is right across.)
+
+- The second profile, after the first change, put `exec` on top and showed the helpers
+  (`modrm`, `alu`, `sr`, `rm_get`, `check`) as functions of their own, each called for
+  every instruction. That was not one of the card's three; the card says to take what
+  the profile shows largest and say so. It took the place of the memory of decoded
+  instructions, which was then not needed.
+
+Then r64m as it now is against g64m's interpreter, the two at once, five runs of each
+program, the least, less a program that does nothing; three such races:
+
+| race | r64m | g64m, interpreter | g64m's time / r64m's |
+|---|---|---|---|
+| 1 | 61.6 M/s | 50.8 M/s | 1.21 |
+| 2 | 68.1 M/s | 56.1 M/s | 1.21 |
+| 3 | **67.4 M/s** | **55.7 M/s** | **1.21** |
+
+The middle one (the third), by program:
+
+| | r64m | g64m, interpreter | g64m's time / r64m's |
+|---|---|---|---|
+| p_bignum | 0.625 s | 0.817 s | 1.31 |
+| p_bitfield | 0.976 s | 1.201 s | 1.23 |
+| p_bytes | 0.421 s | 0.547 s | 1.30 |
+| p_dbl_arith | 0.399 s | 0.460 s | 1.15 |
+| p_dbl_cmp | 0.627 s | 0.777 s | 1.24 |
+| p_dbl_conv | 0.626 s | 0.706 s | 1.13 |
+| p_fill | 0.120 s | 0.019 s | 0.16 |
+| p_float | 0.442 s | 0.476 s | 1.08 |
+| p_funcptr | 0.300 s | 0.331 s | 1.10 |
+| p_if | 0.277 s | 0.384 s | 1.39 |
+| p_index | 0.417 s | 0.507 s | 1.22 |
+| p_ldbl | 0.415 s | 0.310 s | 0.75 |
+| p_loop | 0.178 s | 0.235 s | 1.32 |
+| p_muldiv | 0.428 s | 0.496 s | 1.16 |
+| p_pixel | 0.370 s | 0.500 s | 1.35 |
+| p_pointer | 0.438 s | 0.561 s | 1.28 |
+| p_recursion | 0.152 s | 0.210 s | 1.38 |
+| p_rotate | 1.130 s | 1.479 s | 1.31 |
+| p_sha | 0.235 s | 0.301 s | 1.28 |
+| p_shift | 1.098 s | 1.331 s | 1.21 |
+| p_simd | 0.385 s | 0.505 s | 1.31 |
+| p_switch | 0.351 s | 0.450 s | 1.28 |
+| p_ternary | 0.527 s | 0.654 s | 1.24 |
+
+- **The aim is met**: 1.21 times g64m's interpreter in each of three races, 67.4 M
+  instructions a second where it was 34.8 (R004): 1.94 times itself.
+- **Two programs are still behind.** `p_fill` (0.16): `rep stos` one repetition to a
+  step, as said in R004 and left alone here. `p_ldbl` (0.75): the x87, where g64m keeps
+  an 80-bit value's f64 until it is first read (its E162) and r64m makes it each time.
+  Each is one known thing, neither is the interpreter's form.
+- **Nothing was given up for it**: the 17 unit tests, the 39 traces and the 23
+  primitives hold on macOS and, built again for Linux, in the container.
+- **How the races vary**: the first race of the three final ones was a tenth slower for
+  both than the next two (the machine, without a fan, had just run the earlier races).
+  The ratio did not move. A ratio from two programs run at once is what is to be
+  trusted here, not an instructions-a-second figure from one run.
+- The profiles and the race were `sample` and a script in a scratch folder, not kept.
+
+**Next.** The JIT's design (ADR 0014) is still the owner's to answer. Beside it, as
+things that would each be a change of their own: `rep stos` and `rep movs` in one
+step, and the x87's f64 kept.

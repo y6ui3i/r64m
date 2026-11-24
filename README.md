@@ -9,9 +9,11 @@ far: the guest's memory (`src/mem.rs`), the loader of a static program with its 
 stack (`src/elf.rs`), an interpreter for the integer instructions, SSE and SSE2 and the
 x87 (`src/cpu.rs`, `src/cpu/sse.rs`, `src/cpu/x87.rs`) and three system calls
 (`src/sys.rs`). All 39 of g64m's cases with a trace from the real CPU give that trace,
-and all 23 of its primitives print what they should. There is no JIT, no dynamic
-linking, no system call beyond `write` and `exit`, and no machine yet; nothing has been
-timed. The same holds on arm64 Linux, built from the Mac (R003).
+and all 23 of its primitives print what they should, on macOS and on arm64 Linux
+(R003). The interpreter runs 67 million instructions a second on a MacBook Air (Apple
+M1), 1.2 times g64m's interpreter (R005); QEMU runs the same primitives at 1,267
+million. There is no JIT, no dynamic linking, no system call beyond `write` and `exit`,
+and no machine yet.
 
 ## The goal
 

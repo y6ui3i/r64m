@@ -91,21 +91,25 @@ pub enum Step {
 
 type R<T> = Result<T, Stop>;
 
+#[inline(always)]
 fn mask(w: u32) -> u64 {
     if w == 64 { !0 } else { (1 << w) - 1 }
 }
 
+#[inline(always)]
 fn msb(w: u32) -> u64 {
     1 << (w - 1)
 }
 
 /// The low `w` bits of `v` as a signed number, in 64 bits.
+#[inline(always)]
 fn sx(v: u64, w: u32) -> u64 {
     let s = 64 - w;
     (((v << s) as i64) >> s) as u64
 }
 
 /// The zero, sign and parity bits for a result, as they sit in RFLAGS.
+#[inline(always)]
 fn szp(r: u64, w: u32) -> u64 {
     let mut f = 0;
     if (r as u8).count_ones() % 2 == 0 {
@@ -121,6 +125,7 @@ fn szp(r: u64, w: u32) -> u64 {
 }
 
 /// How many bytes a constant of an operand `w` bits wide takes: never more than four.
+#[inline(always)]
 fn imm_len(w: u32) -> u64 {
     match w {
         8 => 1,
@@ -134,8 +139,10 @@ fn imm_len(w: u32) -> u64 {
 struct Run<'a> {
     c: &'a mut Cpu,
     m: &'a mut Mem,
-    /// The instruction's bytes, as many as could be fetched of the fifteen at most.
-    code: [u8; 15],
+    /// The instruction's bytes where they lie in the guest's memory, and how many of
+    /// the fifteen at most can be run. Every byte is read before the instruction
+    /// writes anything.
+    code: *const u8,
     have: usize,
     /// The address of the next byte to read; when all is read, of the next instruction.
     ip: u64,
@@ -160,13 +167,9 @@ struct Run<'a> {
 /// Runs the instruction at RIP.
 pub fn step(c: &mut Cpu, m: &mut Mem) -> R<Step> {
     let rip = c.rip;
-    let mut code = [0u8; 15];
-    let mut have = 15;
     // Fewer than fifteen bytes may be there before memory that cannot be run; the
     // instruction faults only if it needs one of the missing ones.
-    while have > 0 && m.fetch(rip, &mut code[..have]).is_err() {
-        have -= 1;
-    }
+    let (code, have) = m.code_at(rip);
     let mut run = Run {
         c,
         m,
@@ -194,6 +197,7 @@ pub fn step(c: &mut Cpu, m: &mut Mem) -> R<Step> {
 impl Run<'_> {
     // ---- reading the instruction ---------------------------------------------------
 
+    #[inline(always)]
     fn fb(&mut self) -> R<u64> {
         let i = (self.ip - self.c.rip) as usize;
         if i >= 15 {
@@ -204,26 +208,45 @@ impl Run<'_> {
             return Err(Stop::Fault(Fault { addr: self.ip, access: Access::Fetch }));
         }
         self.ip += 1;
-        Ok(self.code[i] as u64)
+        // Inside the `have` bytes that `code_at` found.
+        Ok(unsafe { *self.code.add(i) } as u64)
     }
 
+    #[inline(always)]
     fn fnum(&mut self, bytes: u32) -> R<u64> {
-        let mut v = 0;
-        for i in 0..bytes {
-            v |= self.fb()? << (8 * i);
+        let i = (self.ip - self.c.rip) as usize;
+        if i + bytes as usize > self.have {
+            // Past what is there: byte by byte, to fault at the first that is missing.
+            let mut v = 0;
+            for k in 0..bytes {
+                v |= self.fb()? << (8 * k);
+            }
+            return Ok(v);
         }
-        Ok(v)
+        self.ip += bytes as u64;
+        let at = unsafe { self.code.add(i) };
+        // Inside the `have` bytes that `code_at` found.
+        Ok(unsafe {
+            match bytes {
+                2 => (at as *const u16).read_unaligned() as u64,
+                4 => (at as *const u32).read_unaligned() as u64,
+                _ => (at as *const u64).read_unaligned(),
+            }
+        })
     }
 
+    #[inline(always)]
     fn fs8(&mut self) -> R<u64> {
         Ok(sx(self.fb()?, 8))
     }
 
+    #[inline(always)]
     fn fs32(&mut self) -> R<u64> {
         Ok(sx(self.fnum(4)?, 32))
     }
 
     /// A constant for an operand `w` bits wide: for 64 bits, 32 with their sign.
+    #[inline(always)]
     fn fimm(&mut self, w: u32) -> R<u64> {
         match w {
             8 => self.fb(),
@@ -234,6 +257,7 @@ impl Run<'_> {
     }
 
     /// The next byte without taking it.
+    #[inline(always)]
     fn peek(&mut self) -> R<u64> {
         let b = self.fb()?;
         self.ip -= 1;
@@ -242,7 +266,8 @@ impl Run<'_> {
 
     fn not_written(&self) -> Stop {
         let n = ((self.ip - self.c.rip) as usize).min(self.have);
-        let bytes: Vec<String> = self.code[..n].iter().map(|b| format!("{b:02X}")).collect();
+        let code = unsafe { std::slice::from_raw_parts(self.code, n) };
+        let bytes: Vec<String> = code.iter().map(|b| format!("{b:02X}")).collect();
         Stop::NotWritten(bytes.join(" "))
     }
 
@@ -250,6 +275,7 @@ impl Run<'_> {
 
     /// A register `w` bits wide. Without REX, the byte registers 4 to 7 are AH, CH, DH
     /// and BH.
+    #[inline(always)]
     fn gr(&self, i: usize, w: u32) -> u64 {
         if w == 8 && self.rex == 0 && (4..8).contains(&i) {
             return self.c.reg[i - 4] >> 8 & 0xff;
@@ -258,6 +284,7 @@ impl Run<'_> {
     }
 
     /// A 32-bit result clears the register's upper half; 8 and 16-bit ones leave the rest.
+    #[inline(always)]
     fn sr(&mut self, i: usize, w: u32, v: u64) {
         let reg = &mut self.c.reg;
         match w {
@@ -271,6 +298,7 @@ impl Run<'_> {
         }
     }
 
+    #[inline(always)]
     fn rd(&self, a: u64, w: u32) -> R<u64> {
         Ok(match w {
             8 => self.m.read_u8(a)? as u64,
@@ -280,6 +308,7 @@ impl Run<'_> {
         })
     }
 
+    #[inline(always)]
     fn wr(&mut self, a: u64, w: u32, v: u64) -> R<()> {
         Ok(match w {
             8 => self.m.write_u8(a, v as u8)?,
@@ -289,6 +318,7 @@ impl Run<'_> {
         })
     }
 
+    #[inline(always)]
     fn seg_base(&self) -> u64 {
         match self.seg {
             1 => self.c.fs_base,
@@ -300,6 +330,7 @@ impl Run<'_> {
     /// Reads the ModRM byte and what belongs to it. `after` is how many bytes of the
     /// instruction come after the operand (a constant): an address relative to RIP is
     /// relative to the instruction's end.
+    #[inline(always)]
     fn modrm(&mut self, after: u64) -> R<()> {
         let b = self.fb()? as u8;
         let (r, x, base_bit) = (self.rex >> 2 & 1, self.rex >> 1 & 1, self.rex & 1);
@@ -343,10 +374,12 @@ impl Run<'_> {
         Ok(())
     }
 
+    #[inline(always)]
     fn rm_get(&self, w: u32) -> R<u64> {
         if self.md == 3 { Ok(self.gr(self.rm, w)) } else { self.rd(self.ea, w) }
     }
 
+    #[inline(always)]
     fn rm_set(&mut self, w: u32, v: u64) -> R<()> {
         if self.md == 3 {
             self.sr(self.rm, w, v);
@@ -357,10 +390,12 @@ impl Run<'_> {
     }
 
     /// The operand size of what uses the stack: 64 bits, or 16 with the prefix 66h.
+    #[inline(always)]
     fn ssz(&self) -> u32 {
         if self.p66 { 16 } else { 64 }
     }
 
+    #[inline(always)]
     fn push(&mut self, v: u64, w: u32) -> R<()> {
         let sp = self.c.reg[RSP].wrapping_sub(w as u64 / 8);
         self.wr(sp, w, v)?;
@@ -368,6 +403,7 @@ impl Run<'_> {
         Ok(())
     }
 
+    #[inline(always)]
     fn pop(&mut self, w: u32) -> R<u64> {
         let v = self.rd(self.c.reg[RSP], w)?;
         self.c.reg[RSP] = self.c.reg[RSP].wrapping_add(w as u64 / 8);
@@ -376,10 +412,12 @@ impl Run<'_> {
 
     // ---- arithmetic and flags -------------------------------------------------------
 
+    #[inline(always)]
     fn flag(&self, f: u64) -> bool {
         self.c.rflags & f != 0
     }
 
+    #[inline(always)]
     fn set_flag(&mut self, f: u64, on: bool) {
         if on {
             self.c.rflags |= f;
@@ -390,6 +428,7 @@ impl Run<'_> {
 
     /// The eight of the opcodes 00h to 3Fh, by their number there: ADD, OR, ADC, SBB,
     /// AND, SUB, XOR, CMP.
+    #[inline(always)]
     fn alu(&mut self, op: u8, a: u64, b: u64, w: u32) -> u64 {
         let (m, s) = (mask(w), msb(w));
         let (a, b) = (a & m, b & m);
@@ -429,6 +468,7 @@ impl Run<'_> {
     }
 
     /// INC and DEC leave CF alone.
+    #[inline(always)]
     fn incdec(&mut self, dec: bool, a: u64, w: u32) -> u64 {
         let carry = self.c.rflags & CF;
         let r = self.alu(if dec { 5 } else { 0 }, a, 1, w);
@@ -629,6 +669,7 @@ impl Run<'_> {
     }
 
     /// The sixteen conditions of Jcc, SETcc and CMOVcc.
+    #[inline(always)]
     fn cond(&self, cc: u8) -> bool {
         let r = match cc >> 1 & 7 {
             0 => self.flag(OF),

@@ -13,6 +13,7 @@
 //!   as open as the most open guest page in it, so on a host with 16 KB pages it is
 //!   coarser than the list (ADR 0008, point B).
 
+use std::cell::Cell;
 use std::io;
 use std::ptr;
 
@@ -63,7 +64,12 @@ pub struct Mem {
     host_page: u64,
     /// In order of address, none overlapping, neighbours of one protection joined.
     regions: Vec<Region>,
+    /// For each kind of access, the region the last one was found in, so that the next
+    /// one nearby is not searched for (R005). Emptied whenever the list changes.
+    near: [Cell<Region>; 3],
 }
+
+const NOWHERE: Region = Region { start: 0, end: 0, prot: 0 };
 
 /// x86 has no page that can be written or run but not read: any mapping with a
 /// protection can be read. A fetch needs `X` (the NX bit is on in every 64-bit Linux).
@@ -109,7 +115,13 @@ impl Mem {
                 )
             };
             if p != libc::MAP_FAILED {
-                return Ok(Mem { base: p as *mut u8, size, host_page, regions: Vec::new() });
+                return Ok(Mem {
+                    base: p as *mut u8,
+                    size,
+                    host_page,
+                    regions: Vec::new(),
+                    near: [const { Cell::new(NOWHERE) }; 3],
+                });
             }
             refused = io::Error::last_os_error();
         }
@@ -195,6 +207,7 @@ impl Mem {
     // ---- the guest's view: access ---------------------------------------------------
 
     /// Reads `N` bytes, or says which byte could not be read.
+    #[inline(always)]
     pub fn read<const N: usize>(&self, addr: u64) -> Result<[u8; N], Fault> {
         let mut bytes = [0u8; N];
         self.read_bytes(addr, &mut bytes)?;
@@ -202,10 +215,12 @@ impl Mem {
     }
 
     /// Writes `N` bytes, or writes none and says which byte could not be written.
+    #[inline(always)]
     pub fn write<const N: usize>(&mut self, addr: u64, bytes: [u8; N]) -> Result<(), Fault> {
         self.write_bytes(addr, &bytes)
     }
 
+    #[inline(always)]
     pub fn read_bytes(&self, addr: u64, into: &mut [u8]) -> Result<(), Fault> {
         self.copy_out(addr, into, Access::Read)
     }
@@ -215,6 +230,20 @@ impl Mem {
         self.copy_out(addr, into, Access::Fetch)
     }
 
+    /// Where the bytes to be run at `addr` lie in the host, and how many of the
+    /// fifteen an instruction may have are there to be run (fewer only where what can
+    /// be run ends). They are to be read before the guest's memory is next changed.
+    pub fn code_at(&self, addr: u64) -> (*const u8, usize) {
+        let mut have = 15;
+        while have > 0 && self.check(addr, have, Access::Fetch).is_err() {
+            have -= 1;
+        }
+        // With none to be had the address may be anywhere, and is not turned into a
+        // pointer inside the reservation.
+        (if have == 0 { self.base } else { self.host(addr) }, have as usize)
+    }
+
+    #[inline(always)]
     pub fn write_bytes(&mut self, addr: u64, from: &[u8]) -> Result<(), Fault> {
         self.check(addr, from.len() as u64, Access::Write)?;
         // The list allowed it, and the host is at least as open as the list.
@@ -222,6 +251,7 @@ impl Mem {
         Ok(())
     }
 
+    #[inline(always)]
     fn copy_out(&self, addr: u64, into: &mut [u8], access: Access) -> Result<(), Fault> {
         self.check(addr, into.len() as u64, access)?;
         unsafe { ptr::copy_nonoverlapping(self.host(addr), into.as_mut_ptr(), into.len()) };
@@ -262,14 +292,33 @@ impl Mem {
 
     /// Is every byte of `[addr, addr + len)` mapped so as to allow `access`? If not,
     /// the fault names the first that is not. An access may run over several regions.
+    #[inline(always)]
     pub fn check(&self, addr: u64, len: u64, access: Access) -> Result<(), Fault> {
+        // Nearly always in the region the last access of this kind was in.
+        let last = self.near[access as usize].get();
+        if addr >= last.start && addr < last.end && len <= last.end - addr {
+            return Ok(());
+        }
+        self.search(addr, len, access)
+    }
+
+    /// `check` when the access is not where the last one was.
+    #[cold]
+    fn search(&self, addr: u64, len: u64, access: Access) -> Result<(), Fault> {
+        let near = &self.near[access as usize];
         // No region reaches past the reservation, so an end that would wrap is cut off
         // at the top and faults there like any other unmapped byte.
         let end = addr.saturating_add(len);
-        match self.walk(addr, end, |prot| allows(prot, access)) {
-            None => Ok(()),
-            Some(at) => Err(Fault { addr: at, access }),
+        if let Some(at) = self.walk(addr, end, |prot| allows(prot, access)) {
+            return Err(Fault { addr: at, access });
         }
+        // Remembered if it lies in one region (a region found here allows the access).
+        if let Some(r) = self.regions.get(self.first_ending_after(addr)) {
+            if r.start <= addr && end <= r.end {
+                near.set(*r);
+            }
+        }
+        Ok(())
     }
 
     /// The first address in `[start, end)` that is unmapped or whose protection `ok`
@@ -289,6 +338,7 @@ impl Mem {
         None
     }
 
+    #[inline(always)]
     fn host(&self, addr: u64) -> *mut u8 {
         // Callers have checked `addr` against the list, which lies inside the
         // reservation.
@@ -305,6 +355,7 @@ impl Mem {
 
     /// Takes `[start, end)` out of the list, cutting the regions that reach into it.
     fn carve(&mut self, start: u64, end: u64) {
+        self.forget_near();
         let mut kept = Vec::with_capacity(self.regions.len() + 1);
         for r in &self.regions {
             if r.end <= start || r.start >= end {
@@ -324,6 +375,7 @@ impl Mem {
     /// Puts a region into a place that `carve` has emptied, and joins it to a neighbour
     /// that touches it with the same protection.
     fn insert(&mut self, new: Region) {
+        self.forget_near();
         let mut i = self.first_ending_after(new.start);
         self.regions.insert(i, new);
         if i + 1 < self.regions.len() && self.joins(i) {
@@ -334,6 +386,12 @@ impl Mem {
             i -= 1;
             self.regions[i].end = self.regions[i + 1].end;
             self.regions.remove(i + 1);
+        }
+    }
+
+    fn forget_near(&mut self) {
+        for near in &self.near {
+            near.set(NOWHERE);
         }
     }
 
