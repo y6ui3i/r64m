@@ -1170,3 +1170,33 @@ Nothing moved beyond what two races differ by (`p_shift` 0.88 and 0.92 s: the sa
   600 million rounds in 0.436 s is 2.3 cycles a round; g64m's is about one.
 
 **Next.** R015: the three things that listing shows.
+
+## R015: three things in a loop's host code (2026-11-25)
+
+The card, written before the run.
+
+- **Hypothesis**: `p_loop`'s loop is nine host instructions with two jumps taken a
+  round (R014's listing), at 2.3 cycles a round; g64m's JIT runs it at about one. Three
+  of the nine are not asked for by the guest's five:
+  1. a jump taken to a second jump taken: where a conditional jump's target is its own
+     block's start and no record is to be written on that way, the conditional jump
+     can go there itself (the count of instructions added before it, once, for both
+     ways);
+  2. `tst` after XOR and OR to give the host's flags, where the flags are dead and no
+     jump of the block asks the host's;
+  3. a constant put in a register for ADD, SUB and CMP, where it is under 4,096 and
+     the host's instruction can carry it.
+  With them the loop is six instructions and one jump taken. `p_loop` is guessed to
+  come from 0.436 s to under 0.3 s (the two jumps are guessed to be most of it), still
+  behind g64m's 0.17 to 0.22 s. The others gain where they have such loops, constants
+  and logic; by how much is not guessed.
+- **What is changed from before**: those three, in the translator. With `--jit-check`
+  a block does not jump to its own start (the check is of one pass through a block).
+- **Next move for each result**:
+  - `p_loop` under 0.3 s → the nine are raced again and set beside QEMU; what the
+    fourteen primitives not in blocks wait for is the next entry
+  - `p_loop` not under 0.3 s → the listing again, and the cycles counted for what is
+    left (the host's counters, as g64m's ledger did), before another guess
+  - A program wrong → put right first
+- **Cut-off**: these three; the shorter race for the nine; one listing of the loop
+  after.
