@@ -1294,3 +1294,67 @@ The card, written before the run.
   - A program wrong → put right first
 - **Cut-off**: these four. The count and the shorter race after (1) alone, and again
   after all four. SSE, the x87, IDIV, BSWAP and the strings are counted and not done.
+
+**Result: the share of instructions in blocks went from 51.8% to 81.8%, three more
+primitives are past QEMU (`p_fill` 2.74 times, `p_ternary` 1.13; `p_loop` and `p_index`
+further), and four that are over 93% in blocks are still far behind it. Being in
+blocks is not the measure: one instruction of the interpreter's in a loop is.**
+
+On a MacBook Air (Apple M1), macOS 27.
+
+After the first change alone (a block may begin after what the interpreter ran in a
+block's stead), one round, three at once, interpreted against the JIT before and with:
+all 23 took 10.48 s interpreted, 7.38 s before, **10.17 s with**: slower, as the card's
+third case had it. 76.1% of instructions were in blocks (51.8% before), but each
+instruction that stood in cost three looks in hash tables and a going out and in for
+the short block after it (`p_dbl_conv` 0.70 s to 1.13 s, `p_ternary` 0.57 s to 0.70 s).
+So it was kept only with the rest, and with the three tables made one with a cheap
+hash.
+
+After all four, the shorter race (r64m `--jit` beside g64m `--jit`; QEMU and Rosetta
+as timed earlier), the primitives that are over 90% in blocks, at 200 rounds:
+
+| 200 rounds | in blocks | r64m `--jit` | g64m `--jit` | QEMU | Rosetta | QEMU's time / r64m's |
+|---|---|---|---|---|---|---|
+| p_recursion | 100.0% | 0.439 s | 0.646 s | 1.567 s | 0.810 s | 3.57 |
+| p_funcptr | 100.0% | 2.932 s | 3.405 s | 9.123 s | 2.867 s | 3.11 |
+| p_fill | 10.2% | 1.050 s | 1.510 s | 2.883 s | 0.497 s | **2.74** (1.15) |
+| p_index | 100.0% | 0.656 s | 1.093 s | 1.723 s | 0.420 s | 2.63 |
+| p_loop | 100.0% | 0.334 s | 0.218 s | 0.773 s | 0.240 s | 2.32 |
+| p_pointer | 100.0% | 1.146 s | 1.465 s | 1.900 s | 0.723 s | 1.66 |
+| p_rotate | 100.0% | 3.251 s | 3.455 s | 4.403 s | 3.060 s | 1.35 |
+| p_if | 100.0% | 1.540 s | 1.473 s | 1.873 s | 0.997 s | 1.22 |
+| p_shift | 100.0% | 0.768 s | 0.757 s | 0.893 s | 0.680 s | 1.16 |
+| p_ternary | 100.0% | 0.714 s | 0.593 s | 0.807 s | 0.473 s | **1.13** (interpreted before) |
+| p_switch | 95.8% | 8.691 s | 3.070 s | 6.167 s | 2.847 s | 0.71 |
+| p_bytes | 96.4% | 6.884 s | 1.183 s | 1.373 s | 0.573 s | 0.20 |
+| p_pixel | 96.0% | 5.058 s | 0.538 s | 0.523 s | 0.393 s | 0.10 |
+
+(`p_fill` is 10% in blocks by count because its work is `rep stos`, which the
+interpreter does in one step: what changed for it is that the loop round the `rep` is
+now blocks.) Eleven primitives are past QEMU, five of them at twice or past it.
+
+- **The hypothesis held for the share and failed for the speed.** The six integer
+  primitives were guessed to be over 90% in blocks and past QEMU. In blocks: `p_bytes`
+  96.4%, `p_pixel` 96.0%, `p_switch` 95.8%, `p_bitfield` 93.2%, `p_muldiv` 86.7%,
+  `p_bignum` 81.2%, `p_ternary` 100%. Past QEMU: `p_ternary` alone. A program 96% in
+  blocks goes in and out of generated code a million times a round for the 4%, and
+  that is all its time.
+- **What the 4% is**, counted again (`--jit-why`): `p_bytes` and `p_bignum` ADC with a
+  constant (`48 83 /2`) and MUL; `p_pixel` a MOVZX from a second byte (AH and its
+  like); `p_switch` JBE where the host's flags do not answer; `p_bitfield` shifts of
+  16 and 8 bits; `p_muldiv` DIV and IDIV; `p_sha` BSWAP. Then SSE, for six
+  primitives, and the x87 for one.
+- **`p_sha` is 99.0% in blocks and runs at 98 M instructions a second**, for a reason
+  that is not an instruction: it makes 30,721 stores a round to data that shares a
+  16 KB host page with its code, each a fault, an instruction interpreted, and the
+  page opened and closed (R010's way, which was made for one store a round). The
+  profile is `mprotect`. It is what R010's card named as its second case and what ADR
+  0008's point B allowed for; on a host with 4 KB pages it does not happen. It is not
+  put right here.
+- 62 programs in four JIT modes and 69 unit tests on macOS and in the Linux container.
+
+**Next.** The integer instructions the count names (ADC and SBB, MUL, DIV and IDIV,
+the shifts of 8 and 16 bits, MOVZX from a second byte, BSWAP, a jump the host's flags
+do not answer) as R017. Then two larger things, each a decision before it is a change:
+SSE in blocks; and stores to data beside code on a host with 16 KB pages.
