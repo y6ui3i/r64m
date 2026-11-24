@@ -5,7 +5,9 @@ An x86-64 emulator with a JIT for arm64 hosts, in Rust: a rebuild of
 code: what g64m found out is used, and the design begins again (`docs/adr/`).
 
 **Nothing runs yet.** This repository was started on 2026-11-24. So far there is the
-guest's memory (`src/mem.rs`); the next step is in "What comes first".
+guest's memory (`src/mem.rs`) and the loader of a static program with its first stack
+(`src/elf.rs`): `r64m program` loads it and prints where it would begin. The next step
+is in "What comes first".
 
 ## The goal
 
@@ -64,8 +66,8 @@ real CPU does.
    no second design.
 2. Done (R002, ADR 0008, `src/mem.rs`): a program's memory is a reservation of the
    host's address space, protected by the host.
-3. A small statically linked program loaded and run by the interpreter on that memory,
-   printing what g64m prints for it.
+3. A small statically linked program loaded (done) and run by the interpreter on that
+   memory, its trace the real CPU's (g64m's `tests/expected64`).
 
 ## Rules of this repository
 
