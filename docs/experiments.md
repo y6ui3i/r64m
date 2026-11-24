@@ -618,3 +618,63 @@ The card, written before the run.
   the two at once, five runs, the least, less a program that does nothing; and one
   profile of `p_loop` with `--jit`. On the Mac only. No change to the code in this
   entry.
+
+**Result: as guessed for the four that are wholly in blocks (1.8 to 4.3 times the
+interpreter, 160 to 366 M instructions a second), and the reason is the one guessed:
+nineteen twentieths of their time is spent between blocks, not in them. Two primitives
+are slower with the JIT than without.**
+
+On a MacBook Air (Apple M1), macOS 27. Each primitive one round, interpreted and with
+`--jit` at once, five runs, the least, less a program that does nothing.
+
+| | in blocks | interpreted | with `--jit` | gain | with `--jit` |
+|---|---|---|---|---|---|
+| p_bignum | 26.5% | 0.568 s | 0.519 s | 1.09 | 86 M/s |
+| p_bitfield | 9.1% | 0.888 s | 0.863 s | 1.03 | 78 M/s |
+| p_bytes | 10.7% | 0.384 s | 0.433 s | 0.89 | 80 M/s |
+| p_dbl_arith | 0.0% | 0.370 s | 0.384 s | 0.96 | 56 M/s |
+| p_dbl_cmp | 11.5% | 0.640 s | 0.642 s | 1.00 | 58 M/s |
+| p_dbl_conv | 0.0% | 0.575 s | 0.564 s | 1.02 | 60 M/s |
+| p_fill | 3.1% | 0.012 s | 0.011 s | 1.09 | 709 M/s |
+| p_float | 0.0% | 0.386 s | 0.404 s | 0.96 | 57 M/s |
+| p_funcptr | 79.3% | 0.264 s | 0.238 s | 1.11 | 88 M/s |
+| p_if | 99.7% | 0.263 s | 0.144 s | 1.83 | 160 M/s |
+| p_index | 75.6% | 0.383 s | 0.155 s | 2.47 | 193 M/s |
+| p_ldbl | 0.0% | 0.280 s | 0.288 s | 0.97 | 48 M/s |
+| p_loop | 99.8% | 0.161 s | 0.046 s | 3.50 | 326 M/s |
+| p_muldiv | 23.3% | 0.383 s | 0.330 s | 1.16 | 93 M/s |
+| p_pixel | 15.1% | 0.348 s | 0.323 s | 1.08 | 82 M/s |
+| p_pointer | 99.6% | 0.385 s | 0.090 s | 4.28 | 367 M/s |
+| p_recursion | 100.0% | 0.137 s | 0.043 s | 3.19 | 284 M/s |
+| p_rotate | 78.8% | 1.018 s | 0.512 s | 1.99 | 175 M/s |
+| p_sha | 0.1% | 0.222 s | 0.228 s | 0.97 | 74 M/s |
+| p_shift | 16.7% | 1.027 s | 0.930 s | 1.10 | 79 M/s |
+| p_simd | 0.8% | 0.383 s | 0.384 s | 1.00 | 43 M/s |
+| p_switch | 35.7% | 0.326 s | 0.376 s | 0.87 | 69 M/s |
+| p_ternary | 16.7% | 0.478 s | 0.450 s | 1.06 | 88 M/s |
+| **all** | 35.0% | 9.88 s | 8.36 s | **1.18** | 88 M/s |
+
+- **The four** (`p_loop` 3.5, `p_if` 1.8, `p_pointer` 4.3, `p_recursion` 3.2 times):
+  hundreds of millions a second, as guessed, and a quarter of QEMU's 1,267 at best.
+- **Where their time goes** (`sample` of `p_loop` with `--jit`, 200 rounds): of some
+  2,450 samples, 1,416 in `Jit::run` (the look in the hash table for the next block),
+  500 in `settle` (the flags worked out from the record after every block, whether
+  anything reads them or not), 387 in `enter` (the sixteen registers loaded and
+  stored), and about 120 in generated code itself. A twentieth of the time is the
+  program; the rest is going from one block to the next. `p_loop`'s 15 million
+  instructions are 3 million entries into blocks: five instructions to an entry.
+- **The two that lose**: `p_bytes` (0.384 s to 0.433 s, 13% slower) and `p_switch`
+  (0.326 s to 0.376 s, 15%). `p_switch` has 36% of its instructions in blocks but
+  enters a block 5.6 million times for 9.2 million instructions: 1.6 instructions to
+  an entry. An entry costs more than interpreting one or two instructions. So it is
+  the same thing as holds back the four, seen from the other side: blocks too short
+  for what it costs to go in and out. (By the card this is found before going on: it
+  is found, and it is not a second fault but the first one again.)
+- **So the JIT is not what `r64m` does unless asked** (`--jit`), until no primitive
+  loses by it.
+
+**Next.** By the card's first case: blocks joined to one another, so that a block's end
+goes to the next block and not out to Rust (ADR 0014's first "not yet", now counted:
+95% of `p_loop`'s time). With it, the flags settled only when something outside
+generated code is about to read them. Then the count of which instructions end the
+blocks of the other nineteen.

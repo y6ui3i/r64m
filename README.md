@@ -12,11 +12,14 @@ x87 (`src/cpu.rs`, `src/cpu/sse.rs`, `src/cpu/x87.rs`) and three system calls
 and all 23 of its primitives print what they should, on macOS and on arm64 Linux
 (R003). The interpreter runs 72 million instructions a second on a MacBook Air (Apple
 M1), 1.27 times g64m's interpreter and ahead of it on every primitive (R007); QEMU,
-which is a JIT, runs the same primitives at 1,267 million. Of r64m's own JIT
-([0014](docs/adr/0014-the-jit.md)) there is the ground and no translator yet: the arm64
-encoder, memory that can be written and run, the way into generated code and out, and a
-fault in it turned into a way out, all tried with blocks made by hand on both hosts
-(`src/jit.rs`, `src/jit/a64.rs`). No program is run by it. There is no dynamic linking,
+which is a JIT, runs the same primitives at 1,267 million. r64m's own JIT
+([0014](docs/adr/0014-the-jit.md)) has its first translator: blocks of integer
+instructions on 32 and 64-bit operands, each checked against the interpreter
+(`--jit-check`). It is asked for with `--jit` and is not yet what r64m does by itself:
+a third of the primitives' instructions run in blocks, the four primitives that are
+wholly in blocks run 1.8 to 4.3 times faster (up to 366 million a second), two others
+run slower than interpreted, and nineteen twentieths of the time is spent between
+blocks, which are not yet joined to one another (R008). There is no dynamic linking,
 no system call beyond `write` and `exit`, and no machine yet.
 
 ## The goal
@@ -83,8 +86,9 @@ real CPU does.
 4. Done (R004 to R007): the interpreter timed, and made faster than g64m's on every
    primitive without giving up the simple form.
 5. The JIT, in ADR 0014's order. Done: the encoder; runnable memory and the way in and
-   out, with a block made by hand. Next: the translator for instructions on registers,
-   each block checked against the interpreter (`--jit-check`).
+   out; the translator for the first integer instructions with `--jit-check`; a fault
+   in a block; a store to translated code. Next: blocks joined to one another (R008),
+   then more instructions translated.
 
 One case is owed: the x87's square root when what is left over equals the root (the
 rounding there is not touched by any of g64m's cases; found by breaking it on purpose).
