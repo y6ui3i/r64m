@@ -28,8 +28,9 @@ back only when counted.
 2. **A block is made when its first address has been arrived at often** (a count kept
    by address, g64m's 16 to begin with). Until then, and for every instruction no
    translator is written for, the interpreter runs. A program's start, run once, is not
-   worth translating: a translated instruction costs some thousand times an
-   interpreted one to make.
+   worth translating: making an instruction's translation costs far more than
+   interpreting it once (how much more is not measured here yet; the count of 16 is
+   g64m's and is to be measured again).
 
 3. **The guest's sixteen registers live in sixteen host registers**, the same ones in
    every block, for as long as generated code runs. One more holds the base of the
