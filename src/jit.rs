@@ -118,7 +118,9 @@ pub unsafe extern "C" fn enter(cpu: *mut Cpu, code: *const u8, base: *mut u8, ta
 
 /// Where each piece of generated code in this process begins and ends, for the handler
 /// of faults to know its own: pairs of addresses, a zero start for a place not taken.
-static PIECES: [[AtomicUsize; 2]; 8] = [const { [const { AtomicUsize::new(0) }; 2] }; 8];
+/// (A program has one piece. The tests have one or two each and run several at once:
+/// with eight places some of them found none left, on Linux, on 2026-11-25.)
+static PIECES: [[AtomicUsize; 2]; 64] = [const { [const { AtomicUsize::new(0) }; 2] }; 64];
 
 /// One piece of memory that can be written and run, filled from its start.
 pub struct Code {
