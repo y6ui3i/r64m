@@ -19,3 +19,7 @@ debug = true
 [[test]]
 name = "trace"
 harness = false
+
+[[test]]
+name = "prim"
+harness = false
