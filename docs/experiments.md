@@ -520,3 +520,69 @@ The card, written before the run.
     one primitive at nine tenths is worth more
 - **Cut-off**: these three and no more. The traces of `f_x87`, `j_x87`, `c_ld`,
   `a_prefix` and `x_fxsave` are what say the x87 is still right; the race is R006's.
+
+**Result: `p_ldbl` is past g64m's interpreter, by a few hundredths; all 23 primitives
+now are, in each of three races.**
+
+The three changes, as the card has them: ST(0) and ST(1) are made into f64 only by the
+instructions that go through f64; the operand's bytes are sixteen that the CPU clears,
+112 only for an environment or a whole unit saved; the division is two divisions of 64
+bits (`div128`, with a test of it against the 128-bit division on 601,728 dividends and
+divisors, the awkward ones among them).
+
+`p_ldbl` alone first, the build of R006, the new one and g64m's interpreter at once,
+seven runs of each, three times:
+
+| | R006's build | new | g64m, interpreter | g64m's time / new |
+|---|---|---|---|---|
+| 1 | 0.338 s | 0.292 s | 0.295 s | 1.01 |
+| 2 | 0.338 s | 0.292 s | 0.303 s | 1.04 |
+| 3 | 0.337 s | 0.292 s | 0.301 s | 1.03 |
+
+Then all 23 as in R006 (two at once, five runs of each program), three races:
+
+| race | r64m | g64m, interpreter | all 23 | the three nearest | behind |
+|---|---|---|---|---|---|
+| 1 | 73.3 M/s | 57.5 M/s | 1.27 | p_ldbl 1.03, p_float 1.15, p_dbl_arith 1.15 | none |
+| 2 | 71.1 M/s | 56.0 M/s | 1.27 | p_ldbl 1.06, p_float 1.15, p_dbl_conv 1.15 | none |
+| 3 | **71.6 M/s** | **56.3 M/s** | **1.27** | p_ldbl 1.04, p_dbl_conv 1.16, p_float 1.16 | none |
+
+The middle one (the third), by program:
+
+| | r64m | g64m, interpreter | g64m's time / r64m's |
+|---|---|---|---|
+| p_bignum | 0.601 s | 0.824 s | 1.37 |
+| p_bitfield | 0.961 s | 1.191 s | 1.24 |
+| p_bytes | 0.396 s | 0.532 s | 1.34 |
+| p_dbl_arith | 0.391 s | 0.460 s | 1.18 |
+| p_dbl_cmp | 0.624 s | 0.753 s | 1.21 |
+| p_dbl_conv | 0.579 s | 0.672 s | 1.16 |
+| p_fill | 0.013 s | 0.017 s | 1.31 |
+| p_float | 0.414 s | 0.482 s | 1.16 |
+| p_funcptr | 0.277 s | 0.325 s | 1.17 |
+| p_if | 0.272 s | 0.381 s | 1.40 |
+| p_index | 0.400 s | 0.504 s | 1.26 |
+| p_ldbl | 0.291 s | 0.304 s | 1.04 |
+| p_loop | 0.168 s | 0.232 s | 1.38 |
+| p_muldiv | 0.408 s | 0.490 s | 1.20 |
+| p_pixel | 0.360 s | 0.491 s | 1.36 |
+| p_pointer | 0.411 s | 0.548 s | 1.33 |
+| p_recursion | 0.145 s | 0.199 s | 1.37 |
+| p_rotate | 1.098 s | 1.475 s | 1.34 |
+| p_sha | 0.222 s | 0.294 s | 1.32 |
+| p_shift | 1.046 s | 1.310 s | 1.25 |
+| p_simd | 0.387 s | 0.506 s | 1.31 |
+| p_switch | 0.335 s | 0.458 s | 1.37 |
+| p_ternary | 0.505 s | 0.650 s | 1.29 |
+
+- **The aim is met for every primitive**: none is behind g64m's interpreter in any of
+  the three races. `p_ldbl` is ahead by 3 to 6 hundredths, which is little: it is
+  right to say it is level or just past, not that it is faster.
+- **All 23 together**: 71.6 M instructions a second, 1.27 times g64m's interpreter;
+  34.8 M/s when first timed (R004).
+- **What holds**: 24 unit tests, the 39 traces (the x87's five among them) on macOS;
+  built again for Linux, 24 unit tests, 39 traces and 23 primitives in the container.
+- The interpreter is still the simple form: nothing decoded is remembered.
+
+**Next.** The JIT's design (ADR 0014), which is where QEMU's 1,267 M/s is to be met:
+that figure is a JIT's, and an interpreter is not expected to come near it.

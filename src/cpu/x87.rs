@@ -57,10 +57,11 @@ pub struct X87 {
 }
 
 /// What passes between the CPU and the unit for one instruction.
-pub struct Io {
+pub struct Io<'a> {
     /// The memory operand's bytes: read before the instruction if it reads them, to be
-    /// written after it if it stores.
-    pub buf: [u8; 112],
+    /// written after it if it stores. As long as the operand is (`shape`), and sixteen
+    /// at least.
+    pub buf: &'a mut [u8],
     /// The environment is in its 32-bit layout (28 bytes, not 14).
     pub env32: bool,
     pub rflags: u64,
@@ -68,7 +69,7 @@ pub struct Io {
     pub ax: Option<u16>,
 }
 
-impl Io {
+impl Io<'_> {
     fn rd(&self, k: usize, bytes: usize) -> u64 {
         let mut v = [0u8; 8];
         v[..bytes].copy_from_slice(&self.buf[k..k + bytes]);
@@ -262,6 +263,33 @@ fn cmp80(am: u64, ase: u16, bm: u64, bse: u16) -> i64 {
     }
     let rel = (ase & 0x7fff, am).cmp(&(bse & 0x7fff, bm)) as i64;
     if an { -rel } else { rel }
+}
+
+/// The 128-bit number `u1:u0` divided by `v`, whose top bit is set and which is more
+/// than `u1`: the quotient, which fits 64 bits, and the remainder. Two divisions of 64
+/// bits, each guessing 32 bits of the quotient from `v`'s upper half and put right at
+/// most twice (Knuth's algorithm D for two digits); the compiler's own 128-bit
+/// division is a call to a routine several times as long (R007).
+fn div128(u1: u64, u0: u64, v: u64) -> (u64, u64) {
+    const B: u64 = 1 << 32;
+    let (vn1, vn0) = (v >> 32, v & 0xffff_ffff);
+    let (un1, un0) = (u0 >> 32, u0 & 0xffff_ffff);
+    let digit = |hi: u64, next: u64| {
+        let mut q = hi / vn1;
+        let mut rhat = hi - q * vn1;
+        while q >= B || q * vn0 > (rhat << 32 | next) {
+            q -= 1;
+            rhat += vn1;
+            if rhat >= B {
+                break;
+            }
+        }
+        q
+    };
+    let q1 = digit(u1, un1);
+    let un21 = (u1 << 32 | un1).wrapping_sub(q1.wrapping_mul(v));
+    let q0 = digit(un21, un0);
+    (q1 << 32 | q0, (un21 << 32 | un0).wrapping_sub(q0.wrapping_mul(v)))
 }
 
 // ---- What the host's library does not give ------------------------------------------------
@@ -778,16 +806,17 @@ impl X87 {
         }
         let mut e = exp80(ase) - exp80(bse) + 16383 - 1;
         // The dividend with 64 or 63 zeros under it, so that the quotient has its top
-        // bit set.
-        let mut n = (am as u128) << 64;
-        if am >= bm {
-            n >>= 1;
+        // bit set. Its upper half is then less than the divisor, as `div128` asks.
+        let (q, rem) = if am >= bm {
             e += 1;
-        }
-        let q = (n / bm as u128) as u64;
-        let rem = n % bm as u128 * 2;
+            let d = am - bm;
+            let (q63, r) = div128(d >> 1, d << 63, bm);
+            (TOP_BIT | q63, r)
+        } else {
+            div128(am, 0, bm)
+        };
         let mut lo = 0;
-        let mut rem = rem;
+        let mut rem = (rem as u128) << 1;
         if rem >= bm as u128 {
             rem -= bm as u128;
             lo = TOP_BIT;
@@ -1117,9 +1146,11 @@ impl X87 {
     }
 
     fn reg(&mut self, row: u8, r: u8, i: u8, io: &mut Io) -> R<()> {
-        let a = self.st(0);
-        // For D9 F0 to FF, where the r/m field is part of the opcode.
-        let s1 = self.st(1);
+        // ST(0) and ST(1) as f64 are made only by the instructions that go through f64
+        // (D9 E0 to FF, where the r/m field is part of the opcode): to make them is
+        // work, and the arithmetic does not use them (R007).
+        let by_f64 = matches!(row << 3 | r, 0x0c | 0x0e | 0x0f);
+        let (a, s1) = if by_f64 { (self.st(0), self.st(1)) } else { (0.0, 0.0) };
         let (am, ase) = self.st80(0);
         let (bm, bse) = self.st80(i);
         let flag = |f: u64| io.rflags & f != 0;
@@ -1368,5 +1399,49 @@ impl X87 {
     /// An escape opcode, D8h to DFh, with its ModRM byte's three fields.
     pub fn escape(&mut self, op: u8, md: u8, r: u8, rm: u8, io: &mut Io) -> R<()> {
         if md == 3 { self.reg(op & 7, r, rm, io) } else { self.mem(op & 7, r, io) }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::div128;
+
+    #[test]
+    fn the_division_in_two_steps_is_the_division() {
+        // A divisor with its top bit set, and an upper half less than it: every pair
+        // from a list of awkward numbers, and many that are not chosen.
+        let edge = [0, 1, 2, 0x7fff_ffff, 0x8000_0000, 0xffff_ffff, 1 << 32, (1 << 32) + 1, u64::MAX >> 1, 1 << 63, u64::MAX - 1, u64::MAX];
+        let mut tried = 0;
+        let mut check = |u1: u64, u0: u64, v: u64| {
+            let v = v | 1 << 63;
+            let u1 = u1 % v;
+            let n = (u1 as u128) << 64 | u0 as u128;
+            assert_eq!(div128(u1, u0, v), ((n / v as u128) as u64, (n % v as u128) as u64), "{u1:x}:{u0:x} / {v:x}");
+            tried += 1;
+        };
+        for u1 in edge {
+            for u0 in edge {
+                for v in edge {
+                    check(u1, u0, v);
+                }
+            }
+        }
+        // A plain generator of numbers, the same every time.
+        let mut x = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        for _ in 0..200_000 {
+            let (a, b, c) = (next(), next(), next());
+            check(a, b, c);
+            // And with a divisor whose lower half is all ones or nothing, where the
+            // guess is most often wrong.
+            check(a, b, c | 0xffff_ffff);
+            check(a, b, c & !0xffff_ffff);
+        }
+        assert_eq!(tried, 12 * 12 * 12 + 600_000);
     }
 }

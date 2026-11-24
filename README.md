@@ -10,9 +10,9 @@ stack (`src/elf.rs`), an interpreter for the integer instructions, SSE and SSE2 
 x87 (`src/cpu.rs`, `src/cpu/sse.rs`, `src/cpu/x87.rs`) and three system calls
 (`src/sys.rs`). All 39 of g64m's cases with a trace from the real CPU give that trace,
 and all 23 of its primitives print what they should, on macOS and on arm64 Linux
-(R003). The interpreter runs 67 million instructions a second on a MacBook Air (Apple
-M1), 1.2 times g64m's interpreter (R005); QEMU runs the same primitives at 1,267
-million. There is no JIT, no dynamic linking, no system call beyond `write` and `exit`,
+(R003). The interpreter runs 72 million instructions a second on a MacBook Air (Apple
+M1), 1.27 times g64m's interpreter and ahead of it on every primitive (R007); QEMU,
+which is a JIT, runs the same primitives at 1,267 million. There is no JIT, no dynamic linking, no system call beyond `write` and `exit`,
 and no machine yet.
 
 ## The goal

@@ -819,13 +819,24 @@ impl Run<'_> {
         self.modrm(0)?;
         // REX names no other register stack: the fields are 0 to 7.
         let (md, r, rm) = (self.md, self.reg as u8 & 7, self.rm as u8 & 7);
-        let mut io =
-            x87::Io { buf: [0; 112], env32: !self.p66, rflags: self.c.rflags, ax: None };
+        // Sixteen bytes hold every operand but an environment and a whole unit saved,
+        // which are the only ones the larger piece is cleared for.
+        let env32 = !self.p66;
+        let shape = if md == 3 { Some((0, false)) } else { x87::shape(op & 7, r, env32) };
+        let Some((n, store)) = shape else {
+            return Err(self.not_written());
+        };
+        let (mut small, mut large);
+        let buf: &mut [u8] = if n <= 16 {
+            small = [0u8; 16];
+            &mut small
+        } else {
+            large = [0u8; 112];
+            &mut large
+        };
+        let mut io = x87::Io { buf, env32, rflags: self.c.rflags, ax: None };
         let mut stores = 0;
         if md != 3 {
-            let Some((n, store)) = x87::shape(op & 7, r, io.env32) else {
-                return Err(self.not_written());
-            };
             if store {
                 self.m.check(self.ea, n as u64, Access::Write)?;
                 stores = n;
