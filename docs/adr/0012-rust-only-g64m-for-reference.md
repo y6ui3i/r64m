@@ -11,9 +11,11 @@ to them are g64m's (`tests/asm64`, `tests/c64`, `tests/expected64`).
 
 ## Decision
 
-- **Work goes on in Rust alone.** Nothing is added to r64m in another language: no C
-  glue, no shell or Python beside it (0006 already says helpers are Rust). g64m is not
-  developed further.
+- **Work goes on in Rust alone**: away from C and from Goose. Nothing is added to r64m
+  in another language: no C glue, no shell or Python beside it (0006 already says
+  helpers are Rust). g64m is not developed further. The one exception the owner named:
+  if r64m is ever built for WebAssembly, the page around it (HTML and what a page
+  needs) is what it has to be.
 - **g64m is for reference.** Its checkout is read: the cases, the traces, the ledger,
   the design. r64m's tests read the cases and traces from that checkout (beside this
   one, or where `R64M_G64M` says) and are not copies of them.
@@ -27,5 +29,8 @@ to them are g64m's (`tests/asm64`, `tests/c64`, `tests/expected64`).
 - 0006's `tests/cases/` in this repository waits: a case that g64m does not have is
   the first that goes there.
 - New expected output can only come from the real CPU. g64m's oracle
-  (`tools/oracle/step64.c`, run on an x86 host) is what takes it today; if it has to
-  change, that is a decision of its own, since it is C.
+  (`tools/oracle/step64.c`, run on an x86 host) took what there is. It is C: when a
+  trace has to be taken again or a new one taken, the oracle is written again in Rust
+  here (ptrace through `libc`, built on the x86 host), not changed there.
+- `tools/linux/Dockerfile` installs a C compiler: it is the record of R001, which built
+  g64m, and builds nothing of r64m's.
