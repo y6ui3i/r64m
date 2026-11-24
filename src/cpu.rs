@@ -35,6 +35,9 @@ pub const RBP: usize = 5;
 pub const RSI: usize = 6;
 pub const RDI: usize = 7;
 
+/// The layout is fixed (`repr(C)`): the JIT's way in and out reads and writes the
+/// first fields by their offsets.
+#[repr(C)]
 pub struct Cpu {
     /// In the order of their numbers in an instruction: RAX, RCX, RDX, RBX, RSP, RBP,
     /// RSI, RDI, R8 to R15.
@@ -45,6 +48,11 @@ pub struct Cpu {
     pub gs_base: u64,
     /// Instructions run so far. RDTSC reads it, so that a run is the same every time.
     pub steps: u64,
+    /// The JIT's record of the flags (ADR 0014, point 6), as generated code left it:
+    /// kept in three host registers while it runs.
+    pub flag_rec: [u64; 3],
+    /// Where in generated code the host faulted, when a block was left that way.
+    pub fault_pc: u64,
     /// The XMM registers, two words each, low then high.
     pub xmm: [u64; 32],
     pub mxcsr: u32,
@@ -59,7 +67,20 @@ impl Cpu {
     pub fn new(rip: u64, rsp: u64) -> Cpu {
         let mut reg = [0; 16];
         reg[RSP] = rsp;
-        Cpu { reg, rip, rflags: 0x202, fs_base: 0, gs_base: 0, steps: 0, xmm: [0; 32], mxcsr: 0x1f80, x87: x87::X87::new(), rep_whole: false }
+        Cpu {
+            reg,
+            rip,
+            rflags: 0x202,
+            fs_base: 0,
+            gs_base: 0,
+            steps: 0,
+            flag_rec: [0; 3],
+            fault_pc: 0,
+            xmm: [0; 32],
+            mxcsr: 0x1f80,
+            x87: x87::X87::new(),
+            rep_whole: false,
+        }
     }
 }
 
