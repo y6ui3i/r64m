@@ -282,9 +282,12 @@ impl Jit {
         if self.writes.get(&page).is_some_and(|&n| n >= GIVEN_UP) {
             return false;
         }
-        let Some(Built { words, starts, end }) = translate(m, rip) else {
+        let Some(Built { words, starts, end, seen }) = translate(m, rip, self.check) else {
             return false;
         };
+        // What the block rests on: its own instructions, and what was read past them
+        // to leave a record of the flags unwritten. A store to any of it forgets it.
+        let (from, to) = seen.map_or((rip, end), |(lo, hi)| (lo.min(rip), hi.max(end)));
         let code = match self.code.append(&words) {
             Some(code) => code,
             None => {
@@ -296,15 +299,15 @@ impl Jit {
             }
         };
         // From now the pages its instructions lie in may not be written.
-        let pages = m.host_pages(rip, end);
+        let pages = m.host_pages(from, to);
         if m.mark_code(pages.0, pages.1, true).is_err() {
             return false;
         }
         self.at.insert(rip, self.blocks.len());
-        for page in (rip & !(PAGE - 1)..end).step_by(PAGE as usize) {
+        for page in (from & !(PAGE - 1)..to).step_by(PAGE as usize) {
             *self.holds.entry(page).or_insert(0) += 1;
         }
-        self.blocks.push(Block { code, starts, pages, guest: (rip, end), incoming: Vec::new() });
+        self.blocks.push(Block { code, starts, pages, guest: (from, to), incoming: Vec::new() });
         self.stats.blocks += 1;
         true
     }
@@ -685,18 +688,29 @@ mod tests {
     fn a_fault_in_a_block_is_the_guests_at_that_instruction() {
         // add eax, 1; add ebx, [rsi]; add eax, 1; syscall, with RSI nowhere.
         let code = [0x83, 0xc0, 0x01, 0x03, 0x1e, 0x83, 0xc0, 0x01, 0x0f, 0x05];
-        let mut m = guest(&code, &[]);
-        let mut jit = Jit::new(false, 1).unwrap();
-        let mut c = Cpu::new(CODE, DATA + 4096);
-        c.reg[RSI] = 0x90_0000;
-        c.reg[RAX] = 0x7fff_ffff;
-        let Event::Stop(stop) = jit.run(&mut c, &mut m) else { panic!("it went on") };
-        assert_eq!(stop, Stop::Fault(crate::mem::Fault { addr: 0x90_0000, access: Access::Read }));
-        // On the second instruction, the first done and counted, its flags as it left
-        // them (the sign and the overflow of 7FFFFFFFh and one).
-        assert_eq!((c.rip, c.steps, c.reg[RAX], c.reg[RBX]), (CODE + 3, 1, 0x8000_0000, 0));
-        assert_eq!(c.rflags & 0x8d5, 0x894);
-        assert_eq!(jit.stats.faults, 1);
+        for exact in [true, false] {
+            let mut m = guest(&code, &[]);
+            let mut jit = Jit::new(exact, 1).unwrap();
+            let mut c = Cpu::new(CODE, DATA + 4096);
+            c.reg[RSI] = 0x90_0000;
+            c.reg[RAX] = 0x7fff_ffff;
+            let Event::Stop(stop) = jit.run(&mut c, &mut m) else { panic!("it went on") };
+            assert_eq!(stop, Stop::Fault(crate::mem::Fault { addr: 0x90_0000, access: Access::Read }));
+            // On the second instruction, the first done and counted.
+            assert_eq!((c.rip, c.steps, c.reg[RAX], c.reg[RBX]), (CODE + 3, 1, 0x8000_0000, 0));
+            assert_eq!(jit.stats.faults, 1);
+            if exact {
+                // With every record written, the flags are as the first instruction
+                // left them (the sign and the overflow of 7FFFFFFFh and one).
+                assert_eq!(c.rflags & 0x8d5, 0x894);
+            } else {
+                // Without: the first instruction's flags are dead (the second writes
+                // them all), so no record was made of them, and what is shown at the
+                // fault is what they were before. Nothing can read them (R013); a
+                // signal handler, when there is one, would be shown them stale.
+                assert_eq!(c.rflags & 0x8d5, 0);
+            }
+        }
     }
 
     #[test]
@@ -1210,7 +1224,7 @@ mod tests {
         // is not: rol eax, 7; cmp eax, ebx; jne; ... against rol eax, 7; jc ...
         let block_of = |code: &[u8]| {
             let m = guest(code, &[]);
-            translate(&m, CODE).map(|b| b.starts.len())
+            translate(&m, CODE, false).map(|b| b.starts.len())
         };
         assert_eq!(block_of(&[0xc1, 0xc0, 0x07, 0x39, 0xd8, 0x75, 0x00, 0x0f, 0x05]), Some(3));
         assert_eq!(block_of(&[0x89, 0xd8, 0xc1, 0xc0, 0x07, 0x72, 0x00, 0x0f, 0x05]), Some(1));
@@ -1246,6 +1260,162 @@ mod tests {
                 c.reg[RSI] = DATA;
             });
             under_every_condition(&[&[0xf7, 0xd8], &[0x48, 0xf7, 0xd8]], &[], &|c| c.reg[RAX] = value);
+        }
+    }
+
+    #[test]
+    fn flags_that_are_dead_are_not_recorded_and_live_ones_are() {
+        use crate::jit::translate::translate;
+        let words = |code: &[u8], exact: bool| {
+            let m = guest(code, &[]);
+            translate(&m, CODE, exact).unwrap().words.len()
+        };
+        // add eax, ebx; add ecx, edx; syscall: the first add's flags die at the second,
+        // whose own are read by whatever comes after. One record fewer than exact.
+        let two = [0x01, 0xd8, 0x01, 0xd1, 0x0f, 0x05];
+        assert_eq!(words(&two, true) - words(&two, false), 3);
+        // add eax, ebx; mov ecx, eax; syscall: nothing writes them again. All kept.
+        let live = [0x01, 0xd8, 0x89, 0xc1, 0x0f, 0x05];
+        assert_eq!(words(&live, true), words(&live, false));
+        // Shifts in a row: each of three but the last without its record (a constant
+        // and three moves each).
+        let shifts = [0xc1, 0xe0, 0x03, 0xc1, 0xe8, 0x05, 0xc1, 0xe0, 0x07, 0xc1, 0xf8, 0x02, 0x0f, 0x05];
+        assert_eq!(words(&shifts, true) - words(&shifts, false), 3 * 4);
+        // A compare read by its own jump, both ways then writing the flags: no record.
+        //  0 cmp eax, ebx; 2 jne +2; 4 add ecx, edx (falls to 6); 6 add esi, edi; syscall
+        let both_die = [0x39, 0xd8, 0x75, 0x02, 0x01, 0xd1, 0x01, 0xfe, 0x0f, 0x05];
+        assert_eq!(words(&both_die, true) - words(&both_die, false), 3);
+        // The same with one way that reads them (jb at the jump's target): recorded.
+        //  0 cmp; 2 jne +2; 4 add ecx, edx; 6 jb ...
+        let one_reads = [0x39, 0xd8, 0x75, 0x02, 0x01, 0xd1, 0x72, 0x00, 0x0f, 0x05];
+        assert_eq!(words(&one_reads, true), words(&one_reads, false));
+        // A jump that the host's flags cannot answer (parity) reads the record.
+        let parity = [0x39, 0xd8, 0x7a, 0x02, 0x01, 0xd1, 0x01, 0xfe, 0x0f, 0x05];
+        assert_eq!(words(&parity, true), words(&parity, false));
+        // Across a jump and a call to constants: add; jmp +0; add: dead.
+        let across = [0x01, 0xd8, 0xeb, 0x00, 0x01, 0xd1, 0x0f, 0x05];
+        assert_eq!(words(&across, true) - words(&across, false), 3);
+        // Before a return: live.
+        let ret = [0x01, 0xd8, 0xc3];
+        assert_eq!(words(&ret, true), words(&ret, false));
+        // What was read to decide is said, so that a store there is known of.
+        let m = guest(&across, &[]);
+        let built = translate(&m, CODE, false).unwrap();
+        assert_eq!((built.end, built.seen), (CODE + 4, Some((CODE + 2, CODE + 6))));
+    }
+
+    #[test]
+    fn a_dead_flag_made_live_by_a_store_to_the_code_after_is_recorded_again() {
+        // first: add eax, ebx; jmp second      (the add's flags die at `second`'s add)
+        // second: add edx, 1; ... the program then writes `second`'s first instruction
+        // into one that reads the carry (adc edx, 1 is 83 D2 01), and comes round.
+        //  0  first:  add eax, ebx          01 d8
+        //  2          jmp second            eb 00
+        //  4  second: add edx, 1            83 c2 01    <- becomes adc edx, 1
+        //  7          sub ecx, 1            83 e9 01
+        // 10          je done               74 09
+        // 12          mov byte [second + 1], 0xd2   c6 05 f2 ff ff ff d2
+        // 19          jmp first             eb eb
+        // 21  done:   syscall
+        let code = [0x01, 0xd8, 0xeb, 0x00, 0x83, 0xc2, 0x01, 0x83, 0xe9, 0x01, 0x74, 0x09, 0xc6, 0x05, 0xf2, 0xff, 0xff, 0xff, 0xd2, 0xeb, 0xeb, 0x0f, 0x05];
+        for check in [true, false] {
+            let mut m = Mem::reserve().unwrap();
+            m.map(CODE, 4096, R | W | X).unwrap();
+            m.write_bytes(CODE, &code).unwrap();
+            m.map(DATA, 4096, R | W).unwrap();
+            let mut jit = Jit::new(check, 1).unwrap();
+            // EAX + EBX carries every time: once `second` is ADC it adds two.
+            let c = both(&mut jit, &mut m, CODE, &|c| {
+                c.reg[RAX] = 0xffff_ffff;
+                c.reg[RBX] = 0xffff_ffff;
+                c.reg[crate::cpu::RCX] = 3;
+            });
+            assert_eq!(m.read_u8(CODE + 5), Ok(0xd2));
+            assert_eq!(c.reg[RDX], 1 + 2 + 2);
+        }
+    }
+
+    /// A program that ends by picking RDX on the carry, by way of `between`, with both
+    /// ways then writing the flags afresh:
+    ///      add eax, ebx; (between); jc two
+    ///      add esi, edi; mov edx, 1; jmp end
+    /// two: add esi, edi; mov edx, 2
+    /// end: syscall
+    fn carry_picked_after(between: &[u8]) -> Vec<u8> {
+        let mut code = vec![0x01, 0xd8];
+        code.extend(between);
+        code.extend([0x72, 0x09, 0x01, 0xfe, 0xba, 1, 0, 0, 0, 0xeb, 0x07, 0x01, 0xfe, 0xba, 2, 0, 0, 0, 0x0f, 0x05]);
+        code
+    }
+
+    #[test]
+    fn flags_read_where_the_hosts_cannot_answer_are_recorded() {
+        // The addition carries; whoever reads the carry must find it. In each of
+        // these the jump on it cannot be answered by the host's flags of the
+        // addition, so it reads the record, which must therefore have been written,
+        // though both of the jump's ways write the flags again.
+        let set = |c: &mut Cpu| {
+            c.reg[RAX] = 0xffff_ffff;
+            c.reg[RBX] = 2;
+        };
+        for between in [
+            // A jump to the next instruction: the jump on carry begins another block.
+            &[0xeb, 0x00][..],
+            // A shift by CL (by nothing here): it keeps x86's flags but the host's
+            // are no longer asked after it.
+            &[0xd3, 0xe7][..],
+            // A rotation, whose own flags are dead only if the carry is not read:
+            // it is read, so the block ends before it.
+            &[0xc1, 0xc7, 0x00][..],
+            // Sixty moves: the jump is past the end of what one block holds.
+            &[0x89, 0xf7].repeat(70)[..],
+        ] {
+            let (c, _) = checked(&carry_picked_after(between), &[], &set);
+            assert_eq!(c.reg[RDX], 2, "after {between:02x?}");
+        }
+        // The addition late in a block: 61 moves before it, three after, and the jump
+        // on the carry falls past the 64 instructions a block holds, into the next.
+        let mut late = [0x89, 0xf7].repeat(61);
+        late.extend(carry_picked_after(&[0x89, 0xf7, 0x89, 0xf7, 0x89, 0xf7]));
+        assert_eq!(checked(&late, &[], &set).0.reg[RDX], 2);
+        // And answered in the block, no record is needed: one fewer than exact.
+        let direct = carry_picked_after(&[]);
+        let m = guest(&direct, &[]);
+        let words = |exact| translate(&m, CODE, exact).unwrap().words.len();
+        assert_eq!(words(true) - words(false), 3);
+        assert_eq!(checked(&direct, &[], &set).0.reg[RDX], 2);
+    }
+
+    #[test]
+    fn code_read_to_leave_a_record_out_is_what_the_block_rests_on() {
+        // As the test of dead flags made live, with `second` on the next host page
+        // from `first` (which lies at the end of its own): the block at `first` has
+        // no instruction on that page, only what it read there to leave its record
+        // out. A store there must forget it all the same.
+        //  first:  add eax, ebx; jmp second            at the end of a host page
+        //  second: add edx, 1 (becomes adc edx, 1); sub ecx, 1; je done;
+        //          mov byte [second + 1], 0xd2; jmp first;  done: syscall
+        const SECOND: u64 = CODE + 0x4000;
+        const FIRST: u64 = SECOND - 4;
+        let first = [0x01, 0xd8, 0xeb, 0x00];
+        let mut second = vec![0x83, 0xc2, 0x01, 0x83, 0xe9, 0x01, 0x74, 0x0c, 0xc6, 0x05, 0, 0, 0, 0, 0xd2, 0xe9, 0, 0, 0, 0, 0x0f, 0x05];
+        second[10..14].copy_from_slice(&(1i32 - 15).to_le_bytes());
+        second[16..20].copy_from_slice(&((FIRST as i64 - (SECOND as i64 + 20)) as i32).to_le_bytes());
+        for check in [true, false] {
+            let mut m = Mem::reserve().unwrap();
+            m.map(CODE, 0x8000, R | W | X).unwrap();
+            m.write_bytes(FIRST, &first).unwrap();
+            m.write_bytes(SECOND, &second).unwrap();
+            m.map(DATA, 4096, R | W).unwrap();
+            assert_ne!(m.host_pages(FIRST, FIRST + 1), m.host_pages(SECOND, SECOND + 1));
+            let mut jit = Jit::new(check, 1).unwrap();
+            let c = both(&mut jit, &mut m, FIRST, &|c| {
+                c.reg[RAX] = 0xffff_ffff;
+                c.reg[RBX] = 0xffff_ffff;
+                c.reg[crate::cpu::RCX] = 3;
+            });
+            assert_eq!(m.read_u8(SECOND + 1), Ok(0xd2));
+            assert_eq!(c.reg[RDX], 1 + 2 + 2);
         }
     }
 }

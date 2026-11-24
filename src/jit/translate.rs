@@ -48,6 +48,11 @@ pub struct Built {
     pub starts: Vec<(u32, u64)>,
     /// The first address after the block's last instruction.
     pub end: u64,
+    /// What of the guest's code the block rests on besides its own instructions: the
+    /// lowest and one past the highest address that was read to decide that a record
+    /// of the flags need not be written (R013). A store there forgets the block as a
+    /// store to its own instructions does.
+    pub seen: Option<(u64, u64)>,
 }
 
 /// An operand that is a register or memory.
@@ -257,21 +262,87 @@ fn flags_of(ins: &Ins) -> Flags {
     }
 }
 
-/// Are the flags written whole, before anything reads them, by the instructions of the
-/// block that follow `at` (of which there is room for `room` more)?
-fn flags_die(m: &Mem, mut at: u64, room: usize) -> bool {
-    for _ in 0..room {
-        let (code, have) = m.code_at(at);
-        let Some(ins) = read(unsafe { std::slice::from_raw_parts(code, have) }, at) else {
-            return false;
-        };
-        match flags_of(&ins) {
-            Flags::All => return true,
-            Flags::Read => return false,
-            Flags::Kept => at = at.wrapping_add(ins.len as u64),
+/// What of the host's flags an instruction that writes all of x86's leaves behind for
+/// a conditional jump to use.
+fn host_flags_of(ins: &Ins) -> Option<HostFlags> {
+    let field = ins.reg & 7;
+    match ins.op {
+        0x01 | 0x03 => Some(HostFlags::Add),
+        0x29 | 0x2b | 0x39 | 0x3b => Some(HostFlags::Sub),
+        0x09 | 0x0b | 0x21 | 0x23 | 0x31 | 0x33 | 0x85 => Some(HostFlags::Logic),
+        0x81 | 0x83 => Some(match field {
+            0 => HostFlags::Add,
+            5 | 7 => HostFlags::Sub,
+            _ => HostFlags::Logic,
+        }),
+        0xf7 if field == 0 => Some(HostFlags::Logic),
+        0xf7 if field == 3 => Some(HostFlags::Sub),
+        _ => None,
+    }
+}
+
+/// The reading on from an instruction that sets the flags, to find whether anything
+/// can read them before they are written whole again.
+struct Scan<'a> {
+    m: &'a Mem,
+    /// How many instructions more may be read before giving up.
+    budget: usize,
+    /// The lowest and one past the highest address read.
+    span: (u64, u64),
+}
+
+impl Scan<'_> {
+    /// Are the flags dead from `at` on: written whole on every way before anything
+    /// reads them? `host` is what the host's flags can say for a conditional jump, and
+    /// `room` how many instructions more the block the question is asked for may hold:
+    /// a conditional jump inside that block which the host's flags answer does not
+    /// read the record, and both its ways are followed. Anything not known, a return,
+    /// a jump through an operand, or the budget run out: not dead.
+    fn dead(&mut self, mut at: u64, mut host: Option<HostFlags>, mut room: usize, depth: u32) -> bool {
+        loop {
+            if self.budget == 0 {
+                return false;
+            }
+            self.budget -= 1;
+            let (code, have) = self.m.code_at(at);
+            let Some(ins) = read(unsafe { std::slice::from_raw_parts(code, have) }, at) else {
+                return false;
+            };
+            let next = at.wrapping_add(ins.len as u64);
+            self.span = (self.span.0.min(at), self.span.1.max(next));
+            let inside = room > 0;
+            room = room.saturating_sub(1);
+            match flags_of(&ins) {
+                Flags::All => return true,
+                Flags::Kept => {
+                    // A shift by CL or a rotation leaves the host's flags no longer
+                    // what a jump would ask (and a rotation may end the block).
+                    if matches!(ins.op, 0xc1 | 0xd1 | 0xd3) {
+                        host = None;
+                    }
+                    at = next;
+                }
+                Flags::Read => match ins.op {
+                    0x70..=0x7f | 0x180..=0x18f => {
+                        // In the block and answered by the host's flags, it reads no
+                        // record. Past it the host's flags are someone else's.
+                        let answered = inside && host.and_then(|h| condition(ins.op as u8 & 15, h)).is_some();
+                        if !answered || depth == 0 {
+                            return false;
+                        }
+                        return self.dead(next, None, 0, depth - 1) && self.dead(ins.imm as u64, None, 0, depth - 1);
+                    }
+                    // A jump or a call to a constant: on from there, in another block.
+                    0xe8 | 0xe9 | 0xeb => {
+                        at = ins.imm as u64;
+                        host = None;
+                        room = 0;
+                    }
+                    _ => return false,
+                },
+            }
         }
     }
-    false
 }
 
 /// What kind of instruction last set the host's flags, so that a conditional jump
@@ -319,12 +390,39 @@ fn condition(cc: u8, flags: HostFlags) -> Option<Jump> {
     })
 }
 
-struct Emit {
+struct Emit<'a> {
     w: Vec<u32>,
     flags: Option<HostFlags>,
+    m: &'a Mem,
+    /// Where the block begins: what is read to prove flags dead is to lie near it.
+    rip: u64,
+    /// Every record is to be written (`--jit-check` compares the flags).
+    exact: bool,
+    /// The instruction being translated need not write its record: its flags are dead.
+    skip: bool,
+    /// What was read to decide that, for all the instructions so far.
+    seen: Option<(u64, u64)>,
 }
 
-impl Emit {
+impl Emit<'_> {
+    /// Are the flags dead from `at` on (`Scan::dead`)? What is read to say so becomes
+    /// part of what the block rests on, and must lie within a few pages of it.
+    fn dead(&mut self, at: u64, host: Option<HostFlags>, room: usize) -> bool {
+        let mut scan = Scan { m: self.m, budget: 48, span: (at, at) };
+        if !scan.dead(at, host, room, 2) {
+            return false;
+        }
+        let (lo, hi) = scan.span;
+        if lo < self.rip.saturating_sub(0x2000) || hi > self.rip.saturating_add(0x4000) {
+            return false;
+        }
+        self.seen = Some(match self.seen {
+            Some((a, b)) => (a.min(lo), b.max(hi)),
+            None => (lo, hi),
+        });
+        true
+    }
+
     fn put(&mut self, word: u32) {
         self.w.push(word);
     }
@@ -367,6 +465,9 @@ impl Emit {
     /// The record of the flags: the kind and the operands' width, the first operand
     /// (or the result), and the second if there is one.
     fn record(&mut self, kind: u64, bits: u32, a: u8, b: Option<u8>) {
+        if self.skip {
+            return;
+        }
         self.put(a64::mov(true, REC_A, a));
         if let Some(b) = b {
             self.put(a64::mov(true, REC_B, b));
@@ -495,7 +596,7 @@ impl Emit {
                 self.flags = Some(if sub { HostFlags::Sub } else { HostFlags::Add });
             }
             4 => self.put(a64::logic(wide, Logic::Ands, to, a, src)),
-            8 => self.put(a64::logic(wide, Logic::Ands, REC_A, a, src)),
+            8 => self.put(a64::logic(wide, Logic::Ands, if self.skip { a64::ZR } else { REC_A }, a, src)),
             _ => {
                 self.put(a64::logic(wide, if kind == 1 { Logic::Orr } else { Logic::Eor }, to, a, src));
                 self.put(a64::logic(wide, Logic::Ands, a64::ZR, to, to));
@@ -511,10 +612,12 @@ impl Emit {
             }
         }
         if matches!(kind, 1 | 4 | 6 | 8) {
-            if kind != 8 {
-                self.put(a64::mov(true, REC_A, to));
+            if !self.skip {
+                if kind != 8 {
+                    self.put(a64::mov(true, REC_A, to));
+                }
+                self.put(a64::movz(true, REC_KIND, (REC_LOGIC << 8 | bits as u64) as u16, 0));
             }
-            self.put(a64::movz(true, REC_KIND, (REC_LOGIC << 8 | bits as u64) as u16, 0));
             self.flags = Some(HostFlags::Logic);
         }
     }
@@ -567,9 +670,10 @@ fn size(bits: u32) -> Size {
 }
 
 /// Translates the block that begins at `rip`. `None` if its first instruction is not
-/// one that is translated.
-pub fn translate(m: &Mem, rip: u64) -> Option<Built> {
-    let mut e = Emit { w: Vec::new(), flags: None };
+/// one that is translated. With `exact` every record of the flags is written, whether
+/// or not anything can read them.
+pub fn translate(m: &Mem, rip: u64, exact: bool) -> Option<Built> {
+    let mut e = Emit { w: Vec::new(), flags: None, m, rip, exact, skip: false, seen: None };
     let mut starts = Vec::new();
     let mut at = rip;
     loop {
@@ -594,6 +698,12 @@ pub fn translate(m: &Mem, rip: u64) -> Option<Built> {
         // host's flags do not say what a jump asks; a rotation's flags may be read):
         // the block ends before it and it is the interpreter's.
         let mut not_here = false;
+        // The record of the flags is not written by an instruction after which they
+        // are dead. (A shift by CL may leave them: if they are dead after it, its own
+        // record is not needed either.)
+        let room = MOST - starts.len();
+        let sets = matches!(flags_of(&ins), Flags::All) || ins.op == 0xd3 && field >= 4;
+        e.skip = !e.exact && sets && e.dead(next, host_flags_of(&ins), room);
         match ins.op {
             0x01 | 0x09 | 0x21 | 0x29 | 0x31 | 0x39 => {
                 let src = if small { e.small(&ins, reg, T0) } else { reg };
@@ -644,7 +754,7 @@ pub fn translate(m: &Mem, rip: u64) -> Option<Built> {
                 let n = if ins.op == 0xc1 { ins.imm as u32 & (bits - 1) } else { 1 };
                 if field < 2 {
                     // ROL and ROR: translated only where their flags are not read.
-                    if !flags_die(m, next, MOST - starts.len()) {
+                    if !e.dead(next, None, room) {
                         not_here = true;
                     } else if by_cl && field == 0 {
                         // To the left by CL is to the right by its negative.
@@ -669,17 +779,21 @@ pub fn translate(m: &Mem, rip: u64) -> Option<Built> {
                         _ => Shift::Asr,
                     };
                     if by_cl {
-                        e.put(a64::ubfx(T1, RCX, 0, if wide { 6 } else { 5 }));
-                        // Over the three instructions of the record.
-                        e.put(a64::cbz(true, false, T1, 4));
-                        e.record(REC_SHIFT + kind, bits, d, Some(T1));
+                        if !e.skip {
+                            e.put(a64::ubfx(T1, RCX, 0, if wide { 6 } else { 5 }));
+                            // Over the three instructions of the record.
+                            e.put(a64::cbz(true, false, T1, 4));
+                            e.record(REC_SHIFT + kind, bits, d, Some(T1));
+                        }
                         e.put(a64::shift_reg(wide, op, d, d, RCX));
                     } else if n == 0 {
                         if !wide {
                             e.put(a64::mov(false, d, d));
                         }
                     } else {
-                        e.constant(T1, n as u64);
+                        if !e.skip {
+                            e.constant(T1, n as u64);
+                        }
                         e.record(REC_SHIFT + kind, bits, d, Some(T1));
                         e.put(match op {
                             Shift::Lsl => a64::lsl(wide, d, d, n),
@@ -849,6 +963,12 @@ pub fn translate(m: &Mem, rip: u64) -> Option<Built> {
             }
             _ => unreachable!("read gave an instruction that is not translated"),
         }
+        // What was asked about the flags before this instruction was written was asked
+        // with what `host_flags_of` says it leaves in the host's flags: that must be
+        // what it did leave, or a jump after it was reasoned about wrongly.
+        if matches!(flags_of(&ins), Flags::All) && !not_here {
+            assert!(e.flags == host_flags_of(&ins), "the host's flags after {:#x} at {at:#x}", ins.op);
+        }
         if not_here {
             e.w.truncate(before);
             starts.pop();
@@ -863,10 +983,10 @@ pub fn translate(m: &Mem, rip: u64) -> Option<Built> {
             break;
         }
     }
-    Some(Built { words: e.w, starts, end: at })
+    Some(Built { words: e.w, starts, end: at, seen: e.seen })
 }
 
-impl Emit {
+impl Emit<'_> {
     /// The register that holds a source operand in its low bits: the guest's own (or
     /// for AH and its like the byte brought down into `T0`), or memory read into `T0`.
     fn operand(&mut self, ins: &Ins, rm: Rm) -> u8 {
