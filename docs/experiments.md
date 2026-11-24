@@ -1875,3 +1875,31 @@ written.
 
 Not built, by the ADR's point 2: forgetting a page's blocks when the guest makes it
 writable. There is no system call that can do it yet; it goes in with the first.
+
+## R024: what a container's programs ask of the kernel (2026-11-25)
+
+The owner chose the container's way to the goal (ADR 0011) and to a race with QEMU on
+a build: x86-64 programs of a container image run as processes on the host's own
+arm64 Linux kernel, with no guest kernel and no machine. A look before the decision
+that orders the work (ADR 0017).
+
+The card, written before the run.
+
+- **Hypothesis**: what r64m lacks for this is counted in system calls, and the list is
+  short where it starts. A dynamically linked "Hello, world" in Alpine asks for fewer
+  than twenty different system calls; compiling and linking one C file with Alpine's
+  GCC (the driver, `cc1`, `as`, `collect2`, `ld`: five programs, started by `vfork`
+  or `fork` and `execve`) for fewer than sixty; and none is of a kind that cannot be
+  handed on to an arm64 kernel (`ptrace`, `seccomp`, `io_uring`, `modify_ldt`,
+  `arch_prctl` beyond setting FS).
+- **What is changed from before**: nothing of r64m is run. The real machine (hal, an
+  x86-64 Linux) runs the two in an Alpine container with GCC that is on it already,
+  under `strace -f -c`.
+- **Next move for each result**:
+  - As guessed → ADR 0017 orders the work by these lists: what hello needs first,
+    then what the compile adds
+  - A call of a kind that cannot be handed on shows → it is a point of the ADR for
+    the owner
+  - Far more calls than guessed → the ADR orders by count of use, and the first
+    milestone is still hello
+- **Cut-off**: one count of each, on hal.
