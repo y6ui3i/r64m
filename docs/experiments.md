@@ -1846,3 +1846,32 @@ The card, written before the run.
     looked at: it may have rested on the mark for something else
 - **Cut-off**: one race of all primitives (three at once: this build, R021's, g64m's
   JIT), after every test passes on both hosts.
+
+The result (MacBook Air, Apple M1; three at once: this build, R021's, g64m with its
+JIT; the least of three, less a program that does nothing; QEMU's times are R008's).
+
+**As R022.**
+
+| 200 rounds | r64m | R021 | g64m's JIT | QEMU | QEMU / r64m |
+|---|---|---|---|---|---|
+| p_sha | 0.281 s | over 15 s | 0.327 s | 0.437 s | 1.55 |
+| p_fill | 1.103 s | 1.131 s | 1.558 s | 2.883 s | 2.61 |
+
+p_sha is within 1% of R022's build (0.278 s). The other primitives are within 1% of
+R021's (0.990 to 1.003); p_fill is 2.5% faster, as it was in R022.
+
+Twenty-two of the 23 primitives are past QEMU on this Mac (1.06 to 8.56 times),
+thirteen of them at twice QEMU or past it, and on nineteen of the twenty-two r64m's
+JIT is level with g64m's or ahead (behind: p_loop, p_ternary, p_dbl_conv). The one
+not past QEMU is p_ldbl: the x87, which is not put in blocks (ADR 0015).
+
+All 62 programs give the interpreter's output, exit code and count in the four JIT
+modes, on macOS and in the Linux container; 90 unit tests on both. The tests of a
+store to code and of a store beside it had their code on a page the guest may write
+already and hold as they were; one new test holds that code on a page it may not
+write is not marked, with its data in the same host page written 300 times and no
+fault, and that a block resting on code it only read is guarded if that code may be
+written.
+
+Not built, by the ADR's point 2: forgetting a page's blocks when the guest makes it
+writable. There is no system call that can do it yet; it goes in with the first.

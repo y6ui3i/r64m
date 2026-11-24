@@ -21,11 +21,12 @@ arithmetic, comparisons and conversions of floats and doubles, and the packed
 instructions of whole numbers; the XMM registers in the host's vector registers),
 joins them to one another, finds a return's block without leaving generated code, and
 checks each block against the interpreter when asked (`--jit-check`). It is asked for
-with `--jit` and is not yet what r64m does by itself. Of the 23 primitives (named, with what each is made of, in `tests/prim.rs`) twenty-one are
-past QEMU on this Mac (1.05 to 8.57 times), thirteen of them at twice QEMU or past it,
-and on eighteen r64m's JIT is level with g64m's or ahead (R021). One integer primitive
-is behind QEMU for its stores to data that shares a 16 KB host page with its code, and
-one is still mostly interpreted: the x87 is not translated. There is no dynamic linking,
+with `--jit` and is not yet what r64m does by itself. Of the 23 primitives (named, with what each is made of, in `tests/prim.rs`) twenty-two are
+past QEMU on this Mac (1.06 to 8.56 times), thirteen of them at twice QEMU or past it,
+and on nineteen r64m's JIT is level with g64m's or ahead (R023). The one behind QEMU
+is long double's: the x87 is interpreted, by soft arithmetic of 80 bits. Translated
+code is guarded against writes only where the guest may write it
+([0016](docs/adr/0016-only-writable-code-is-guarded.md)). There is no dynamic linking,
 no system call beyond `write` and `exit`, and no machine yet.
 
 ## The goal
@@ -97,8 +98,10 @@ real CPU does.
    and jumps through an operand found in a table. The record of the flags is written only where
    something can read it (R013 to R015); the integer instructions the primitives use
    (R016, R017); a block goes on past a conditional jump (R018); the scalar SSE
-   instructions (R020) and the packed integer ones (R021). Next: stores beside code
-   on 16 KB pages.
+   instructions (R020) and the packed integer ones (R021); stores to data beside
+   code on 16 KB pages go straight to memory (R023).
+6. Next: what the goal's programs need before they run at all (ADR 0011): dynamic
+   linking, system calls, threads, signals.
 
 One case is owed: the x87's square root when what is left over equals the root (the
 rounding there is not touched by any of g64m's cases; found by breaking it on purpose).

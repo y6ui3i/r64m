@@ -71,6 +71,9 @@ primitives, its own tests) and be exact only on a host with 4 KB pages.
 *Proposed: arm64 Linux with 4 KB pages is the host r64m is made for; macOS is where it
 is developed, with these three written down. (A Raspberry Pi 5's usual kernel has 16 KB
 pages too; its other kernel has 4 KB.)*
+(Since 0016 the second of the three is so only for code the guest may write; and a
+fourth is written down there: a store by generated code into code the guest may not
+write, in a host page shared with data it may, is made and leaves a block stale.)
 
 **C. What a fault costs is paid by programs that fault on purpose.** A language's
 run-time that finds a null pointer by the fault, or grows a stack by one, pays half a
