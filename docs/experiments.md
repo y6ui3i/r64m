@@ -293,3 +293,38 @@ The timing was a script of its own in a scratch folder, not kept (ADR 0012: what
 kept is Rust; a `cargo xtask` for the races is owed when they are run again).
 
 **Next.** The JIT's design, as a decision (ADR 0013).
+
+## R005: the interpreter past g64m's (2026-11-24)
+
+The owner's aim: r64m's interpreter faster than g64m's (58.0 M instructions a second
+over the 23 primitives, R004; r64m's is 34.8). The JIT's design (ADR 0014) waits.
+
+The card, written before the run.
+
+- **Hypothesis**: the time is not in what the instructions do but in what is done
+  again for every one of them, and three things are guessed, in this order of size:
+  1. the fetch: fifteen bytes copied out for each instruction after a search of the
+     list of regions (and the search again for every access to memory, ADR 0010);
+  2. the decoding itself, done afresh each time (prefixes, ModRM, the constants read a
+     byte at a time, each read with its own test);
+  3. what is set up and passed round for each step (the `Run` built and filled, results
+     handed back through several layers).
+  A profile of two primitives (`p_loop`: registers and jumps; `p_index`: memory) says
+  whether that is so before anything is changed.
+- **What is changed from before**: R004 timed the interpreter as first written. Here it
+  is changed, one thing at a time, each kept only if the 39 traces still hold and the
+  race with g64m's interpreter (both at once, as in R004) shows a gain.
+- **Next move for each result**:
+  - The profile agrees → in the order of what it shows as largest: a memory of the last
+    region found (one for code, one for data); then the fetch reading the guest's bytes
+    where they lie instead of copying fifteen; then, if still behind, a memory of
+    decoded instructions as g64m has (its entry by address, dropped when the page is
+    written)
+  - The profile shows something else largest → that first, and said
+  - Past 58 M/s without a memory of decoded instructions → stop there: the simple form
+    is kept (ADR 0007) and the aim is met
+  - Not past it with all three → said as found, with what the profile then shows, and
+    the owner's to say whether the interpreter is worth more or the JIT is next
+- **Cut-off**: the three changes above and no more in this entry. `p_fill`'s `rep stos`
+  (15 times slower than g64m's, R004) is counted in the total but is not what this is
+  about: if it alone keeps the total behind, that is said and it gets its own change.
