@@ -63,6 +63,10 @@ struct Block {
     pages: (u64, u64),
     /// Where its instructions begin and end in the guest.
     guest: (u64, u64),
+    /// Whether its host pages are marked as holding translated code, so that a store
+    /// to them is caught: only if the guest may write what it was made from (ADR
+    /// 0016). Code the guest may not write does not change.
+    guarded: bool,
     /// The jumps in other blocks (or in this one) that were rewritten to come here.
     incoming: Vec<u64>,
 }
@@ -365,16 +369,21 @@ impl Jit {
                 }
             }
         };
-        // From now the pages its instructions lie in may not be written.
+        // If the guest may write any page of what the block rests on, the host pages
+        // those lie in may not be written from now, and are counted as holding code
+        // (ADR 0016: what the guest may not write needs no guard).
         let pages = m.host_pages(from, to);
-        if m.mark_code(pages.0, pages.1, true).is_err() {
-            return false;
+        let guarded = m.guest_may_write(from & !(PAGE - 1), to.next_multiple_of(PAGE));
+        if guarded {
+            if m.mark_code(pages.0, pages.1, true).is_err() {
+                return false;
+            }
+            for page in (from & !(PAGE - 1)..to).step_by(PAGE as usize) {
+                *self.holds.entry(page).or_insert(0) += 1;
+            }
         }
         self.places.insert(rip, Place::Block(self.blocks.len()));
-        for page in (from & !(PAGE - 1)..to).step_by(PAGE as usize) {
-            *self.holds.entry(page).or_insert(0) += 1;
-        }
-        self.blocks.push(Block { code, starts, pages, guest: (from, to), incoming: Vec::new() });
+        self.blocks.push(Block { code, starts, pages, guest: (from, to), guarded, incoming: Vec::new() });
         self.stats.blocks += 1;
         true
     }
@@ -413,7 +422,10 @@ impl Jit {
                 unsafe { self.code.rewrite(site as *const u8, a64::b(1)) };
             }
             let (from, to) = self.blocks[id].guest;
-            for page in (from & !(PAGE - 1)..to).step_by(PAGE as usize) {
+            // (A block that is not guarded was not counted. It goes with the rest of
+            // its host page all the same: more than is needed, never less.)
+            let counted = if self.blocks[id].guarded { from & !(PAGE - 1)..to } else { 0..0 };
+            for page in counted.step_by(PAGE as usize) {
                 if let Some(n) = self.holds.get_mut(&page) {
                     *n -= 1;
                     if *n == 0 {
@@ -432,7 +444,7 @@ impl Jit {
 
     /// Forgets all generated code: the piece of memory is full.
     fn empty(&mut self, m: &mut Mem) {
-        for block in &self.blocks {
+        for block in self.blocks.iter().filter(|b| b.guarded) {
             let _ = m.mark_code(block.pages.0, block.pages.1, false);
         }
         self.blocks.clear();
@@ -2612,5 +2624,41 @@ mod tests {
         for code in [&[0x0fu8, 0xfe, 0xca][..], &[0x0f, 0x72, 0xd1, 1], &[0xf3, 0x0f, 0x70, 0xca, 0], &[0xf2, 0x0f, 0x70, 0xca, 0], &[0x66, 0x0f, 0xc6, 0xca, 0]] {
             assert!(translate(&guest(code, &[]), CODE, true).is_none(), "{code:02x?}");
         }
+    }
+    #[test]
+    fn code_the_guest_may_not_write_is_not_guarded() {
+        // The same loop as "a store to data beside code", with its code on a page
+        // the guest may only read and run, as a compiled program's is (ADR 0016): the
+        // data two of the guest's pages on is in the same host page where those are
+        // 16 KB, and every store goes straight to it.
+        // again: add [rsi], ebx; add edx, [rsi]; sub ebx, 1; jne again; syscall
+        let code = [0x01, 0x1e, 0x03, 0x16, 0x83, 0xeb, 0x01, 0x75, 0xf7, 0x0f, 0x05];
+        let rounds = 300u64;
+        for check in [true, false] {
+            let mut m = guest(&code, &[]);
+            m.map(CODE + 0x2000, 4096, R | W).unwrap();
+            let mut jit = Jit::new(check, 1).unwrap();
+            let c = both(&mut jit, &mut m, CODE, &|c| {
+                c.reg[RBX] = rounds;
+                c.reg[RSI] = CODE + 0x2000;
+            });
+            let total: u64 = (1..=rounds).map(|k| (k..=rounds).sum::<u64>()).sum();
+            assert_eq!(c.reg[RDX], total & 0xffff_ffff);
+            assert!(jit.stats.blocks >= 1 && !m.is_code(CODE) && jit.holds.is_empty());
+            assert_eq!((jit.stats.beside, jit.stats.faults, jit.stats.forgotten), (0, 0, 0));
+        }
+        // And a block that rests on code it only read (to leave a record of the flags
+        // out) is guarded if that is on a page the guest may write, though its own
+        // instructions are not: add eax, ebx at a page's end, cmp eax, ecx on the next.
+        let mut m = Mem::reserve().unwrap();
+        m.map(CODE, 4096, R | W).unwrap();
+        m.write_bytes(CODE + 4094, &[0x01, 0xd8]).unwrap();
+        m.protect(CODE, 4096, R | X).unwrap();
+        m.map(CODE + 4096, 4096, R | W | X).unwrap();
+        m.write_bytes(CODE + 4096, &[0x39, 0xc8, 0x0f, 0x05]).unwrap();
+        m.map(DATA, 4096, R | W).unwrap();
+        let mut jit = Jit::new(false, 1).unwrap();
+        both(&mut jit, &mut m, CODE + 4094, &|c| c.reg[RBX] = 1);
+        assert!(m.is_code(CODE + 4096) && jit.holds.len() == 2);
     }
 }

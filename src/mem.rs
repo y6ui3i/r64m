@@ -326,6 +326,12 @@ impl Mem {
         self.host_sync(start, end).map_err(MapError::Host)
     }
 
+    /// May the guest write any of `[start, end)`? (By what it mapped and protected:
+    /// the mark of translated code does not change the answer.)
+    pub fn guest_may_write(&self, start: u64, end: u64) -> bool {
+        self.regions.iter().any(|r| r.start < end && start < r.end && r.prot & W != 0)
+    }
+
     /// Does the page at `addr` hold translated code?
     pub fn is_code(&self, addr: u64) -> bool {
         self.regions.get(self.first_ending_after(addr)).is_some_and(|r| r.start <= addr && r.prot & C != 0)
@@ -925,7 +931,11 @@ mod tests {
         m.write_u64(A + 8, 5).unwrap();
         // Marked from the middle of the first host page to the middle of the third:
         // whole host pages are.
+        assert!(m.guest_may_write(A, A + 1) && m.guest_may_write(A + 2 * hp - 1, A + 3 * hp));
+        assert!(!m.guest_may_write(A + 2 * hp, A + 3 * hp) && !m.guest_may_write(A + 3 * hp, A + 4 * hp));
         m.mark_code(A + hp - 1, A + 2 * hp + 1, true).unwrap();
+        // (The mark does not change what the guest may do.)
+        assert!(m.guest_may_write(A, A + 1) && !m.guest_may_write(A + 2 * hp, A + 3 * hp));
         assert!(m.is_code(A) && m.is_code(A + hp) && m.is_code(A + 3 * hp - 1));
         assert!(!m.is_code(A + 3 * hp) && !m.is_code(A - 1));
         // Read and run as before, written by neither the interpreter nor the host.
