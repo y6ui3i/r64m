@@ -1,7 +1,6 @@
 # 0008: A program's memory is the host's, with the host's protection
 
-**Status**: proposed (2026-11-24); not accepted. Three points are the owner's to decide
-and are marked so.
+**Status**: accepted (2026-11-24, the owner: the three points as proposed)
 
 ## Context
 
@@ -52,7 +51,7 @@ code; its memory is a mapping of the host's too, and nothing more is decided for
    itself to live outside the guest's half of the address space, which Linux with 48
    bits gives and macOS does not. Not done until the simple form is measured (0007).
 
-## The three points that are the owner's
+## The three points that were the owner's, each accepted as proposed
 
 **A. An address outside the reservation is not caught.** On Linux the reservation is
 everything an x86 program can address in user space, so this is only an address that is
