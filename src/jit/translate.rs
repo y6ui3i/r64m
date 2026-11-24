@@ -21,7 +21,7 @@
 
 use super::a64::{self, Cond, Logic, Mem as Op, Shift, Size};
 use super::{BASE, CPU, LEFT_AT_END, OUT, RAN, REASON, TABLE, TABLE_BITS};
-use crate::cpu::{Cpu, REC_ADD, REC_BSF, REC_BSR, REC_LOGIC, REC_SHIFT, REC_SUB};
+use crate::cpu::{Cpu, REC_ADD, REC_ADD_BY_RESULT, REC_BSF, REC_BSR, REC_LOGIC, REC_SHIFT, REC_SUB, REC_SUB_BY_RESULT};
 use crate::mem::Mem;
 use std::mem::offset_of;
 
@@ -281,6 +281,61 @@ fn host_flags_of(ins: &Ins) -> Option<HostFlags> {
     }
 }
 
+/// A record of the flags that is not written by its instruction but, if at all, by the
+/// jump that follows it at once, on the ways where the flags are not dead (R014).
+#[derive(Clone, Copy)]
+struct Later {
+    kind: u64,
+    bits: u32,
+    /// The register that holds the first operand, or the result.
+    a: u8,
+    b: Second,
+}
+
+#[derive(Clone, Copy)]
+enum Second {
+    None,
+    Reg(u8),
+    Imm(u64),
+    /// TEST: the record is the AND of `a` and this register, or this constant.
+    AndReg(u8),
+    AndImm(u64),
+}
+
+/// What an instruction's record needs, if all of it is still in the guest's registers
+/// when the instruction is done: an arithmetic or logic instruction of 32 or 64 bits
+/// on a register with a register or a constant. Not where the two operands are one
+/// register and the result has taken its place.
+fn later_of(ins: &Ins) -> Option<Later> {
+    if ins.size < 32 {
+        return None;
+    }
+    let field = ins.reg & 7;
+    // (the kind among the opcodes 00h to 3Fh, the register written or compared, the
+    // other operand)
+    let (kind, a, b) = match (ins.op, ins.rm) {
+        (0x01 | 0x09 | 0x21 | 0x29 | 0x31 | 0x39, Rm::Reg(d)) => ((ins.op >> 3) as u8, d, Second::Reg(ins.reg)),
+        (0x03 | 0x0b | 0x23 | 0x2b | 0x33 | 0x3b, Rm::Reg(s)) => ((ins.op >> 3) as u8, ins.reg, Second::Reg(s)),
+        (0x85, Rm::Reg(d)) => (8, d, Second::Reg(ins.reg)),
+        (0x81 | 0x83, Rm::Reg(d)) => (field, d, Second::Imm(ins.imm as u64)),
+        (0xf7, Rm::Reg(d)) if field == 0 => (8, d, Second::Imm(ins.imm as u64)),
+        _ => return None,
+    };
+    let same = matches!(b, Second::Reg(r) if r == a);
+    let (kind, b) = match (kind, b) {
+        (0, _) if !same => (REC_ADD_BY_RESULT, b),
+        // (A register less itself is nothing less nothing by its flags too, so this
+        // one would come out right; it is refused with the addition for plainness.)
+        (5, _) if !same => (REC_SUB_BY_RESULT, b),
+        (7, _) => (REC_SUB, b),
+        (1 | 4 | 6, _) => (REC_LOGIC, Second::None),
+        (8, Second::Reg(r)) => (REC_LOGIC, Second::AndReg(r)),
+        (8, Second::Imm(v)) => (REC_LOGIC, Second::AndImm(v)),
+        _ => return None,
+    };
+    Some(Later { kind, bits: ins.size, a, b })
+}
+
 /// The reading on from an instruction that sets the flags, to find whether anything
 /// can read them before they are written whole again.
 struct Scan<'a> {
@@ -402,6 +457,8 @@ struct Emit<'a> {
     skip: bool,
     /// What was read to decide that, for all the instructions so far.
     seen: Option<(u64, u64)>,
+    /// The record that the jump now to be translated writes on the ways that need it.
+    later: Option<Later>,
 }
 
 impl Emit<'_> {
@@ -473,6 +530,38 @@ impl Emit<'_> {
             self.put(a64::mov(true, REC_B, b));
         }
         self.put(a64::movz(true, REC_KIND, (kind << 8 | bits as u64) as u16, 0));
+    }
+
+    /// Writes a record that was left for the jump to write.
+    fn write_later(&mut self, l: Later) {
+        match l.b {
+            Second::None => self.put(a64::mov(true, REC_A, l.a)),
+            Second::Reg(b) => {
+                self.put(a64::mov(true, REC_A, l.a));
+                self.put(a64::mov(true, REC_B, b));
+            }
+            Second::Imm(v) => {
+                self.put(a64::mov(true, REC_A, l.a));
+                self.constant(REC_B, v);
+            }
+            Second::AndReg(b) => self.put(a64::logic(true, Logic::And, REC_A, l.a, b)),
+            Second::AndImm(v) => {
+                self.constant(T3, v);
+                self.put(a64::logic(true, Logic::And, REC_A, l.a, T3));
+            }
+        }
+        self.put(a64::movz(true, REC_KIND, (l.kind << 8 | l.bits as u64) as u16, 0));
+    }
+
+    /// A way out of a conditional jump to `rip`: the record that was left for the
+    /// jump is written on this way unless the flags are dead from there.
+    fn leave_way(&mut self, rip: u64, n: usize, later: Option<Later>) {
+        if let Some(l) = later {
+            if !self.dead(rip, None, 0) {
+                self.write_later(l);
+            }
+        }
+        self.leave(rip, n);
     }
 
     /// Is this a byte register that is the second byte of a register (AH, CH, DH,
@@ -673,7 +762,7 @@ fn size(bits: u32) -> Size {
 /// one that is translated. With `exact` every record of the flags is written, whether
 /// or not anything can read them.
 pub fn translate(m: &Mem, rip: u64, exact: bool) -> Option<Built> {
-    let mut e = Emit { w: Vec::new(), flags: None, m, rip, exact, skip: false, seen: None };
+    let mut e = Emit { w: Vec::new(), flags: None, m, rip, exact, skip: false, seen: None, later: None };
     let mut starts = Vec::new();
     let mut at = rip;
     loop {
@@ -704,6 +793,22 @@ pub fn translate(m: &Mem, rip: u64, exact: bool) -> Option<Built> {
         let room = MOST - starts.len();
         let sets = matches!(flags_of(&ins), Flags::All) || ins.op == 0xd3 && field >= 4;
         e.skip = !e.exact && sets && e.dead(next, host_flags_of(&ins), room);
+        // Not dead, but read at once by a jump that the host's flags answer, with all
+        // that a record needs still in the registers: the jump writes it, where needed.
+        let later = e.later.take();
+        if !e.exact && !e.skip && room > 0 {
+            if let (Some(l), Some(host)) = (later_of(&ins), host_flags_of(&ins)) {
+                let (code, have) = m.code_at(next);
+                let jump = read(unsafe { std::slice::from_raw_parts(code, have) }, next);
+                let answered = jump.is_some_and(|j| {
+                    matches!(j.op, 0x70..=0x7f | 0x180..=0x18f) && condition(j.op as u8 & 15, host).is_some()
+                });
+                if answered {
+                    e.skip = true;
+                    e.later = Some(l);
+                }
+            }
+        }
         match ins.op {
             0x01 | 0x09 | 0x21 | 0x29 | 0x31 | 0x39 => {
                 let src = if small { e.small(&ins, reg, T0) } else { reg };
@@ -945,18 +1050,22 @@ pub fn translate(m: &Mem, rip: u64, exact: bool) -> Option<Built> {
             0x70..=0x7f | 0x180..=0x18f => {
                 let n = starts.len();
                 match e.flags.and_then(|f| condition(ins.op as u8 & 15, f)) {
-                    // The host's flags do not say.
-                    None => not_here = true,
-                    Some(Jump::Always) => e.leave(ins.imm as u64, n),
-                    Some(Jump::Never) => e.leave(next, n),
+                    // The host's flags do not say. (Never where a record was left for
+                    // this jump: it was left because they do.)
+                    None => {
+                        assert!(later.is_none(), "a record left for a jump that reads it, at {at:#x}");
+                        not_here = true;
+                    }
+                    Some(Jump::Always) => e.leave_way(ins.imm as u64, n, later),
+                    Some(Jump::Never) => e.leave_way(next, n, later),
                     Some(Jump::If(cond)) => {
                         // Over the way out for "not taken" to the one for "taken": the
                         // jump is written when it is known how far that is.
                         let jump_at = e.w.len();
                         e.put(a64::nop());
-                        e.leave(next, n);
+                        e.leave_way(next, n, later);
                         e.w[jump_at] = a64::b_cond(cond, (e.w.len() - jump_at) as i32);
-                        e.leave(ins.imm as u64, n);
+                        e.leave_way(ins.imm as u64, n, later);
                     }
                 }
                 ended = true;

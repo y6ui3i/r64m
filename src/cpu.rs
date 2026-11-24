@@ -301,6 +301,10 @@ let set = |f: &mut u64, flag: u64, on: bool| if on { *f |= flag } else { *f &= !
 pub const REC_ADD: u64 = 1;
 pub const REC_SUB: u64 = 2;
 pub const REC_LOGIC: u64 = 3;
+/// An addition and a subtraction told by their result and their second operand (the
+/// first is had back from the two): what is still there after the instruction (R014).
+pub const REC_ADD_BY_RESULT: u64 = 4;
+pub const REC_SUB_BY_RESULT: u64 = 5;
 /// A shift by a count that is not zero: this and the shift's kind (4 SHL, 5 SHR, 7
 /// SAR); the operands are what was shifted and by how much.
 pub const REC_SHIFT: u64 = 0x10;
@@ -319,6 +323,8 @@ pub fn settle(c: &mut Cpu) {
     let f = match kind >> 8 {
         REC_ADD => alu_flags(0, a, b, w, false).1,
         REC_SUB => alu_flags(5, a, b, w, false).1,
+        REC_ADD_BY_RESULT => alu_flags(0, a.wrapping_sub(b), b, w, false).1,
+        REC_SUB_BY_RESULT => alu_flags(5, a.wrapping_add(b), b, w, false).1,
         // A result and nothing: OR's flags are the result's.
         REC_LOGIC => alu_flags(1, a, 0, w, false).1,
         REC_BSF | REC_BSR => {

@@ -1378,6 +1378,11 @@ mod tests {
         let mut late = [0x89, 0xf7].repeat(61);
         late.extend(carry_picked_after(&[0x89, 0xf7, 0x89, 0xf7, 0x89, 0xf7]));
         assert_eq!(checked(&late, &[], &set).0.reg[RDX], 2);
+        // The addition the last instruction a block holds: the jump on its carry is
+        // the next block's first, and no record may be left for it to write.
+        let mut last = [0x89, 0xf7].repeat(63);
+        last.extend(carry_picked_after(&[]));
+        assert_eq!(checked(&last, &[], &set).0.reg[RDX], 2);
         // And answered in the block, no record is needed: one fewer than exact.
         let direct = carry_picked_after(&[]);
         let m = guest(&direct, &[]);
@@ -1417,5 +1422,50 @@ mod tests {
             assert_eq!(m.read_u8(SECOND + 1), Ok(0xd2));
             assert_eq!(c.reg[RDX], 1 + 2 + 2);
         }
+    }
+
+    #[test]
+    fn a_record_left_for_the_jump_is_the_record() {
+        // Each is followed at once by a jump on every condition in turn, and then by
+        // SYSCALL, which reads the flags: so the record that was not written by the
+        // instruction is written by the jump, on both ways, and must be the same.
+        // Two registers; one register twice (where the second operand is lost and the
+        // record cannot wait); constants of 8 and of 32 bits; at 32 and at 64 bits.
+        let mut list: Vec<Vec<u8>> = Vec::new();
+        for op in [0x01u8, 0x09, 0x21, 0x29, 0x31, 0x39, 0x85] {
+            for modrm in [0xd8u8, 0xc0, 0xdb] {
+                list.push(vec![op, modrm]);
+                list.push(vec![0x48, op, modrm]);
+                if op != 0x85 {
+                    list.push(vec![op | 2, modrm]);
+                    list.push(vec![0x48, op | 2, modrm]);
+                }
+            }
+        }
+        for field in [0u8, 1, 4, 5, 6, 7] {
+            list.push(vec![0x83, 0xc0 | field << 3, 0xff]);
+            list.push(vec![0x48, 0x83, 0xc0 | field << 3, 0x7f]);
+            list.push(vec![0x81, 0xc0 | field << 3, 0x00, 0x00, 0x00, 0x80]);
+            list.push(vec![0x48, 0x81, 0xc3 | field << 3, 0xff, 0xff, 0xff, 0x7f]);
+        }
+        list.push(vec![0xf7, 0xc0, 0x00, 0x00, 0x00, 0x80]); // test eax, 80000000h
+        list.push(vec![0x48, 0xf7, 0xc3, 0x00, 0x00, 0x00, 0x80]); // test rbx, -80000000h
+        let list: Vec<&[u8]> = list.iter().map(|v| v.as_slice()).collect();
+        for (a, b) in [(0u64, 0u64), (1, u64::MAX), (0x7fff_ffff, 1), (0x8000_0000, 0x8000_0000), (0xffff_ffff, 0xffff_ffff), (1 << 63, 1 << 63), (0x7fff_ffff_ffff_ffff, 0x7fff_ffff_ffff_ffff), (0x1234_5678_9abc_def0, 0x0fed_cba9_8765_4321)] {
+            under_every_condition(&list, &[], &|c| {
+                c.reg[RAX] = a;
+                c.reg[RBX] = b;
+            });
+        }
+        // That it is left: a loop's compare and jump, the way back writing the flags
+        // and the way on reading them, has its record on the way on only, so the
+        // block is three host instructions shorter than with every record written
+        // (written once, where exact writes it before the jump for both ways).
+        //  0 again: add edx, 3; 3 cmp edx, ebx; 5 jne again; 7 syscall
+        let m = guest(&[0x83, 0xc2, 0x03, 0x39, 0xda, 0x75, 0xf9, 0x0f, 0x05], &[]);
+        let words = |exact| translate(&m, CODE, exact).unwrap().words.len();
+        // The add's record is left out in both (dead at the compare); the compare's is
+        // written once either way: before the jump, or on the way on.
+        assert_eq!(words(true) - words(false), 3);
     }
 }
