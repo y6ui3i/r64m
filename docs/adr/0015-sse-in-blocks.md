@@ -25,15 +25,15 @@ decision changes neither; both are named under "Not yet".
 
 1. **A: the guest's sixteen XMM registers live in the host's v0 to v15**, in every
    block, as the sixteen integer registers live in x0 to x15 (0014). Going in loads
-   them from the state and coming out stores them: sixteen `ldp`/`stp` of 128 bits
-   more each way. v16 to v31 are scratch. The host's rule that d8 to d15 are kept
+   them from the state and coming out stores them: eight `ldp` of two 128-bit
+   registers going in and eight `stp` coming out. v16 to v31 are scratch. The host's rule that d8 to d15 are kept
    across a call is met in `enter`, once.
    - The other way is to leave them in the state and load and store around each
      instruction. A `double` loop is then two loads and a store for each `addsd`, the
      cost g64m's ledger counted for integers before its registers were pinned.
    - The price of this way is paid by every entry, with or without SSE in the block:
-     32 host instructions on about 60. Entries are rare where blocks are joined (R012);
-     the race says whether it shows.
+     sixteen host instructions that touch 256 bytes, and four each way for d8 to d15.
+     Entries are rare where blocks are joined (R012); the race says whether it shows.
 
 2. **B: a block computes with the host's instruction and leaves to the interpreter
    when the result is not a number.** `addsd xmm1, xmm2` is
@@ -120,7 +120,7 @@ decision changes neither; both are named under "Not yet".
 
 ## Consequences
 
-- `enter` grows by 32 instructions each way and the state's `xmm` must stay where
+- `enter` grows by twelve instructions each way and the state's `xmm` must stay where
   `enter` expects it (`#[repr(C)]`, an offset asserted).
 - The fault handler and the way out by fault store v0 to v15 as they store x0 to x15.
 - The encoder gains the floating-point and vector forms, each tested against the
