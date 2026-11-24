@@ -2501,4 +2501,116 @@ mod tests {
         assert_ne!(begins(&[0x83, 0xc2, 0x01, 0x0f, 0x05]), loading);
         assert_eq!(begins(&[0xf2, 0x0f, 0x58, 0xca, 0x0f, 0x05]), loading);
     }
+    #[test]
+    fn packed_integers_element_by_element() {
+        // PUNPCKL and PUNPCKH of each size, PCMPGT and PCMPEQ, PADD and PSUB,
+        // PMULUDQ: xmm1 with xmm2, with [rsi], with itself, and xmm9 with xmm10.
+        let mut list = Vec::new();
+        for op in [0x60u8, 0x61, 0x62, 0x6c, 0x68, 0x69, 0x6a, 0x6d, 0x64, 0x65, 0x66, 0x74, 0x75, 0x76, 0xfc, 0xfd, 0xfe, 0xd4, 0xf8, 0xf9, 0xfa, 0xfb, 0xf4] {
+            list.push((vec![0x66, 0x0f, op, 0xca], 1));
+            list.push((vec![0x66, 0x0f, op, 0x0e], 1));
+            list.push((vec![0x66, 0x0f, op, 0xc9], 1));
+            list.push((vec![0x66, 0x45, 0x0f, op, 0xca], 1));
+        }
+        // Elements that are equal, that differ in their sign, that carry from one
+        // element into where the next would be, and whose products need 64 bits.
+        let values: [[u64; 2]; 6] = [
+            [0x0102_0304_0506_0708, 0x090a_0b0c_0d0e_0f10],
+            [0xffff_ffff_ffff_ffff, 0x8000_0000_7fff_ffff],
+            [0x7f80_ff01_8000_7fff, 0x0000_0001_ffff_fffe],
+            [0, 0x8080_8080_8080_8080],
+            [0x0102_0304_0506_0708, 0x8000_0000_7fff_ffff],
+            [0xffff_ffff_0000_0001, 0xdead_beef_cafe_f00d],
+        ];
+        let n = values.len();
+        let checked = sse(&list, n * n, &|case| [values[case % n][0].to_le_bytes(), values[case % n][1].to_le_bytes()].concat(), &|case, c| {
+            fill_xmm(c);
+            (c.xmm[2], c.xmm[3]) = (values[case / n][0], values[case / n][1]);
+            (c.xmm[4], c.xmm[5]) = (values[case % n][0], values[case % n][1]);
+            (c.xmm[18], c.xmm[19]) = (values[case / n][0], values[case / n][1]);
+            (c.xmm[20], c.xmm[21]) = (values[case % n][0], values[case % n][1]);
+            c.reg[RSI] = DATA;
+        });
+        assert_eq!(checked as usize, list.len() * n * n);
+        // Said outright: punpckldq, pmuludq and pcmpgtd of 32-bit elements 1, 2, 3, 4
+        // with 5, 6, 0x80000007, 8.
+        for (op, lo, hi) in [
+            (0x62u8, 0x0000_0005_0000_0001u64, 0x0000_0006_0000_0002u64),
+            (0xf4, 5, 3 * 0x8000_0007),
+            (0x66, 0, 0x0000_0000_ffff_ffff),
+        ] {
+            let (c, _) = checked_run(&[0x66, 0x0f, op, 0xca, 0x0f, 0x05], &|c| {
+                (c.xmm[2], c.xmm[3]) = (0x0000_0002_0000_0001, 0x0000_0004_0000_0003);
+                (c.xmm[4], c.xmm[5]) = (0x0000_0006_0000_0005, 0x0000_0008_8000_0007);
+            });
+            assert_eq!((c.xmm[2], c.xmm[3]), (lo, hi), "opcode {op:#x}");
+        }
+    }
+
+    /// `checked` with no data.
+    fn checked_run(code: &[u8], set: &dyn Fn(&mut Cpu)) -> (Cpu, Mem) {
+        checked(code, &[], set)
+    }
+
+    #[test]
+    fn shuffles_by_every_constant() {
+        // pshufd xmm1, xmm2 / xmm1, xmm1 / xmm1, [rsi] and shufps the same, with each
+        // of the 256 constants.
+        let mut list = Vec::new();
+        for imm in 0..=255u8 {
+            list.push((vec![0x66, 0x0f, 0x70, 0xca, imm], 1));
+            list.push((vec![0x66, 0x0f, 0x70, 0xc9, imm], 1));
+            list.push((vec![0x66, 0x0f, 0x70, 0x0e, imm], 1));
+            list.push((vec![0x0f, 0xc6, 0xca, imm], 1));
+            list.push((vec![0x0f, 0xc6, 0xc9, imm], 1));
+            list.push((vec![0x0f, 0xc6, 0x0e, imm], 1));
+        }
+        let data: Vec<u8> = (0..16u8).map(|i| 0xa0 + i).collect();
+        let n = sse(&list, 1, &|_| data.clone(), &|_, c| {
+            fill_xmm(c);
+            (c.xmm[2], c.xmm[3]) = (0x1111_1111_0000_0000, 0x3333_3333_2222_2222);
+            (c.xmm[4], c.xmm[5]) = (0x5555_5555_4444_4444, 0x7777_7777_6666_6666);
+            c.reg[RSI] = DATA;
+        });
+        assert_eq!(n as usize, list.len());
+        // Said outright: pshufd by 1Bh turns the four end for end; shufps by DDh is
+        // the odd elements of the register and then of the operand.
+        let (c, _) = checked_run(&[0x66, 0x0f, 0x70, 0xda, 0x1b, 0x0f, 0xc6, 0xca, 0xdd, 0x0f, 0x05], &|c| {
+            (c.xmm[2], c.xmm[3]) = (0x1111_1111_0000_0000, 0x3333_3333_2222_2222);
+            (c.xmm[4], c.xmm[5]) = (0x5555_5555_4444_4444, 0x7777_7777_6666_6666);
+        });
+        assert_eq!((c.xmm[6], c.xmm[7]), (0x6666_6666_7777_7777, 0x4444_4444_5555_5555));
+        assert_eq!((c.xmm[2], c.xmm[3]), (0x3333_3333_1111_1111, 0x7777_7777_5555_5555));
+    }
+
+    #[test]
+    fn packed_shifts_by_every_count() {
+        // psrlw, psraw, psllw; psrld, psrad, pslld; psrlq, psllq: of xmm1 and of
+        // xmm9, by nothing, by less than the width, by the width, and by more.
+        let mut list = Vec::new();
+        for (op, fields) in [(0x71u8, &[2u8, 4, 6][..]), (0x72, &[2, 4, 6]), (0x73, &[2, 6])] {
+            for &field in fields {
+                for by in [0u8, 1, 7, 8, 15, 16, 17, 24, 31, 32, 33, 63, 64, 65, 128, 255] {
+                    list.push((vec![0x66, 0x0f, op, 0xc1 | field << 3, by], 1));
+                    list.push((vec![0x66, 0x41, 0x0f, op, 0xc1 | field << 3, by], 1));
+                }
+            }
+        }
+        let values: [[u64; 2]; 3] = [[0x8001_7fff_8000_0001, 0xffff_ffff_0000_0001], [0x0123_4567_89ab_cdef, 0xfedc_ba98_7654_3210], [u64::MAX, 1 << 63]];
+        let n = sse(&list, values.len(), &|_| Vec::new(), &|case, c| {
+            fill_xmm(c);
+            (c.xmm[2], c.xmm[3], c.xmm[18], c.xmm[19]) = (values[case][0], values[case][1], values[case][1], values[case][0]);
+        });
+        assert_eq!(n as usize, list.len() * values.len());
+        // What is not read: a shift of memory, the shifts of the whole register by
+        // bytes, and a shift of 64 bits with its sign.
+        for code in [&[0x66u8, 0x0f, 0x72, 0x16, 1][..], &[0x66, 0x0f, 0x73, 0xd9, 1], &[0x66, 0x0f, 0x73, 0xf9, 1], &[0x66, 0x0f, 0x73, 0xe1, 1]] {
+            assert!(translate(&guest(code, &[]), CODE, true).is_none(), "{code:02x?}");
+        }
+        // Nor the instructions of the MMX registers, which these opcodes are without
+        // 66h, nor the other shuffles behind PSHUFD's opcode.
+        for code in [&[0x0fu8, 0xfe, 0xca][..], &[0x0f, 0x72, 0xd1, 1], &[0xf3, 0x0f, 0x70, 0xca, 0], &[0xf2, 0x0f, 0x70, 0xca, 0], &[0x66, 0x0f, 0xc6, 0xca, 0]] {
+            assert!(translate(&guest(code, &[]), CODE, true).is_none(), "{code:02x?}");
+        }
+    }
 }

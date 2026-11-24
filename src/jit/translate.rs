@@ -19,7 +19,7 @@
 //!   adds the block's to it, so that a block may go on to the next without Rust
 //!   between (R009).
 
-use super::a64::{self, Cond, Fp, FpSize, Logic, Mem as Op, Shift, Size, VLogic};
+use super::a64::{self, Cond, Fp, FpSize, Lane, Logic, Mem as Op, Shift, Size, V3, VLogic, VShift};
 use super::{BASE, CPU, KEPT_D8, LEFT_AT_END, LEFT_FOR_THE_INTERPRETER, OUT, RAN, REASON, TABLE, TABLE_BITS, XMM_LOADED};
 use crate::cpu::{Cpu, REC_ADC, REC_ADD, REC_ADD_BY_RESULT, REC_BSF, REC_BSR, REC_FLOAT, REC_IMUL, REC_LOGIC, REC_MUL, REC_SBB, REC_SHIFT, REC_SUB, REC_SUB_BY_RESULT};
 use crate::mem::Mem;
@@ -114,7 +114,14 @@ fn is_sse(op: u16) -> bool {
         op,
         0x110 | 0x111 | 0x128 | 0x129 | 0x12a | 0x12c | 0x12e | 0x12f | 0x151 | 0x154..=0x15a | 0x15c..=0x15f
             | 0x16e | 0x16f | 0x17e | 0x17f | 0x1d6 | 0x1db | 0x1df | 0x1eb | 0x1ef
-    )
+    ) || is_packed(op)
+}
+
+/// The packed instructions of whole numbers (R021), and SHUFPS with them: PUNPCKL and
+/// PUNPCKH of each size, PCMPGT and PCMPEQ, PSHUFD, the shifts by a constant, PADD
+/// and PSUB of each size, PMULUDQ.
+fn is_packed(op: u16) -> bool {
+    matches!(op, 0x160..=0x162 | 0x164..=0x166 | 0x168..=0x16a | 0x16c | 0x16d | 0x170..=0x176 | 0x1c6 | 0x1d4 | 0x1f4 | 0x1f8..=0x1fe)
 }
 
 /// Is it one with this prefix?
@@ -131,6 +138,10 @@ fn sse_with(op: u16, pre: u8) -> bool {
         0x16e | 0x1d6 | 0x1db | 0x1df | 0x1eb | 0x1ef => pre == 1,
         // The scalar arithmetic and the conversions.
         0x12a | 0x12c | 0x151 | 0x158..=0x15a | 0x15c..=0x15f => pre == 2 || pre == 3,
+        // SHUFPS has no prefix; the packed integers have 66h (without it they are the
+        // MMX registers', and PSHUFD is another shuffle with F3h and with F2h).
+        0x1c6 => pre == 0,
+        op if is_packed(op) => pre == 1,
         _ => false,
     }
 }
@@ -209,6 +220,8 @@ fn read(bytes: &[u8], rip: u64) -> Option<Ins> {
         _ => 4,
     };
     let (modrm, mut imm) = match op {
+        // The shuffles and the shifts by a constant have a byte after the operand.
+        0x170..=0x173 | 0x1c6 => (true, 1),
         _ if sse => (true, 0),
         0x01 | 0x03 | 0x09 | 0x0b | 0x21 | 0x23 | 0x29 | 0x2b | 0x31 | 0x33 | 0x39 | 0x3b => (true, 0),
         0x11 | 0x13 | 0x19 | 0x1b => (true, 0),
@@ -285,7 +298,15 @@ fn read(bytes: &[u8], rip: u64) -> Option<Ins> {
         ins.imm = end.wrapping_add(ins.imm as u64) as i64;
     }
     if sse {
-        return sse_with(op, pre).then_some(ins);
+        // Of the shifts by a constant: of a register, to the right without and with
+        // the sign and to the left (fields 2, 4 and 6); of 64 bits not with the sign
+        // (those fields of 73h shift the whole register by bytes).
+        let shift_ok = match op {
+            0x171 | 0x172 => matches!(ins.rm, Rm::Reg(_)) && matches!(ins.reg & 7, 2 | 4 | 6),
+            0x173 => matches!(ins.rm, Rm::Reg(_)) && matches!(ins.reg & 7, 2 | 6),
+            _ => true,
+        };
+        return (sse_with(op, pre) && shift_ok).then_some(ins);
     }
     if f2 {
         return None;
@@ -974,6 +995,82 @@ impl Emit<'_> {
                 self.bail_if_unordered(at, n);
                 self.put(a64::ins_low(to_double, reg, V0));
             }
+            // Element by element, and the layings side by side: one instruction of
+            // the host's each. PUNPCKL is ZIP1 and PUNPCKH is ZIP2.
+            0x160..=0x162 | 0x164..=0x166 | 0x168..=0x16a | 0x16c | 0x16d | 0x174..=0x176 | 0x1d4 | 0x1f8..=0x1fe => {
+                let b = self.fsrc(ins.rm, FpSize::Q);
+                let (op, lane) = match ins.op {
+                    0x160..=0x162 => (V3::Zip1, ins.op - 0x160),
+                    0x164..=0x166 => (V3::Cmgt, ins.op - 0x164),
+                    0x168..=0x16a => (V3::Zip2, ins.op - 0x168),
+                    0x16c => (V3::Zip1, 3),
+                    0x16d => (V3::Zip2, 3),
+                    0x174..=0x176 => (V3::Cmeq, ins.op - 0x174),
+                    0x1d4 => (V3::Add, 3),
+                    0x1f8..=0x1fb => (V3::Sub, ins.op - 0x1f8),
+                    _ => (V3::Add, ins.op - 0x1fc),
+                };
+                self.put(a64::vec3(op, lane_of(lane), reg, reg, b));
+            }
+            // PMULUDQ: the 64-bit products of the lower halves of the two 64-bit
+            // elements of each.
+            0x1f4 => {
+                let b = self.fsrc(ins.rm, FpSize::Q);
+                self.put(a64::xtn_2d(V0, reg));
+                self.put(a64::xtn_2d(V1, b));
+                self.put(a64::umull_2d(reg, V0, V1));
+            }
+            // PSHUFD: each element of the register is the operand's element that two
+            // bits of the constant name.
+            0x170 => {
+                let b = self.fsrc(ins.rm, FpSize::Q);
+                let pick = |i: u32| ins.imm as u32 >> (2 * i) & 3;
+                if (1..4).all(|i| pick(i) == pick(0)) {
+                    self.put(a64::dup_s(reg, b, pick(0)));
+                } else {
+                    // Into another register if the operand is the one written.
+                    let to = if b == reg { V0 } else { reg };
+                    for i in 0..4 {
+                        self.put(a64::ins_s(to, i, b, pick(i)));
+                    }
+                    if to != reg {
+                        self.put(a64::vlogic(VLogic::Orr, reg, to, to));
+                    }
+                }
+            }
+            // SHUFPS: two elements of the register named by the constant, then two
+            // of the operand. The odd ones of both and the even ones of both are one
+            // instruction of the host's.
+            0x1c6 => {
+                let b = self.fsrc(ins.rm, FpSize::Q);
+                let pick = |i: u32| ins.imm as u32 >> (2 * i) & 3;
+                match ins.imm as u8 {
+                    0xdd => self.put(a64::vec3(V3::Uzp2, Lane::S, reg, reg, b)),
+                    0x88 => self.put(a64::vec3(V3::Uzp1, Lane::S, reg, reg, b)),
+                    _ => {
+                        for i in 0..4 {
+                            self.put(a64::ins_s(V0, i, if i < 2 { reg } else { b }, pick(i)));
+                        }
+                        self.put(a64::vlogic(VLogic::Orr, reg, V0, V0));
+                    }
+                }
+            }
+            // The shifts of every element by a constant. By the element's width or
+            // more, x86 gives nothing (or, with the sign, the sign everywhere); the
+            // host's instruction has no such count.
+            0x171..=0x173 => {
+                let Rm::Reg(d) = ins.rm else { unreachable!("a shift of memory was read") };
+                let lane = lane_of(ins.op - 0x170);
+                let bits = 8u32 << lane as u32;
+                let by = ins.imm as u8 as u32;
+                match (ins.reg & 7, by) {
+                    (_, 0) => {}
+                    (4, _) => self.put(a64::vshift(VShift::Sshr, lane, d, d, by.min(bits - 1))),
+                    (_, _) if by >= bits => self.put(a64::vlogic(VLogic::Eor, d, d, d)),
+                    (2, _) => self.put(a64::vshift(VShift::Ushr, lane, d, d, by)),
+                    _ => self.put(a64::vshift(VShift::Shl, lane, d, d, by)),
+                }
+            }
             _ => unreachable!("an SSE opcode that is read and not translated"),
         }
         if sse_spends_flags(ins.op) {
@@ -1266,6 +1363,15 @@ impl Emit<'_> {
         self.put(a64::mem_imm(Size::X, Op::Store, T0, CPU, offset_of!(Cpu, rip) as u32));
         self.put(a64::movz(true, REASON, LEFT_AT_END as u16, 0));
         self.put(a64::br(OUT));
+    }
+}
+
+fn lane_of(n: u16) -> Lane {
+    match n {
+        0 => Lane::B,
+        1 => Lane::H,
+        2 => Lane::S,
+        _ => Lane::D,
     }
 }
 

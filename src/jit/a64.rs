@@ -423,6 +423,76 @@ pub fn fp_mem(size: FpSize, load: bool, rt: u8, rn: u8, rm: u8) -> u32 {
     form | (load as u32) << 22 | r(rm) << 16 | r(rn) << 5 | r(rt)
 }
 
+/// The size of the elements a vector instruction works on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Lane {
+    B = 0,
+    H = 1,
+    S = 2,
+    D = 3,
+}
+
+/// The vector instructions of whole numbers with two operands, element by element:
+/// sum, difference, all ones where equal, all ones where the first is the greater
+/// (signed); and the ones that lay elements side by side: ZIP1 and ZIP2 take the
+/// lower and the upper halves of both in turn, UZP1 and UZP2 the even and the odd
+/// elements of the first and then of the second.
+#[derive(Clone, Copy)]
+pub enum V3 {
+    Add = 0x4e20_8400,
+    Sub = 0x6e20_8400,
+    Cmeq = 0x6e20_8c00,
+    Cmgt = 0x4e20_3400,
+    Zip1 = 0x4e00_3800,
+    Zip2 = 0x4e00_7800,
+    Uzp1 = 0x4e00_1800,
+    Uzp2 = 0x4e00_5800,
+}
+
+pub fn vec3(op: V3, lane: Lane, rd: u8, rn: u8, rm: u8) -> u32 {
+    op as u32 | (lane as u32) << 22 | r(rm) << 16 | r(rn) << 5 | r(rd)
+}
+
+/// The lower halves of two 64-bit elements, as two of 32 bits in the lower half of
+/// the register written (the rest zero).
+pub fn xtn_2d(rd: u8, rn: u8) -> u32 {
+    0x0ea1_2800 | r(rn) << 5 | r(rd)
+}
+
+/// The two 64-bit products of the two lower 32-bit elements of each, unsigned.
+pub fn umull_2d(rd: u8, rn: u8, rm: u8) -> u32 {
+    0x2ea0_c000 | r(rm) << 16 | r(rn) << 5 | r(rd)
+}
+
+/// 32-bit element `j` of `rn` to element `i` of `rd`, the rest of it kept; and to all
+/// four of `rd`.
+pub fn ins_s(rd: u8, i: u32, rn: u8, j: u32) -> u32 {
+    0x6e00_0400 | (i << 3 | 4) << 16 | j << 13 | r(rn) << 5 | r(rd)
+}
+
+pub fn dup_s(rd: u8, rn: u8, j: u32) -> u32 {
+    0x4e00_0400 | (j << 3 | 4) << 16 | r(rn) << 5 | r(rd)
+}
+
+/// Every element shifted by a constant: to the right without and with its sign (by
+/// 1 to the element's width), and to the left (by less than the width).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum VShift {
+    Ushr,
+    Sshr,
+    Shl,
+}
+
+pub fn vshift(op: VShift, lane: Lane, rd: u8, rn: u8, by: u32) -> u32 {
+    let bits = 8 << lane as u32;
+    let (form, field) = match op {
+        VShift::Ushr => (0x6f00_0400, 2 * bits - by),
+        VShift::Sshr => (0x4f00_0400, 2 * bits - by),
+        VShift::Shl => (0x4f00_5400, bits + by),
+    };
+    form | field << 16 | r(rn) << 5 | r(rd)
+}
+
 /// A store of the lower halves of two vector registers, and a load of all of two, at a
 /// register (31: the stack pointer) and a constant that is a multiple of their size.
 pub fn stp_d(rt: u8, rt2: u8, rn: u8, offset: u32) -> u32 {
@@ -646,6 +716,38 @@ mod tests {
             (fp_mem(FpSize::Q, false, 3, 20, 4), 0x3ca46a83, "str q3, [x20, x4]"),
             (ccmn_imm(false, 16, 1, 1, Cond::Vc), 0x3a417a01, "ccmn w16, #1, #1, vc"),
             (ccmn_imm(true, 16, 1, 1, Cond::Vc), 0xba417a01, "ccmn x16, #1, #1, vc"),
+            (vec3(V3::Add, Lane::B, 1, 1, 17), 0x4e318421, "add v1.16b, v1.16b, v17.16b"),
+            (vec3(V3::Add, Lane::H, 1, 1, 2), 0x4e628421, "add v1.8h, v1.8h, v2.8h"),
+            (vec3(V3::Add, Lane::S, 15, 15, 3), 0x4ea385ef, "add v15.4s, v15.4s, v3.4s"),
+            (vec3(V3::Add, Lane::D, 1, 1, 2), 0x4ee28421, "add v1.2d, v1.2d, v2.2d"),
+            (vec3(V3::Sub, Lane::S, 1, 1, 2), 0x6ea28421, "sub v1.4s, v1.4s, v2.4s"),
+            (vec3(V3::Sub, Lane::D, 1, 1, 17), 0x6ef18421, "sub v1.2d, v1.2d, v17.2d"),
+            (vec3(V3::Cmeq, Lane::B, 1, 1, 2), 0x6e228c21, "cmeq v1.16b, v1.16b, v2.16b"),
+            (vec3(V3::Cmeq, Lane::S, 1, 1, 2), 0x6ea28c21, "cmeq v1.4s, v1.4s, v2.4s"),
+            (vec3(V3::Cmgt, Lane::S, 1, 1, 2), 0x4ea23421, "cmgt v1.4s, v1.4s, v2.4s"),
+            (vec3(V3::Cmgt, Lane::H, 1, 1, 17), 0x4e713421, "cmgt v1.8h, v1.8h, v17.8h"),
+            (vec3(V3::Zip1, Lane::S, 1, 1, 2), 0x4e823821, "zip1 v1.4s, v1.4s, v2.4s"),
+            (vec3(V3::Zip2, Lane::S, 1, 1, 2), 0x4e827821, "zip2 v1.4s, v1.4s, v2.4s"),
+            (vec3(V3::Zip1, Lane::D, 1, 1, 2), 0x4ec23821, "zip1 v1.2d, v1.2d, v2.2d"),
+            (vec3(V3::Zip2, Lane::B, 1, 1, 2), 0x4e027821, "zip2 v1.16b, v1.16b, v2.16b"),
+            (vec3(V3::Uzp1, Lane::S, 1, 1, 2), 0x4e821821, "uzp1 v1.4s, v1.4s, v2.4s"),
+            (vec3(V3::Uzp2, Lane::S, 1, 1, 17), 0x4e915821, "uzp2 v1.4s, v1.4s, v17.4s"),
+            (xtn_2d(16, 1), 0x0ea12830, "xtn v16.2s, v1.2d"),
+            (xtn_2d(17, 17), 0x0ea12a31, "xtn v17.2s, v17.2d"),
+            (umull_2d(1, 16, 17), 0x2eb1c201, "umull v1.2d, v16.2s, v17.2s"),
+            (ins_s(16, 0, 2, 2), 0x6e044450, "mov v16.s[0], v2.s[2]"),
+            (ins_s(16, 3, 17, 1), 0x6e1c2630, "mov v16.s[3], v17.s[1]"),
+            (ins_s(1, 2, 2, 0), 0x6e140441, "mov v1.s[2], v2.s[0]"),
+            (dup_s(1, 2, 0), 0x4e040441, "dup v1.4s, v2.s[0]"),
+            (dup_s(1, 17, 3), 0x4e1c0621, "dup v1.4s, v17.s[3]"),
+            (vshift(VShift::Ushr, Lane::S, 1, 1, 7), 0x6f390421, "ushr v1.4s, v1.4s, #7"),
+            (vshift(VShift::Ushr, Lane::D, 1, 1, 32), 0x6f600421, "ushr v1.2d, v1.2d, #32"),
+            (vshift(VShift::Ushr, Lane::H, 1, 1, 15), 0x6f110421, "ushr v1.8h, v1.8h, #15"),
+            (vshift(VShift::Sshr, Lane::S, 1, 1, 31), 0x4f210421, "sshr v1.4s, v1.4s, #31"),
+            (vshift(VShift::Sshr, Lane::H, 1, 1, 3), 0x4f1d0421, "sshr v1.8h, v1.8h, #3"),
+            (vshift(VShift::Shl, Lane::S, 1, 1, 24), 0x4f385421, "shl v1.4s, v1.4s, #24"),
+            (vshift(VShift::Shl, Lane::D, 1, 1, 63), 0x4f7f5421, "shl v1.2d, v1.2d, #63"),
+            (vshift(VShift::Shl, Lane::H, 1, 1, 1), 0x4f115421, "shl v1.8h, v1.8h, #1"),
             (stp_d(8, 9, 31, 96), 0x6d0627e8, "stp d8, d9, [sp, #96]"),
             (stp_d(14, 15, 31, 144), 0x6d093fee, "stp d14, d15, [sp, #144]"),
             (ldp_q(0, 1, 16, 0), 0xad400600, "ldp q0, q1, [x16]"),
@@ -656,7 +758,7 @@ mod tests {
         for (ours, theirs, name) in cases {
             assert_eq!(ours, theirs, "{name}: {ours:08x}, the assembler {theirs:08x}");
         }
-        assert_eq!(cases.len(), 201);
+        assert_eq!(cases.len(), 233);
     }
 
     #[test]
