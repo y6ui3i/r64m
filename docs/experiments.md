@@ -495,3 +495,28 @@ program, three races):
   with SYSCALL, which writes RCX, and then compared RCX. They end with UD2 now.
 
 **Next.** R007: the x87's own work, which the profile showed third and after.
+
+## R007: `p_ldbl` past g64m's interpreter: the x87's own work (2026-11-24)
+
+The card, written before the run.
+
+- **Hypothesis**: with the search gone, the profile of `p_ldbl` (taken after R006) has
+  three things of the x87's own that are work not asked for by the instruction:
+  1. `now` (279 samples of some 3,300): every register form makes ST(0) and ST(1)
+     into f64 before it looks at which instruction it is, and only the functions of
+     the library and FXAM use them;
+  2. the hand-over (`Run::x87`, 424): 112 bytes are cleared for every instruction,
+     for an operand that is ten bytes at most unless it is an environment;
+  3. the division (`soft_div` and the library's 128-bit division under it, 220): g64m
+     does it as two divisions of 64 bits (its E161).
+  Together they are over a quarter of the samples; r64m is a tenth behind.
+- **What is changed from before**: R006 changed what lay round the x87 (the search, the
+  copy of the operand). This changes the x87's code itself, in those three places.
+- **Next move for each result**:
+  - Past g64m on `p_ldbl` in the middle race of three → all 23 are past; the
+    interpreter is left and the JIT's design (ADR 0014) is next
+  - Still behind → said as found with the profile then; what is left is the
+    arithmetic in integers that makes the x87 right, and the owner's to say whether
+    one primitive at nine tenths is worth more
+- **Cut-off**: these three and no more. The traces of `f_x87`, `j_x87`, `c_ld`,
+  `a_prefix` and `x_fxsave` are what say the x87 is still right; the race is R006's.
