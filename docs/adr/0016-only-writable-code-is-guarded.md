@@ -1,6 +1,6 @@
 # 0016: Only code the guest may write is guarded against writes
 
-**Status**: proposed (2026-11-25). Two points are the owner's: A and B below.
+**Status**: accepted (2026-11-25, the owner: the two points, A and B, as proposed)
 
 ## Context
 

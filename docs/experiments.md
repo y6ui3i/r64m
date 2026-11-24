@@ -1822,3 +1822,27 @@ beside, was 2.8% faster and p_loop the same.
 
 So with this rule 22 of the 23 primitives would be past QEMU on this Mac. The build is
 not kept; ADR 0016 proposes the rule.
+
+## R023: ADR 0016 as built (2026-11-25)
+
+ADR 0016 was accepted as proposed.
+
+The card, written before the run.
+
+- **Hypothesis**: the rule built to be kept gives what R022's build gave: p_sha with no
+  store beside code and about 1.5 times QEMU, the other primitives where they were
+  (p_fill perhaps a little faster), and every program right on both hosts.
+- **What is changed from before** (R021): a block is guarded (its host pages marked,
+  its pages counted for "is this store to code?") only if the guest may write one of
+  the guest's pages it lies in or rests on. The tests of stores to code and beside it
+  have their code on a page the guest may write, where those cases still are; a new
+  test holds that code on a page it may not write is not marked.
+- **Next move for each result**:
+  - As R022 → the JIT's list in the README is done but for the x87; the next work is
+    the goal's (ADR 0011): what a real program needs before it runs at all
+  - p_sha differs from R022's build by more than 2% → the two builds' blocks are
+    compared before anything else
+  - A test of the old cases cannot be made to hold on a writable page → the case is
+    looked at: it may have rested on the mark for something else
+- **Cut-off**: one race of all primitives (three at once: this build, R021's, g64m's
+  JIT), after every test passes on both hosts.
