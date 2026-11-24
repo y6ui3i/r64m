@@ -50,6 +50,10 @@ pub const REASON: u8 = 16;
 pub const LEFT_AT_END: u64 = 0;
 /// The host faulted in it: `Cpu::fault_pc` says where.
 pub const LEFT_BY_FAULT: u64 = 1;
+/// A block left for the interpreter to run the instruction RIP is on, which the block
+/// does not do in every case (a division that would fault): whatever block begins
+/// there, it is the interpreter's this time.
+pub const LEFT_FOR_THE_INTERPRETER: u64 = 2;
 
 /// Goes into generated code at `code` with the guest's registers loaded from `cpu`,
 /// and comes back when that code jumps to the way out (the address in x24), with the

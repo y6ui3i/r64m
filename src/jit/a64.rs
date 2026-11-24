@@ -78,6 +78,46 @@ pub fn arith_imm(wide: bool, sub: bool, flags: bool, rd: u8, rn: u8, imm: u32, h
     sf(wide) | (sub as u32) << 30 | (flags as u32) << 29 | 0x1100_0000 | (high as u32) << 22 | imm << 10 | r(rn) << 5 | r(rd)
 }
 
+/// ADCS, or SBCS (`sub`): with the host's carry, and setting its flags.
+pub fn with_carry(wide: bool, sub: bool, rd: u8, rn: u8, rm: u8) -> u32 {
+    sf(wide) | (sub as u32) << 30 | 0x3a00_0000 | r(rm) << 16 | r(rn) << 5 | r(rd)
+}
+
+/// A compare of a register with another shifted right by `by`, its sign kept.
+pub fn cmp_asr(rn: u8, rm: u8, by: u32) -> u32 {
+    arith(true, true, true, ZR, rn, rm, by) | 2 << 22
+}
+
+/// OR of a 64-bit register and another moved left by `by`.
+pub fn orr_lsl(rd: u8, rn: u8, rm: u8, by: u32) -> u32 {
+    logic(true, Logic::Orr, rd, rn, rm) | by << 10
+}
+
+/// The upper half of the product of two 64-bit registers.
+pub fn mulh(signed: bool, rd: u8, rn: u8, rm: u8) -> u32 {
+    (if signed { 0x9b40_7c00 } else { 0x9bc0_7c00 }) | r(rm) << 16 | r(rn) << 5 | r(rd)
+}
+
+/// The 64-bit product of two 32-bit registers.
+pub fn mull(signed: bool, rd: u8, rn: u8, rm: u8) -> u32 {
+    (if signed { 0x9b20_7c00 } else { 0x9ba0_7c00 }) | r(rm) << 16 | r(rn) << 5 | r(rd)
+}
+
+/// A quotient, cut off toward zero; a divisor of zero gives zero.
+pub fn div(wide: bool, signed: bool, rd: u8, rn: u8, rm: u8) -> u32 {
+    sf(wide) | (if signed { 0x1ac0_0c00 } else { 0x1ac0_0800 }) | r(rm) << 16 | r(rn) << 5 | r(rd)
+}
+
+/// `ra` less the product of `rn` and `rm`.
+pub fn msub(wide: bool, rd: u8, rn: u8, rm: u8, ra: u8) -> u32 {
+    sf(wide) | 0x1b00_8000 | r(rm) << 16 | r(ra) << 10 | r(rn) << 5 | r(rd)
+}
+
+/// A register's bytes end for end.
+pub fn rev(wide: bool, rd: u8, rn: u8) -> u32 {
+    (if wide { 0xdac0_0c00 } else { 0x5ac0_0800 }) | r(rn) << 5 | r(rd)
+}
+
 #[derive(Clone, Copy)]
 pub enum Logic {
     And = 0,
@@ -183,6 +223,11 @@ pub fn bfi(rd: u8, rn: u8, lsb: u32, width: u32) -> u32 {
 /// `width` bits of a 64-bit register from bit `lsb` up, the rest zero.
 pub fn ubfx(rd: u8, rn: u8, lsb: u32, width: u32) -> u32 {
     bitfield(true, false, rd, rn, lsb, lsb + width - 1)
+}
+
+/// `width` bits of a register from bit `lsb` up, with their sign.
+pub fn sbfx(wide: bool, rd: u8, rn: u8, lsb: u32, width: u32) -> u32 {
+    bitfield(wide, true, rd, rn, lsb, lsb + width - 1)
 }
 
 /// The low `bits` (8, 16 or 32) of a register with their sign, to all of a register.
@@ -382,6 +427,33 @@ mod tests {
             (lsr(false, 29, 29, 16), 0x53107fbd, "lsr w29, w29, #16"),
             (arith(false, false, true, 29, 29, 30, 0), 0x2b1e03bd, "adds w29, w29, w30"),
             (ubfx(16, 3, 8, 8), 0xd3483c70, "ubfx x16, x3, #8, #8"),
+            (with_carry(true, false, 1, 2, 3), 0xba030041, "adcs x1, x2, x3"),
+            (with_carry(false, false, 1, 2, 3), 0x3a030041, "adcs w1, w2, w3"),
+            (with_carry(true, true, 1, 2, 3), 0xfa030041, "sbcs x1, x2, x3"),
+            (with_carry(false, true, 1, 2, 3), 0x7a030041, "sbcs w1, w2, w3"),
+            (mulh(false, 1, 2, 3), 0x9bc37c41, "umulh x1, x2, x3"),
+            (mulh(true, 1, 2, 3), 0x9b437c41, "smulh x1, x2, x3"),
+            (mull(false, 1, 2, 3), 0x9ba37c41, "umull x1, w2, w3"),
+            (mull(true, 1, 2, 3), 0x9b237c41, "smull x1, w2, w3"),
+            (div(true, false, 1, 2, 3), 0x9ac30841, "udiv x1, x2, x3"),
+            (div(false, false, 1, 2, 3), 0x1ac30841, "udiv w1, w2, w3"),
+            (div(true, true, 1, 2, 3), 0x9ac30c41, "sdiv x1, x2, x3"),
+            (div(false, true, 1, 2, 3), 0x1ac30c41, "sdiv w1, w2, w3"),
+            (msub(true, 1, 2, 3, 4), 0x9b039041, "msub x1, x2, x3, x4"),
+            (msub(false, 1, 2, 3, 4), 0x1b039041, "msub w1, w2, w3, w4"),
+            (rev(true, 1, 2), 0xdac00c41, "rev x1, x2"),
+            (rev(false, 1, 2), 0x5ac00841, "rev w1, w2"),
+            (sbfx(true, 1, 2, 8, 8), 0x93483c41, "sbfx x1, x2, #8, #8"),
+            (sbfx(false, 1, 2, 8, 8), 0x13083c41, "sbfx w1, w2, #8, #8"),
+            (arith_imm(false, true, true, ZR, 17, 1, false), 0x7100063f, "subs wzr, w17, #1"),
+            (arith(true, true, true, ZR, ZR, 17, 0), 0xeb1103ff, "cmp xzr, x17"),
+            (bfi(21, 17, 16, 1), 0xb3700235, "bfi x21, x17, #16, #1"),
+            (cmp_asr(2, 0, 63), 0xeb80fc5f, "cmp x2, x0, asr #63"),
+            (orr_lsl(29, 30, 2, 32), 0xaa0283dd, "orr x29, x30, x2, lsl #32"),
+            (arith_imm(true, false, true, ZR, 3, 1, false), 0xb100047f, "cmn x3, #1"),
+            (arith_imm(false, false, true, ZR, 3, 1, false), 0x3100047f, "cmn w3, #1"),
+            (cbz(true, true, 2, 2), 0xb5000042, "cbnz x2, .+8"),
+            (lsr(true, 26, 25, 32), 0xd360ff3a, "lsr x26, x25, #32"),
             (ubfx(17, 16, 0, 14), 0xd3403611, "ubfx x17, x16, #0, #14"),
             (ubfx(1, 2, 3, 5), 0xd3431c41, "ubfx x1, x2, #3, #5"),
             (arith(true, false, false, 17, 28, 17, 4), 0x8b111391, "add x17, x28, x17, lsl #4"),
@@ -406,7 +478,7 @@ mod tests {
         for (ours, theirs, name) in cases {
             assert_eq!(ours, theirs, "{name}: {ours:08x}, the assembler {theirs:08x}");
         }
-        assert_eq!(cases.len(), 125);
+        assert_eq!(cases.len(), 152);
     }
 
     #[test]

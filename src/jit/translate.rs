@@ -20,8 +20,8 @@
 //!   between (R009).
 
 use super::a64::{self, Cond, Logic, Mem as Op, Shift, Size};
-use super::{BASE, CPU, LEFT_AT_END, OUT, RAN, REASON, TABLE, TABLE_BITS};
-use crate::cpu::{Cpu, REC_ADD, REC_ADD_BY_RESULT, REC_BSF, REC_BSR, REC_IMUL, REC_LOGIC, REC_SHIFT, REC_SUB, REC_SUB_BY_RESULT};
+use super::{BASE, CPU, LEFT_AT_END, LEFT_FOR_THE_INTERPRETER, OUT, RAN, REASON, TABLE, TABLE_BITS};
+use crate::cpu::{Cpu, REC_ADC, REC_ADD, REC_ADD_BY_RESULT, REC_BSF, REC_BSR, REC_IMUL, REC_LOGIC, REC_MUL, REC_SBB, REC_SHIFT, REC_SUB, REC_SUB_BY_RESULT};
 use crate::mem::Mem;
 use std::mem::offset_of;
 
@@ -137,13 +137,15 @@ fn read(bytes: &[u8], rip: u64) -> Option<Ins> {
     };
     let (modrm, mut imm) = match op {
         0x01 | 0x03 | 0x09 | 0x0b | 0x21 | 0x23 | 0x29 | 0x2b | 0x31 | 0x33 | 0x39 | 0x3b => (true, 0),
+        0x11 | 0x13 | 0x19 | 0x1b => (true, 0),
+        0x1c8..=0x1cf => (false, 0),
         0x63 | 0x85 | 0x89 | 0x8b | 0x8d | 0xd1 | 0xd3 | 0xf7 | 0xff => (true, 0),
         0x11e | 0x11f | 0x1b6 | 0x1b7 | 0x1bc | 0x1bd | 0x1be | 0x1bf => (true, 0),
         0x140..=0x14f | 0x190..=0x19f | 0x1af => (true, 0),
         0x81 | 0xc7 | 0x69 => (true, whole),
         0x83 | 0xc1 | 0x6b => (true, 1),
         // The arithmetic of the A register and a constant, and TEST of them.
-        0x05 | 0x0d | 0x25 | 0x2d | 0x35 | 0x3d | 0xa9 => (false, whole),
+        0x05 | 0x0d | 0x15 | 0x1d | 0x25 | 0x2d | 0x35 | 0x3d | 0xa9 => (false, whole),
         0x50..=0x5f | 0x90 | 0x98 | 0x99 | 0xc3 => (false, 0),
         0x68 | 0xe8 | 0xe9 | 0x180..=0x18f => (false, 4),
         0x6a | 0x70..=0x7f | 0xeb => (false, 1),
@@ -210,7 +212,7 @@ fn read(bytes: &[u8], rip: u64) -> Option<Ins> {
     }
     // The A register and a constant: read as the same instruction in its general form
     // (81h with the kind in the ModRM byte's field; F7h with field 0 for TEST).
-    if matches!(op, 0x05 | 0x0d | 0x25 | 0x2d | 0x35 | 0x3d | 0xa9) {
+    if matches!(op, 0x05 | 0x0d | 0x15 | 0x1d | 0x25 | 0x2d | 0x35 | 0x3d | 0xa9) {
         ins.reg = if op == 0xa9 { 0 } else { (op >> 3) as u8 };
         ins.op = if op == 0xa9 { 0xf7 } else { 0x81 };
         ins.rm = Rm::Reg(0);
@@ -219,30 +221,32 @@ fn read(bytes: &[u8], rip: u64) -> Option<Ins> {
     let field = ins.reg & 7;
     let register = matches!(ins.rm, Rm::Reg(_));
     // An operand of 8 or 16 bits is translated for the arithmetic and the moves only.
-    let small_ok = matches!(op, 0x01..=0x3b | 0x81 | 0x83 | 0x85 | 0x89 | 0x8b | 0xc7 | 0xf7 | 0x11e | 0x11f | 0x190..=0x19f);
+    let small_ok = matches!(op, 0x01..=0x3b | 0x81 | 0x83 | 0x85 | 0x89 | 0x8b | 0xc1 | 0xc7 | 0xd1 | 0xf7 | 0x11e | 0x11f | 0x190..=0x19f);
+    let small = size < 32;
+    // ADC and SBB are translated at 32 and 64 bits.
+    let with_carry = matches!(op, 0x11 | 0x13 | 0x19 | 0x1b) || matches!(op, 0x81 | 0x83) && matches!(field, 2 | 3);
     // F3h is REP RET before a return, part of ENDBR64 before the hint 0F 1Eh, and
     // nothing before BSF and BSR on a CPU without TZCNT and LZCNT.
     let f3_ok = matches!(op, 0xc3 | 0x11e | 0x1bc | 0x1bd);
     // What is in the list above by its opcode but is not translated in this form.
-    let refused = (size < 32 && !small_ok)
+    let refused = (small && !small_ok)
+        || (small && with_carry)
         || (f3 && !f3_ok)
         || match op {
             // XCHG with R8.
             0x90 => rex & 1 != 0,
             // The one field of C7h that is MOV.
             0xc7 => field != 0,
-            // ADC and SBB read the carry.
-            0x81 | 0x83 => matches!(field, 2 | 3),
             // LEA of a register is not an instruction.
             0x8d => register,
-            // Without REX the byte registers 4 to 7 are AH, CH, DH and BH.
-            0x1b6 | 0x1be => rex == 0 && matches!(ins.rm, Rm::Reg(4..=7)),
             // Of FFh only CALL and JMP through the operand.
             0xff => !matches!(field, 2 | 4),
-            // Of F7h: TEST with a constant, NOT, and NEG of a 32 or 64-bit register.
-            0xf7 => !(matches!(field, 0 | 2) || field == 3 && register && size >= 32),
-            // The shifts and rotations of a register, not through the carry.
-            0xc1 | 0xd1 | 0xd3 => !register || matches!(field, 2 | 3),
+            // Of F7h: TEST with a constant and NOT; NEG of a register, and MUL, IMUL,
+            // DIV and IDIV, at 32 and 64 bits.
+            0xf7 => !(matches!(field, 0 | 2) || field == 3 && register && !small || field >= 4 && !small),
+            // The shifts and rotations of a register, not through the carry; of 8 and
+            // 16 bits the shifts by a constant only.
+            0xc1 | 0xd1 | 0xd3 => !register || matches!(field, 2 | 3) || small && (op == 0xd3 || field < 2),
             _ => false,
         };
     if refused { None } else { Some(ins) }
@@ -255,6 +259,8 @@ fn read(bytes: &[u8], rip: u64) -> Option<Ins> {
 enum Flags {
     /// Writes all six, whatever they were.
     All,
+    /// ADC and SBB: reads the carry, then writes all six.
+    Carry,
     /// Leaves them, or may leave them.
     Kept,
     /// Reads them, or leaves the block.
@@ -264,10 +270,13 @@ enum Flags {
 fn flags_of(ins: &Ins) -> Flags {
     let field = ins.reg & 7;
     match ins.op {
+        0x11 | 0x13 | 0x19 | 0x1b => Flags::Carry,
+        0x81 | 0x83 if matches!(field, 2 | 3) => Flags::Carry,
         0x01..=0x3b | 0x81 | 0x83 | 0x85 | 0x1bc | 0x1bd | 0x69 | 0x6b | 0x1af => Flags::All,
-        0xf7 if field != 2 => Flags::All,
+        // TEST, NEG, MUL and IMUL write them; NOT, DIV and IDIV leave them.
+        0xf7 if matches!(field, 0 | 3 | 4 | 5) => Flags::All,
         // A shift by a constant that is not zero; by CL it may be by nothing.
-        0xc1 if field >= 4 && ins.imm as u32 & (ins.size - 1) != 0 => Flags::All,
+        0xc1 if field >= 4 && ins.imm as u32 & (if ins.size == 64 { 63 } else { 31 }) != 0 => Flags::All,
         0xd1 if field >= 4 => Flags::All,
         0x70..=0x7f | 0x180..=0x18f | 0xc3 | 0xe8 | 0xe9 | 0xeb | 0xff => Flags::Read,
         // CMOVcc and SETcc read them and go on.
@@ -281,12 +290,12 @@ fn flags_of(ins: &Ins) -> Flags {
 fn host_flags_of(ins: &Ins) -> Option<HostFlags> {
     let field = ins.reg & 7;
     match ins.op {
-        0x01 | 0x03 => Some(HostFlags::Add),
-        0x29 | 0x2b | 0x39 | 0x3b => Some(HostFlags::Sub),
+        0x01 | 0x03 | 0x11 | 0x13 => Some(HostFlags::Add),
+        0x19 | 0x1b | 0x29 | 0x2b | 0x39 | 0x3b => Some(HostFlags::Sub),
         0x09 | 0x0b | 0x21 | 0x23 | 0x31 | 0x33 | 0x85 => Some(HostFlags::Logic),
         0x81 | 0x83 => Some(match field {
-            0 => HostFlags::Add,
-            5 | 7 => HostFlags::Sub,
+            0 | 2 => HostFlags::Add,
+            3 | 5 | 7 => HostFlags::Sub,
             _ => HostFlags::Logic,
         }),
         0xf7 if field == 0 => Some(HostFlags::Logic),
@@ -386,10 +395,20 @@ impl Scan<'_> {
             room = room.saturating_sub(1);
             match flags_of(&ins) {
                 Flags::All => return true,
+                // In the block, with the host's flags saying what the carry is, it
+                // reads no record; and after it the flags are its own.
+                Flags::Carry => {
+                    if !(inside && host.and_then(|h| condition(2, h)).is_some()) {
+                        return false;
+                    }
+                    self.asked = true;
+                    return true;
+                }
                 Flags::Kept => {
                     // A shift by CL or a rotation leaves the host's flags no longer
-                    // what a jump would ask (and a rotation may end the block).
-                    if matches!(ins.op, 0xc1 | 0xd1 | 0xd3) {
+                    // what a jump would ask (and a rotation may end the block); so
+                    // does a division, which tests its operands with them.
+                    if matches!(ins.op, 0xc1 | 0xd1 | 0xd3 | 0xf7) {
                         host = None;
                     }
                     at = next;
@@ -600,6 +619,116 @@ impl Emit<'_> {
         self.leave_counted(rip);
     }
 
+    /// The record of an ADC or an SBB: its operands, and the carry that came in (in
+    /// T4, as a number) above the kind.
+    fn record_carry(&mut self, sub: bool, bits: u32, a: u8, b: u8) {
+        if self.skip {
+            return;
+        }
+        self.record(if sub { REC_SBB } else { REC_ADC }, bits, a, Some(b));
+        self.put(a64::bfi(REC_KIND, T4, 16, 1));
+    }
+
+    /// Is the carry what the host's flags can say? (For ADC and SBB.)
+    fn carry_known(&self) -> bool {
+        self.flags.and_then(|f| condition(2, f)).is_some()
+    }
+
+    /// A way out to the interpreter at `at`, the instruction now being translated,
+    /// for the cases of it that are not done here (a division that would fault). `n`
+    /// is how many instructions of the block came before it. Gives back where the
+    /// jumps to it are to be written from: each is a place holding the condition's
+    /// instruction with a distance of zero.
+    fn bail(&mut self, jumps: &[usize], at: u64, n: usize) {
+        // Over the way out, for the case that is done here.
+        let over = self.w.len();
+        self.put(a64::nop());
+        let stub = self.w.len();
+        for &j in jumps {
+            // The distance goes into bits 5 to 23 of a CBZ, CBNZ or B.cond.
+            self.w[j] |= ((stub - j) as u32 & 0x7_ffff) << 5;
+        }
+        // Not a way out that can be joined: the block that begins at `at` may be this
+        // one, and the instruction is the interpreter's this time whatever begins
+        // there.
+        self.put(a64::arith_imm(true, false, false, RAN, RAN, n as u32, false));
+        self.put(a64::mem_imm(Size::X, Op::Store, a64::ZR, CPU, offset_of!(Cpu, left_from) as u32));
+        self.constant(T0, at);
+        self.put(a64::mem_imm(Size::X, Op::Store, T0, CPU, offset_of!(Cpu, rip) as u32));
+        self.put(a64::movz(true, REASON, LEFT_FOR_THE_INTERPRETER as u16, 0));
+        self.put(a64::br(OUT));
+        self.w[over] = a64::b((self.w.len() - over) as i32);
+    }
+
+    /// MUL (unsigned) and IMUL with one operand: the A register by `b`, the product's
+    /// lower half to the A register and its upper half to the D register.
+    fn mul_wide(&mut self, signed: bool, wide: bool, b: u8) {
+        self.record(if signed { REC_IMUL } else { REC_MUL }, if wide { 64 } else { 32 }, 0, Some(b));
+        if wide {
+            self.put(a64::mulh(signed, T4, 0, b));
+            self.put(a64::mul(true, T5, 0, b));
+            self.put(a64::mov(true, 0, T5));
+            self.put(a64::mov(true, 2, T4));
+        } else {
+            self.put(a64::mull(signed, T4, 0, b));
+            self.put(a64::mov(false, 0, T4));
+            self.put(a64::lsr(true, 2, T4, 32));
+        }
+        self.flags = None;
+    }
+
+    /// DIV (unsigned) and IDIV: the D and A registers together by `b`, the quotient
+    /// to the A register and the remainder to the D register. Where x86 would fault
+    /// (a divisor of zero, a quotient that does not fit), and where the dividend's
+    /// upper half is not just the lower's extension so that the host's division
+    /// cannot take it, the instruction is left to the interpreter.
+    fn div_wide(&mut self, signed: bool, wide: bool, b: u8, at: u64, n: usize) {
+        let mut out = Vec::new();
+        let mut jump = |e: &mut Emit, word: u32| {
+            out.push(e.w.len());
+            e.put(word);
+        };
+        if wide {
+            jump(self, a64::cbz(true, false, b, 0));
+            if signed {
+                // The upper half must be the lower's sign, and the divisor not -1
+                // (the one quotient of 64 bits by 64 that does not fit is by -1).
+                self.put(a64::cmp_asr(2, 0, 63));
+                jump(self, a64::b_cond(Cond::Ne, 0));
+                self.put(a64::arith_imm(true, false, true, a64::ZR, b, 1, false));
+                jump(self, a64::b_cond(Cond::Eq, 0));
+            } else {
+                jump(self, a64::cbz(true, true, 2, 0));
+            }
+            self.put(a64::div(true, signed, T4, 0, b));
+            self.put(a64::msub(true, T5, T4, b, 0));
+            self.put(a64::mov(true, 0, T4));
+            self.put(a64::mov(true, 2, T5));
+        } else {
+            // EDX:EAX as one 64-bit number in T4, the divisor as 64 bits in T1.
+            self.put(a64::mov(false, T5, 0));
+            self.put(a64::orr_lsl(T4, T5, 2, 32));
+            self.put(if signed { a64::sxt(true, T1, b, 32) } else { a64::mov(false, T1, b) });
+            jump(self, a64::cbz(true, false, T1, 0));
+            self.put(a64::div(true, signed, T2, T4, T1));
+            // The quotient must fit 32 bits.
+            if signed {
+                self.put(a64::sxt(true, T3, T2, 32));
+                self.put(a64::arith(true, true, true, a64::ZR, T3, T2, 0));
+                jump(self, a64::b_cond(Cond::Ne, 0));
+            } else {
+                self.put(a64::lsr(true, T3, T2, 32));
+                jump(self, a64::cbz(true, true, T3, 0));
+            }
+            self.put(a64::msub(true, T3, T2, T1, T4));
+            self.put(a64::mov(false, 0, T2));
+            self.put(a64::mov(false, 2, T3));
+        }
+        self.bail(&out, at, n);
+        // The tests above used the host's flags.
+        self.flags = None;
+    }
+
     /// Is this a byte register that is the second byte of a register (AH, CH, DH,
     /// BH)? Then it is the register four numbers lower, from bit 8.
     fn high(ins: &Ins, r: u8) -> bool {
@@ -711,6 +840,28 @@ impl Emit<'_> {
         };
         let keeps = !matches!(kind, 7 | 8);
         match kind {
+            2 | 3 => {
+                // ADC and SBB. The carry as the host's flags say it (the caller has
+                // seen that they do) goes into T4 as a number, for the record, and
+                // from there into the host's carry as ADCS or SBCS wants it: x86's
+                // for an addition, its opposite for a subtraction.
+                let sub = kind == 3;
+                match self.flags.and_then(|f| condition(2, f)).expect("the carry is known") {
+                    Jump::If(cond) => self.put(a64::cset(false, T4, cond)),
+                    Jump::Always => self.put(a64::movz(false, T4, 1, 0)),
+                    Jump::Never => self.put(a64::movz(false, T4, 0, 0)),
+                }
+                if at.is_none() {
+                    self.record_carry(sub, bits, a, src);
+                }
+                if sub {
+                    self.put(a64::arith(true, true, true, a64::ZR, a64::ZR, T4, 0));
+                } else {
+                    self.put(a64::arith_imm(false, true, true, a64::ZR, T4, 1, false));
+                }
+                self.put(a64::with_carry(wide, sub, to, a, src));
+                self.flags = Some(if sub { HostFlags::Sub } else { HostFlags::Add });
+            }
             0 | 5 | 7 => {
                 let sub = kind != 0;
                 // A register's old value is recorded before it is written over.
@@ -736,6 +887,9 @@ impl Emit<'_> {
                 self.put(a64::mem_reg(size(bits), Op::Store, to, BASE, at));
             }
             // Memory's old value is still in T2: recorded when the store is done.
+            if matches!(kind, 2 | 3) {
+                self.record_carry(kind == 3, bits, T2, src);
+            }
             if matches!(kind, 0 | 5 | 7) {
                 self.record(if kind == 0 { REC_ADD } else { REC_SUB }, bits, T2, Some(src));
             }
@@ -836,7 +990,7 @@ pub fn translate(m: &Mem, rip: u64, exact: bool) -> Option<Built> {
         // are dead. (A shift by CL may leave them: if they are dead after it, its own
         // record is not needed either.)
         let room = MOST - starts.len();
-        let sets = matches!(flags_of(&ins), Flags::All) || ins.op == 0xd3 && field >= 4;
+        let sets = matches!(flags_of(&ins), Flags::All | Flags::Carry) || ins.op == 0xd3 && field >= 4;
         e.host = true;
         e.skip = !e.exact && sets && e.dead(next, host_flags_of(&ins), room);
         if !e.skip {
@@ -860,11 +1014,14 @@ pub fn translate(m: &Mem, rip: u64, exact: bool) -> Option<Built> {
             }
         }
         match ins.op {
-            0x01 | 0x09 | 0x21 | 0x29 | 0x31 | 0x39 => {
+            // ADC and SBB, where the host's flags do not say what the carry is.
+            0x11 | 0x13 | 0x19 | 0x1b if !e.carry_known() => not_here = true,
+            0x81 | 0x83 if matches!(field, 2 | 3) && !e.carry_known() => not_here = true,
+            0x01 | 0x09 | 0x11 | 0x19 | 0x21 | 0x29 | 0x31 | 0x39 => {
                 let src = if small { e.small(&ins, reg, T0) } else { reg };
                 e.alu((ins.op >> 3) as u8, &ins, ins.rm, src);
             }
-            0x03 | 0x0b | 0x23 | 0x2b | 0x33 | 0x3b => {
+            0x03 | 0x0b | 0x13 | 0x1b | 0x23 | 0x2b | 0x33 | 0x3b => {
                 let src = e.operand(&ins, ins.rm);
                 e.alu((ins.op >> 3) as u8, &ins, Rm::Reg(reg), src);
             }
@@ -906,6 +1063,14 @@ pub fn translate(m: &Mem, rip: u64, exact: bool) -> Option<Built> {
                     e.put(a64::mem_reg(size(bits), Op::Store, T4, BASE, a));
                 }
             },
+            0xf7 if field >= 4 => {
+                // MUL, IMUL, DIV, IDIV with one operand.
+                let b = e.operand(&ins, ins.rm);
+                match field {
+                    4 | 5 => e.mul_wide(field == 5, wide, b),
+                    _ => e.div_wide(field == 7, wide, b, at, starts.len() - 1),
+                }
+            }
             0xf7 => {
                 // NEG of a register: a subtraction from nothing.
                 let Rm::Reg(d) = ins.rm else { unreachable!() };
@@ -913,6 +1078,35 @@ pub fn translate(m: &Mem, rip: u64, exact: bool) -> Option<Built> {
                 e.put(a64::arith(wide, true, true, d, a64::ZR, d, 0));
                 e.flags = Some(HostFlags::Sub);
             }
+            0xc1 | 0xd1 if small => {
+                // SHL, SHR, SAR of an 8 or 16-bit register by a constant. The count
+                // is taken by its low five bits whatever the width: one as large as
+                // the register or larger shifts everything out.
+                let Rm::Reg(d) = ins.rm else { unreachable!() };
+                let n = if ins.op == 0xc1 { ins.imm as u32 & 31 } else { 1 };
+                if n != 0 {
+                    let kind = if field == 6 { 4 } else { field } as u64;
+                    let a = e.small(&ins, d, T2);
+                    if !e.skip {
+                        e.constant(T1, n as u64);
+                    }
+                    e.record(REC_SHIFT + kind, bits, a, Some(T1));
+                    match kind {
+                        4 => e.put(a64::lsl(false, T4, a, n)),
+                        5 => {
+                            e.put(a64::uxt(T4, a, bits));
+                            e.put(a64::lsr(false, T4, T4, n));
+                        }
+                        _ => {
+                            e.put(a64::sxt(false, T4, a, bits));
+                            e.put(a64::asr(false, T4, T4, n));
+                        }
+                    }
+                    e.set_small(&ins, d, T4);
+                }
+                e.flags = None;
+            }
+            0x1c8..=0x1cf => e.put(a64::rev(wide, reg, reg)),
             0xc1 | 0xd1 | 0xd3 => {
                 let Rm::Reg(d) = ins.rm else { unreachable!() };
                 let by_cl = ins.op == 0xd3;
@@ -1088,6 +1282,11 @@ pub fn translate(m: &Mem, rip: u64, exact: bool) -> Option<Built> {
                 let (from, small) = if ins.op & 1 == 0 { (8, Size::B) } else { (16, Size::H) };
                 let signed = ins.op >= 0x1be;
                 match ins.rm {
+                    // From AH and its like: the second byte of the register four
+                    // numbers lower. (There is no REX, so the result is 32 bits.)
+                    Rm::Reg(s) if from == 8 && !ins.rex && (4..8).contains(&s) => {
+                        e.put(if signed { a64::sbfx(false, reg, s - 4, 8, 8) } else { a64::ubfx(reg, s - 4, 8, 8) });
+                    }
                     Rm::Reg(s) if signed => e.put(a64::sxt(wide, reg, s, from)),
                     Rm::Reg(s) => e.put(a64::uxt(reg, s, from)),
                     Rm::Mem { base, index, disp } => {
@@ -1201,7 +1400,7 @@ pub fn translate(m: &Mem, rip: u64, exact: bool) -> Option<Built> {
         // What was asked about the flags before this instruction was written was asked
         // with what `host_flags_of` says it leaves in the host's flags: that must be
         // what it did leave, or a jump after it was reasoned about wrongly.
-        if matches!(flags_of(&ins), Flags::All) && !not_here {
+        if matches!(flags_of(&ins), Flags::All | Flags::Carry) && !not_here {
             assert!(e.flags == host_flags_of(&ins), "the host's flags after {:#x} at {at:#x}", ins.op);
         }
         if not_here {
@@ -1333,21 +1532,21 @@ mod tests {
         no(&[0x67, 0x8b, 0x00]); // a 32-bit address
         no(&[0xf0, 0x01, 0x06]); // LOCK
         no(&[0x66, 0x50]); // a 16-bit push
-        no(&[0x66, 0xc1, 0xe0, 0x03]); // a 16-bit shift
-        no(&[0xc0, 0xe0, 0x03]); // an 8-bit one
+        no(&[0x66, 0xd3, 0xe0]); // a 16-bit shift by CL
+        no(&[0xc0, 0xc0, 0x03]); // an 8-bit rotation
+        no(&[0x66, 0x11, 0xd8]); // a 16-bit ADC
+        no(&[0x10, 0xd8]); // an 8-bit one
+        no(&[0x66, 0xf7, 0xe3]); // a 16-bit MUL
+        no(&[0xf6, 0xf3]); // an 8-bit DIV
+        no(&[0x66, 0x0f, 0xc8]); // a 16-bit BSWAP
         no(&[0xc1, 0x26, 0x03]); // a shift of memory
         no(&[0xd1, 0xd0]); // RCL
-        no(&[0xf7, 0xe3]); // MUL
         no(&[0xf7, 0x1e]); // NEG of memory
         no(&[0xf6, 0xdb]); // NEG of a byte
         no(&[0x66, 0x0f, 0xbc, 0xc3]); // a 16-bit BSF
         no(&[0x66, 0x98]); // CBW
         no(&[0x64, 0x8b, 0x00]); // a segment
-        no(&[0x11, 0xd8]); // ADC
-        no(&[0x83, 0xd0, 0x01]); // ADC of a constant
-        no(&[0x83, 0xd8, 0x01]); // SBB of a constant
         no(&[0x8d, 0xc0]); // LEA of a register
-        no(&[0x0f, 0xb6, 0xc4]); // MOVZX from AH
         no(&[0xc7, 0xf8, 0, 0, 0, 0]); // C7h's other field
         no(&[0x41, 0x90]); // XCHG R8, RAX
         no(&[0x0f, 0x05]); // SYSCALL
