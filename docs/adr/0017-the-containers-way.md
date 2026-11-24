@@ -1,6 +1,6 @@
 # 0017: The container's way: a program's system calls are the host kernel's
 
-**Status**: proposed (2026-11-25). Three points are the owner's: A, B and C below.
+**Status**: accepted (2026-11-25, the owner: the three points, A, B and C, as proposed)
 
 ## Context
 

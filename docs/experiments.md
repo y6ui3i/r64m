@@ -1934,3 +1934,33 @@ Seen besides, on this Mac, with what is on it already (nothing fetched):
 - That container's own x86-64 programs are run by Rosetta, and a user-mode QEMU
   (`qemu-x86_64`) is in an arm64 image from g64m's work. Both yardsticks are at hand;
   how each is put to the same container's programs is not shown yet.
+
+## R025: hello, dynamically linked, in the container (2026-11-25)
+
+ADR 0017 was accepted as proposed. Its first step.
+
+The card, written before the run.
+
+- **Hypothesis**: with a loader that takes a program not at a fixed address and its
+  interpreter, and R024's eight system calls (`brk`, `mmap`, `mprotect`, `arch_prctl`,
+  `set_tid_address`, `ioctl`, `writev`, and the exit), a C "Hello, world" compiled by
+  Alpine's GCC and linked dynamically prints its line and ends with 0 under r64m in
+  the x86-64 Alpine container on this Mac, by the interpreter and with `--jit` and
+  `--jit-check`. musl's loader is 600 KB of compiled C that r64m has never run: it is
+  guessed to need no instruction r64m lacks.
+- **What is changed from before** (R023): `src/elf.rs` takes `ET_DYN` and loads the
+  file `PT_INTERP` names; the first stack says where both are; `src/sys.rs` answers
+  the eight, memory from r64m's own list and the rest by the host's kernel (Linux);
+  a change of mapping or protection forgets the blocks made from those pages (ADR
+  0016, point 2).
+- **Next move for each result**:
+  - It prints and ends with 0 in all three ways → a few of busybox's programs that
+    need no file (`echo`, `true`, `false`, `expr`) as the first cases of the Rust
+    test, held to what hal prints; then step 2 (the shell, a pipe)
+  - An instruction r64m lacks → written in the interpreter, with a case, before
+    anything else
+  - A system call beyond the eight → answered if it is of R024's list for the
+    compile; else looked at
+  - Right by the interpreter and not with `--jit-check` → the block that differs is
+    the finding: a translation that the primitives never met
+- **Cut-off**: hello in the three ways, and the busybox cases, in the container.
