@@ -18,6 +18,8 @@
 //! | x25, x26 | scratch that the way in saves |
 //! | x27 | how many instructions the blocks run to their ends have run |
 //! | x28 | the address of the table of blocks (`TABLE_BITS`) |
+//! | v0 to v15 | the guest's sixteen XMM registers (ADR 0015) |
+//! | v16 to v31 | scratch |
 
 // Some of its forms wait for the instructions that will use them.
 #[allow(dead_code)]
@@ -66,13 +68,18 @@ pub const LEFT_FOR_THE_INTERPRETER: u64 = 2;
 #[unsafe(naked)]
 pub unsafe extern "C" fn enter(cpu: *mut Cpu, code: *const u8, base: *mut u8, table: *const [u64; 2]) -> u64 {
     core::arch::naked_asm!(
-        "sub sp, sp, #96",
+        "sub sp, sp, #160",
         "stp x19, x20, [sp]",
         "stp x21, x22, [sp, #16]",
         "stp x23, x24, [sp, #32]",
         "stp x25, x26, [sp, #48]",
         "stp x27, x28, [sp, #64]",
         "stp x29, x30, [sp, #80]",
+        // The lower halves of v8 to v15 are the caller's to find again.
+        "stp d8, d9, [sp, #96]",
+        "stp d10, d11, [sp, #112]",
+        "stp d12, d13, [sp, #128]",
+        "stp d14, d15, [sp, #144]",
         "mov x19, x0",
         "mov x20, x2",
         "mov x28, x3",
@@ -88,6 +95,15 @@ pub unsafe extern "C" fn enter(cpu: *mut Cpu, code: *const u8, base: *mut u8, ta
         "ldp x10, x11, [x19, #{reg} + 80]",
         "ldp x12, x13, [x19, #{reg} + 96]",
         "ldp x14, x15, [x19, #{reg} + 112]",
+        "add x16, x19, #{xmm}",
+        "ldp q0, q1, [x16]",
+        "ldp q2, q3, [x16, #32]",
+        "ldp q4, q5, [x16, #64]",
+        "ldp q6, q7, [x16, #96]",
+        "ldp q8, q9, [x16, #128]",
+        "ldp q10, q11, [x16, #160]",
+        "ldp q12, q13, [x16, #192]",
+        "ldp q14, q15, [x16, #224]",
         "mov x27, #0",
         "br x17",
         // The way out.
@@ -103,6 +119,15 @@ pub unsafe extern "C" fn enter(cpu: *mut Cpu, code: *const u8, base: *mut u8, ta
         "stp x21, x22, [x19, #{rec}]",
         "str x23, [x19, #{rec} + 16]",
         "str x27, [x19, #{ran}]",
+        "add x17, x19, #{xmm}",
+        "stp q0, q1, [x17]",
+        "stp q2, q3, [x17, #32]",
+        "stp q4, q5, [x17, #64]",
+        "stp q6, q7, [x17, #96]",
+        "stp q8, q9, [x17, #128]",
+        "stp q10, q11, [x17, #160]",
+        "stp q12, q13, [x17, #192]",
+        "stp q14, q15, [x17, #224]",
         "mov x0, x16",
         "ldp x19, x20, [sp]",
         "ldp x21, x22, [sp, #16]",
@@ -110,11 +135,16 @@ pub unsafe extern "C" fn enter(cpu: *mut Cpu, code: *const u8, base: *mut u8, ta
         "ldp x25, x26, [sp, #48]",
         "ldp x27, x28, [sp, #64]",
         "ldp x29, x30, [sp, #80]",
-        "add sp, sp, #96",
+        "ldp d8, d9, [sp, #96]",
+        "ldp d10, d11, [sp, #112]",
+        "ldp d12, d13, [sp, #128]",
+        "ldp d14, d15, [sp, #144]",
+        "add sp, sp, #160",
         "ret",
         reg = const offset_of!(Cpu, reg),
         rec = const offset_of!(Cpu, flag_rec),
         ran = const offset_of!(Cpu, ran),
+        xmm = const offset_of!(Cpu, xmm),
     )
 }
 

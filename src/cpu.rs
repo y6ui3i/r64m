@@ -320,6 +320,8 @@ pub const REC_SBB: u64 = 9;
 /// BSF and BSR: the operand that was scanned.
 pub const REC_BSF: u64 = 0x20;
 pub const REC_BSR: u64 = 0x21;
+/// UCOMIS and COMIS: the two operands' bits, singles (width 32) or doubles.
+pub const REC_FLOAT: u64 = 0x0a;
 
 /// Works the flags out from the JIT's record, if generated code left one, so that
 /// RFLAGS is as the interpreter would have left it.
@@ -352,6 +354,23 @@ pub fn settle(c: &mut Cpu) {
             let r = full as u64 & mask(w);
             let over = if sx(r, w) as i64 as i128 != full { CF | OF } else { 0 };
             over | szp(r, w) & (SF | PF)
+        }
+        REC_FLOAT => {
+            // ZF, PF and CF as the interpreter's `comis` has them.
+            let (x, y) = if w == 32 {
+                (f32::from_bits(a as u32) as f64, f32::from_bits(b as u32) as f64)
+            } else {
+                (f64::from_bits(a), f64::from_bits(b))
+            };
+            if x.is_nan() || y.is_nan() {
+                ZF | PF | CF
+            } else if x < y {
+                CF
+            } else if x == y {
+                ZF
+            } else {
+                0
+            }
         }
         REC_BSF | REC_BSR => {
             // Of a zero: ZF and PF. Else the parity of the bit's number.

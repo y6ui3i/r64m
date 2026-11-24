@@ -508,6 +508,15 @@ fn differs(want: &Cpu, got: &Cpu, written: &[(u64, Vec<u8>)], m: &Mem) -> Option
             said.push(format!("{name} {a:#x} -> {b:#x}"));
         }
     }
+    for i in 0..16 {
+        let (a, b) = (&want.xmm[2 * i..2 * i + 2], &got.xmm[2 * i..2 * i + 2]);
+        if a != b {
+            said.push(format!("XMM{i} {:016x}{:016x} -> {:016x}{:016x}", a[1], a[0], b[1], b[0]));
+        }
+    }
+    if want.mxcsr != got.mxcsr {
+        said.push(format!("MXCSR {:#x} -> {:#x}", want.mxcsr, got.mxcsr));
+    }
     // What the interpreter left at each place it wrote: the last write to a byte is
     // the one that stands, so they are laid over one another in their order.
     let mut bytes: HashMap<u64, u8> = HashMap::new();
@@ -2124,5 +2133,354 @@ mod tests {
         let (c, _) = checked(&code, &[], &|c| c.reg[RBX] = 40);
         assert_eq!(c.reg[RDX], 2);
         assert_eq!(shape(&code, false).0, 3);
+    }
+    // ---- SSE in blocks (ADR 0015) ----------------------------------------------------------
+
+    /// R019's operands as doubles: numbers, zeros of both signs, infinities, two that
+    /// are not numbers and quiet, two that signal, and what does not fit an integer.
+    fn doubles() -> Vec<u64> {
+        let mut v: Vec<u64> = [
+            1.0f64, 2.0, 0.0, -0.0, -1.0, 0.1, 0.3, 3e9, -3e9, 1e19, -1e19, 2147483647.0, 2147483647.5, 2147483648.0,
+            -2147483648.0, -2147483648.9, -2147483649.0, 9.3e18, 5e-324, f64::MAX, f64::INFINITY, f64::NEG_INFINITY,
+        ]
+        .iter()
+        .map(|d| d.to_bits())
+        .collect();
+        v.extend([0x7ff8_0000_0000_0001, 0x7ff8_0000_0000_0002, 0x7ff0_0000_0000_0001, 0xfff0_0000_0000_0002]);
+        v
+    }
+
+    /// And as singles, in the low half of a register whose upper half is something.
+    fn singles() -> Vec<u64> {
+        let mut v: Vec<u64> = [
+            1.0f32, 2.0, 0.0, -0.0, -1.0, 0.1, 0.3, 3e9, -3e9, 1e19, -1e19, 2147483520.0, 2147483648.0, -2147483648.0,
+            16777216.0, 1e-45, f32::MAX, f32::INFINITY, f32::NEG_INFINITY,
+        ]
+        .iter()
+        .map(|f| f.to_bits() as u64)
+        .collect();
+        v.extend([0x7fc0_0001, 0x7fc0_0002, 0x7f80_0001, 0xff80_0002]);
+        v.iter().map(|x| x | 0xabcd_ef01 << 32).collect()
+    }
+
+    /// Runs each of `list` (an instruction or a few, of which `.1` are to be in its
+    /// block; SYSCALL is added) from each of `cases` beginnings, by blocks each
+    /// checked and by blocks joined, held to the interpreter. `data(case)` begins the
+    /// page at `DATA`. How many blocks were run to their ends and checked comes back.
+    fn sse(list: &[(Vec<u8>, usize)], cases: usize, data: &dyn Fn(usize) -> Vec<u8>, set: &dyn Fn(usize, &mut Cpu)) -> u64 {
+        let mut code = Vec::new();
+        let mut programs = Vec::new();
+        for (ins, n) in list {
+            let whole = [&ins[..], &[0x0f, 0x05]].concat();
+            assert_eq!(shape(&whole, true).0, *n, "{ins:02x?} is not all in a block");
+            programs.push(CODE + code.len() as u64);
+            code.extend(whole);
+        }
+        let mut checked = 0;
+        for check in [true, false] {
+            let mut m = guest(&code, &[]);
+            let mut jit = Jit::new(check, 1).unwrap();
+            for case in 0..cases {
+                for &rip in &programs {
+                    m.write_bytes(DATA, &data(case)).unwrap();
+                    both(&mut jit, &mut m, rip, &|c| set(case, c));
+                }
+            }
+            if check {
+                checked = jit.stats.checked;
+            }
+        }
+        checked
+    }
+
+    /// Every XMM register something of its own, so that a wrong one shows.
+    fn fill_xmm(c: &mut Cpu) {
+        for i in 0..32 {
+            c.xmm[i] = 0x0101_0101_0101_0101 * (i as u64 + 1) ^ 0x8000_0000_0000_00ff << (i % 7);
+        }
+    }
+
+    #[test]
+    fn the_arithmetic_of_floats_is_the_interpreters_whatever_the_operands() {
+        // op xmm1, xmm2 and op xmm1, [rsi]: the root, the sum, the product, the
+        // difference, the smaller, the quotient, the larger; of doubles and of singles.
+        for (pre, values) in [(0xf2u8, doubles()), (0xf3, singles())] {
+            let mut list = Vec::new();
+            for op in [0x51u8, 0x58, 0x59, 0x5c, 0x5d, 0x5e, 0x5f] {
+                list.push((vec![pre, 0x0f, op, 0xca], 1));
+                list.push((vec![pre, 0x0f, op, 0x0e], 1));
+            }
+            let n = values.len();
+            let checked = sse(&list, n * n, &|case| values[case % n].to_le_bytes().to_vec(), &|case, c| {
+                fill_xmm(c);
+                c.xmm[2] = values[case / n];
+                c.xmm[4] = values[case % n];
+                c.reg[RSI] = DATA;
+            });
+            // Most of them were the block's from end to end: what is a number.
+            assert!(checked as usize > list.len() * n * n / 2, "{checked} of {}", list.len() * n * n);
+        }
+    }
+
+    #[test]
+    fn a_result_that_is_not_a_number_is_left_to_the_interpreter() {
+        // subsd xmm1, xmm2; syscall
+        let code = [0xf2, 0x0f, 0x5c, 0xca, 0x0f, 0x05];
+        for (a, b, want, in_block) in [
+            (3.0f64.to_bits(), 1.0f64.to_bits(), 2.0f64.to_bits(), 1),
+            // Infinity less infinity: x86's has the sign set, the host's has not.
+            (f64::INFINITY.to_bits(), f64::INFINITY.to_bits(), 0xfff8_0000_0000_0000, 0),
+            // Quiet and signalling: x86 gives the first, the host the one that signals.
+            (0x7ff8_0000_0000_0001, 0xfff0_0000_0000_0002, 0x7ff8_0000_0000_0001, 0),
+        ] {
+            let mut m = guest(&code, &[]);
+            let mut jit = Jit::new(true, 1).unwrap();
+            let c = both(&mut jit, &mut m, CODE, &|c| {
+                c.xmm[2] = a;
+                c.xmm[3] = 7;
+                c.xmm[4] = b;
+            });
+            assert_eq!((c.xmm[2], c.xmm[3], c.steps), (want, 7, 2));
+            // The block was entered either way; it ran to its end only for the number.
+            assert_eq!((jit.stats.entered, jit.stats.checked, jit.stats.in_blocks), (1, in_block, in_block));
+        }
+    }
+
+    #[test]
+    fn comparisons_of_floats_under_every_condition() {
+        // ucomisd, comisd, ucomiss, comiss of xmm1 with xmm2 and with [rsi]; and
+        // with XMM8 and XMM9.
+        let d = |x: f64| x.to_bits();
+        let f = |x: f32| x.to_bits() as u64 | 0x5555 << 32;
+        let double: [&[u8]; 5] = [&[0x66, 0x0f, 0x2e, 0xca], &[0x66, 0x0f, 0x2f, 0xca], &[0x66, 0x0f, 0x2e, 0x0e], &[0x66, 0x0f, 0x2f, 0x0e], &[0x66, 0x45, 0x0f, 0x2e, 0xc1]];
+        let single: [&[u8]; 5] = [&[0x0f, 0x2e, 0xca], &[0x0f, 0x2f, 0xca], &[0x0f, 0x2e, 0x0e], &[0x0f, 0x2f, 0x0e], &[0x45, 0x0f, 0x2e, 0xc1]];
+        let nan = 0x7ff8_0000_0000_0000u64;
+        let pairs = [
+            (d(1.0), d(2.0)), (d(2.0), d(1.0)), (d(1.5), d(1.5)), (d(0.0), d(-0.0)), (d(-1.0), d(1.0)),
+            (d(f64::INFINITY), d(1.0)), (nan, d(1.0)), (d(1.0), nan), (nan, nan), (0x7ff0_0000_0000_0001, d(0.0)),
+        ];
+        let nan = 0x7fc0_0000u64;
+        let small = [
+            (f(1.0), f(2.0)), (f(2.0), f(1.0)), (f(1.5), f(1.5)), (f(0.0), f(-0.0)), (f(-1.0), f(1.0)),
+            (f(f32::INFINITY), f(1.0)), (nan, f(1.0)), (f(1.0), nan), (nan, nan), (0x7f80_0001, f(0.0)),
+        ];
+        for (list, pairs) in [(&double, &pairs), (&single, &small)] {
+            for &(a, b) in pairs.iter() {
+                under_every_condition(&list[..], &b.to_le_bytes(), &|c| {
+                    fill_xmm(c);
+                    (c.xmm[2], c.xmm[4], c.xmm[16], c.xmm[18]) = (a, b, a, b);
+                    c.reg[RSI] = DATA;
+                });
+            }
+        }
+        // What each comes to, said outright for a double (2: the jump is taken):
+        // above, below, equal, and not numbers (which is below, equal and odd at once).
+        for (a, b, ja, jb, je, jp) in [(2.0, 1.0, 2, 1, 1, 1), (1.0, 2.0, 1, 2, 1, 1), (1.0, 1.0, 1, 1, 2, 1), (f64::NAN, 1.0, 1, 2, 2, 2)] {
+            for (cc, want) in [(7u8, ja), (2, jb), (4, je), (10, jp)] {
+                let code = [&[0x66, 0x0f, 0x2e, 0xca][..], &pick(cc)].concat();
+                let (c, _) = checked(&code, &[], &|c| (c.xmm[2], c.xmm[4]) = (d(a), d(b)));
+                assert_eq!(c.reg[RDX], want, "{a} and {b}, condition {cc}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_comparison_of_floats_read_by_setcc_cmovcc_and_adc() {
+        // ucomisd xmm1, xmm2; then setcc dl / cmovcc edx, ebx / adc edx, 0
+        let mut list = Vec::new();
+        for cc in 0..16u8 {
+            list.push(([&[0x66, 0x0f, 0x2e, 0xca][..], &[0x0f, 0x90 | cc, 0xc2]].concat(), 2));
+            list.push(([&[0x66, 0x0f, 0x2e, 0xca][..], &[0x0f, 0x40 | cc, 0xd3]].concat(), 2));
+        }
+        list.push((vec![0x66, 0x0f, 0x2e, 0xca, 0x83, 0xd2, 0x00], 2));
+        let pairs = [(1.0f64, 2.0f64), (2.0, 1.0), (1.0, 1.0), (f64::NAN, 1.0), (1.0, f64::NAN)];
+        sse(&list, pairs.len(), &|_| Vec::new(), &|case, c| {
+            (c.xmm[2], c.xmm[4]) = (pairs[case].0.to_bits(), pairs[case].1.to_bits());
+            c.reg[RBX] = 0x77;
+            c.reg[RDX] = 0x1100;
+        });
+    }
+
+    #[test]
+    fn the_hosts_flags_are_not_asked_after_arithmetic_of_floats_spent_them() {
+        // cmp eax, ebx; <SSE>; then every condition. A move leaves the host's flags as
+        // the compare made them; arithmetic, the smaller, and the conversions that
+        // test their result do not, and the jump reads the record.
+        let list: [&[u8]; 6] = [
+            &[0x39, 0xd8, 0xf2, 0x0f, 0x10, 0xca],       // movsd xmm1, xmm2
+            &[0x39, 0xd8, 0xf2, 0x0f, 0x58, 0xca],       // addsd xmm1, xmm2
+            &[0x39, 0xd8, 0xf2, 0x0f, 0x5d, 0xca],       // minsd xmm1, xmm2
+            &[0x39, 0xd8, 0xf2, 0x0f, 0x2c, 0xca],       // cvttsd2si ecx, xmm2
+            &[0x39, 0xd8, 0xf2, 0x48, 0x0f, 0x2c, 0xca], // cvttsd2si rcx, xmm2
+            &[0x39, 0xd8, 0xf2, 0x0f, 0x5a, 0xca],       // cvtsd2ss xmm1, xmm2
+        ];
+        for (a, b) in [(1u64, 2u64), (2, 1), (5, 5), (0x8000_0000, 1), (0x7fff_ffff, 0xffff_ffff)] {
+            under_every_condition(&list, &[], &|c| {
+                (c.reg[RAX], c.reg[RBX]) = (a, b);
+                (c.xmm[2], c.xmm[4]) = (1.5f64.to_bits(), 2.5f64.to_bits());
+            });
+        }
+        // The jump is in the compare's block after the move, and not after the
+        // others: it is the interpreter's there, which reads the record.
+        for (i, ins) in list.into_iter().enumerate() {
+            assert_eq!(shape(&[ins, &pick(2)[..]].concat(), true).0, if i == 0 { 3 } else { 2 });
+        }
+    }
+
+    #[test]
+    fn a_comparison_of_floats_whose_flags_only_a_jump_reads_writes_no_record() {
+        // ucomisd xmm1, xmm2; ja over; add edx, 1; over: add edx, 2; syscall
+        let code = [0x66, 0x0f, 0x2e, 0xca, 0x77, 0x03, 0x83, 0xc2, 0x01, 0x83, 0xc2, 0x02, 0x0f, 0x05];
+        // (MOVZ x21 with the kind of a comparison of doubles.)
+        let record = a64::movz(true, 21, (cpu::REC_FLOAT << 8 | 64) as u16, 0);
+        let has = |exact| translate(&guest(&code, &[]), CODE, exact).unwrap().words.contains(&record);
+        assert!(has(true) && !has(false));
+        for (a, b, want) in [(2.0f64, 1.0f64, 2), (1.0, 2.0, 3), (f64::NAN, 1.0, 3)] {
+            let (c, _) = checked(&code, &[], &|c| (c.xmm[2], c.xmm[4]) = (a.to_bits(), b.to_bits()));
+            assert_eq!(c.reg[RDX], want);
+        }
+    }
+
+    #[test]
+    fn integers_to_floats_and_back() {
+        // cvtsi2sd and cvtsi2ss xmm1 from eax, rax, [rsi] of 32 and of 64 bits.
+        let mut list = Vec::new();
+        for pre in [0xf2u8, 0xf3] {
+            list.push((vec![pre, 0x0f, 0x2a, 0xc8], 1));
+            list.push((vec![pre, 0x48, 0x0f, 0x2a, 0xc8], 1));
+            list.push((vec![pre, 0x0f, 0x2a, 0x0e], 1));
+            list.push((vec![pre, 0x48, 0x0f, 0x2a, 0x0e], 1));
+        }
+        // What is exact, and what must be rounded (to 53 bits, to 24).
+        let ints = [0u64, 1, u64::MAX, 0x7fff_ffff, 0x8000_0000, 0xffff_ffff_8000_0000, i64::MAX as u64, 1 << 63, 0x20_0000_0000_0001, 0x20_0000_0000_0003, 16_777_217, 16_777_219, 0x1234_5678_9abc_def0];
+        let n = sse(&list, ints.len(), &|case| ints[case].to_le_bytes().to_vec(), &|case, c| {
+            fill_xmm(c);
+            c.reg[RAX] = ints[case];
+            c.reg[RSI] = DATA;
+        });
+        assert_eq!(n as usize, list.len() * ints.len());
+
+        // cvttsd2si and cvttss2si to eax and to rax, from xmm1 and from [rsi]: every
+        // one in its block to the end, what does not fit and what is not a number too.
+        for (pre, values) in [(0xf2u8, doubles()), (0xf3, singles())] {
+            let list = [
+                (vec![pre, 0x0f, 0x2c, 0xc1], 1),
+                (vec![pre, 0x48, 0x0f, 0x2c, 0xc1], 1),
+                (vec![pre, 0x0f, 0x2c, 0x06], 1),
+                (vec![pre, 0x48, 0x0f, 0x2c, 0x06], 1),
+                (vec![pre, 0x4c, 0x0f, 0x2c, 0xf9], 1), // to r15
+            ];
+            let n = sse(&list, values.len(), &|case| values[case].to_le_bytes().to_vec(), &|case, c| {
+                c.xmm[2] = values[case];
+                c.reg[RAX] = 0x1111_2222_3333_4444;
+                c.reg[RSI] = DATA;
+            });
+            assert_eq!(n as usize, list.len() * values.len());
+        }
+        // Said outright: what x86 gives where the host would give something else.
+        for (v, want32, want64) in [
+            (3e9f64, 0x8000_0000u64, 3_000_000_000u64),
+            (-3e9, 0x8000_0000, -3_000_000_000i64 as u64),
+            (1e19, 0x8000_0000, 1 << 63),
+            (f64::NAN, 0x8000_0000, 1 << 63),
+            (2147483647.5, 0x7fff_ffff, 0x7fff_ffff),
+            (-1.9, 0xffff_ffff, u64::MAX),
+        ] {
+            // cvttsd2si eax, xmm1; cvttsd2si rbx, xmm1; syscall
+            let (c, _) = checked(&[0xf2, 0x0f, 0x2c, 0xc1, 0xf2, 0x48, 0x0f, 0x2c, 0xd9, 0x0f, 0x05], &[], &|c| {
+                c.xmm[2] = v.to_bits();
+                c.reg[RAX] = u64::MAX;
+            });
+            assert_eq!((c.reg[RAX], c.reg[RBX]), (want32, want64), "{v}");
+        }
+    }
+
+    #[test]
+    fn between_singles_and_doubles() {
+        // cvtsd2ss and cvtss2sd xmm1 from xmm2 and from [rsi].
+        for (pre, values) in [(0xf2u8, doubles()), (0xf3, singles())] {
+            let list = [(vec![pre, 0x0f, 0x5a, 0xca], 1), (vec![pre, 0x0f, 0x5a, 0x0e], 1), (vec![pre, 0x45, 0x0f, 0x5a, 0xf8], 1)];
+            sse(&list, values.len(), &|case| values[case].to_le_bytes().to_vec(), &|case, c| {
+                fill_xmm(c);
+                (c.xmm[4], c.xmm[16]) = (values[case], values[case]);
+                c.reg[RSI] = DATA;
+            });
+        }
+    }
+
+    #[test]
+    fn moves_and_logic_of_the_xmm_registers() {
+        let list: Vec<(Vec<u8>, usize)> = [
+            // movsd and movss: register to register (the rest kept), from memory (the
+            // rest zero), to memory; by both opcodes.
+            &[0xf2u8, 0x0f, 0x10, 0xca][..], &[0xf2, 0x0f, 0x10, 0x0e], &[0xf2, 0x0f, 0x11, 0x0e], &[0xf2, 0x0f, 0x11, 0xca],
+            &[0xf3, 0x0f, 0x10, 0xca], &[0xf3, 0x0f, 0x10, 0x0e], &[0xf3, 0x0f, 0x11, 0x0e], &[0xf3, 0x0f, 0x11, 0xca],
+            // movups, movupd, movaps, movapd, movdqa, movdqu: each way.
+            &[0x0f, 0x10, 0xca], &[0x0f, 0x10, 0x0e], &[0x0f, 0x11, 0x0e], &[0x0f, 0x11, 0xca],
+            &[0x66, 0x0f, 0x10, 0x0e], &[0x66, 0x0f, 0x11, 0x0e],
+            &[0x0f, 0x28, 0xca], &[0x0f, 0x28, 0x0e], &[0x0f, 0x29, 0x0e], &[0x66, 0x0f, 0x28, 0xca], &[0x66, 0x0f, 0x29, 0xca],
+            &[0x66, 0x0f, 0x6f, 0xca], &[0x66, 0x0f, 0x6f, 0x0e], &[0x66, 0x0f, 0x7f, 0x0e], &[0x66, 0x0f, 0x7f, 0xca],
+            &[0xf3, 0x0f, 0x6f, 0x0e], &[0xf3, 0x0f, 0x7f, 0x0e], &[0xf3, 0x0f, 0x6f, 0xca],
+            // movd and movq with a general register and with memory.
+            &[0x66, 0x0f, 0x6e, 0xc8], &[0x66, 0x48, 0x0f, 0x6e, 0xc8], &[0x66, 0x0f, 0x6e, 0x0e], &[0x66, 0x48, 0x0f, 0x6e, 0x0e],
+            &[0x66, 0x0f, 0x7e, 0xc8], &[0x66, 0x48, 0x0f, 0x7e, 0xc8], &[0x66, 0x0f, 0x7e, 0x0e], &[0x66, 0x48, 0x0f, 0x7e, 0x0e],
+            // movq between XMM registers and memory, by both opcodes.
+            &[0xf3, 0x0f, 0x7e, 0xca], &[0xf3, 0x0f, 0x7e, 0x0e], &[0x66, 0x0f, 0xd6, 0xca], &[0x66, 0x0f, 0xd6, 0x0e],
+            // and, andn, or, xor: of singles, of doubles, of integers; from memory; of
+            // a register with itself.
+            &[0x0f, 0x54, 0xca], &[0x0f, 0x55, 0xca], &[0x0f, 0x56, 0xca], &[0x0f, 0x57, 0xca],
+            &[0x66, 0x0f, 0x54, 0xca], &[0x66, 0x0f, 0x55, 0xca], &[0x66, 0x0f, 0x56, 0xca], &[0x66, 0x0f, 0x57, 0xca],
+            &[0x66, 0x0f, 0xdb, 0xca], &[0x66, 0x0f, 0xdf, 0xca], &[0x66, 0x0f, 0xeb, 0xca], &[0x66, 0x0f, 0xef, 0xca],
+            &[0x0f, 0x54, 0x0e], &[0x0f, 0x55, 0x0e], &[0x66, 0x0f, 0xdf, 0x0e], &[0x66, 0x0f, 0xef, 0x0e],
+            &[0x0f, 0x57, 0xc9], &[0x0f, 0x55, 0xc9], &[0x66, 0x0f, 0xef, 0xc9],
+            // The upper eight: xorps xmm8, xmm9; addsd xmm8, xmm9; movsd xmm15, [rsi];
+            // movaps xmm9, xmm1; movq r9, xmm10; movd xmm11, r9d; movsd [rsi + 8], xmm14
+            &[0x45, 0x0f, 0x57, 0xc1], &[0xf2, 0x45, 0x0f, 0x58, 0xc1], &[0xf2, 0x44, 0x0f, 0x10, 0x3e],
+            &[0x44, 0x0f, 0x28, 0xc9], &[0x66, 0x4d, 0x0f, 0x7e, 0xd1], &[0x66, 0x45, 0x0f, 0x6e, 0xd9],
+            &[0xf2, 0x44, 0x0f, 0x11, 0x76, 0x08],
+            // With an address that is worked out: movsd xmm1, [rsi + rax*8 + 16];
+            // movups [rsi + rax + 5], xmm2
+            &[0xf2, 0x0f, 0x10, 0x4c, 0xc6, 0x10], &[0x0f, 0x11, 0x54, 0x06, 0x05],
+        ]
+        .iter()
+        .map(|i| (i.to_vec(), 1))
+        .collect();
+        let data: Vec<u8> = (0..64u8).map(|i| i.wrapping_mul(37) ^ 0xa5).collect();
+        let n = sse(&list, 2, &|_| data.clone(), &|case, c| {
+            fill_xmm(c);
+            c.reg[RAX] = if case == 0 { 2 } else { 0x1234_5678_9abc_def0 & 3 };
+            c.reg[RSI] = DATA;
+            c.reg[9] = 0xfedc_ba98_7654_3210;
+        });
+        assert_eq!(n as usize, list.len() * 2);
+        // Said outright, one of each kind: movsd from a register keeps the upper half
+        // and from memory clears it; movd clears all above 32 bits.
+        let (c, _) = checked(&[0xf2, 0x0f, 0x10, 0xca, 0xf2, 0x0f, 0x10, 0x1e, 0x66, 0x0f, 0x6e, 0xe0, 0x0f, 0x05], &9u64.to_le_bytes(), &|c| {
+            fill_xmm(c);
+            (c.xmm[2], c.xmm[3], c.xmm[4]) = (1, 2, 3);
+            c.reg[RAX] = 0x1_0000_0005;
+            c.reg[RSI] = DATA;
+        });
+        assert_eq!((c.xmm[2], c.xmm[3], c.xmm[6], c.xmm[7], c.xmm[8], c.xmm[9]), (3, 2, 9, 0, 5, 0));
+    }
+
+    #[test]
+    fn a_fault_at_an_sse_instructions_load_or_store_changes_nothing() {
+        // add edx, 1; addsd xmm1, [rsi]; ...  and  add edx, 1; movups [rsi], xmm1
+        for (code, access) in [
+            (&[0x83u8, 0xc2, 0x01, 0xf2, 0x0f, 0x58, 0x0e, 0x0f, 0x05][..], Access::Read),
+            (&[0x83, 0xc2, 0x01, 0x0f, 0x11, 0x0e, 0x0f, 0x05], Access::Write),
+        ] {
+            let mut m = guest(code, &[]);
+            let mut jit = Jit::new(false, 1).unwrap();
+            let mut c = Cpu::new(CODE, DATA + 4096);
+            fill_xmm(&mut c);
+            let xmm = c.xmm;
+            c.reg[RSI] = 0x90_0000;
+            let Event::Stop(stop) = jit.run(&mut c, &mut m) else { panic!("it went on") };
+            assert_eq!(stop, Stop::Fault(crate::mem::Fault { addr: 0x90_0000, access }));
+            assert_eq!((c.rip, c.steps, c.reg[RDX], c.xmm), (CODE + 3, 1, 1, xmm));
+            assert_eq!(jit.stats.faults, 1);
+        }
     }
 }

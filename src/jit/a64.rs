@@ -313,6 +313,122 @@ pub fn mov_imm(rd: u8, value: u64, out: &mut [u32; 4]) -> usize {
     n
 }
 
+// ---- Floating point and the vector registers (ADR 0015) -----------------------------------
+//
+// A vector register is its number, 0 to 31. `double` chooses the 64-bit element (D
+// registers) over the 32-bit one (S registers).
+
+fn ty(double: bool) -> u32 {
+    (double as u32) << 22
+}
+
+/// The four of arithmetic with two operands, by their numbers in an instruction.
+#[derive(Clone, Copy)]
+pub enum Fp {
+    Mul = 0,
+    Div = 1,
+    Add = 2,
+    Sub = 3,
+}
+
+pub fn fp_arith(double: bool, op: Fp, rd: u8, rn: u8, rm: u8) -> u32 {
+    0x1e20_0800 | ty(double) | r(rm) << 16 | (op as u32) << 12 | r(rn) << 5 | r(rd)
+}
+
+pub fn fsqrt(double: bool, rd: u8, rn: u8) -> u32 {
+    0x1e21_c000 | ty(double) | r(rn) << 5 | r(rd)
+}
+
+/// A comparison that sets the host's flags: less 1000, equal 0110, greater 0010, and
+/// 0011 where either is not a number (R019).
+pub fn fcmp(double: bool, rn: u8, rm: u8) -> u32 {
+    0x1e20_2000 | ty(double) | r(rm) << 16 | r(rn) << 5
+}
+
+/// The same comparison if the condition holds; else the flags are `nzcv`.
+pub fn fccmp(double: bool, rn: u8, rm: u8, nzcv: u32, cond: Cond) -> u32 {
+    0x1e20_0400 | ty(double) | r(rm) << 16 | (cond as u32) << 12 | r(rn) << 5 | nzcv
+}
+
+/// `rn` if the condition holds, else `rm`.
+pub fn fcsel(double: bool, rd: u8, rn: u8, rm: u8, cond: Cond) -> u32 {
+    0x1e20_0c00 | ty(double) | r(rm) << 16 | (cond as u32) << 12 | r(rn) << 5 | r(rd)
+}
+
+/// A single to a double (`to_double`), or a double to a single.
+pub fn fcvt(to_double: bool, rd: u8, rn: u8) -> u32 {
+    (if to_double { 0x1e22_c000 } else { 0x1e62_4000 }) | r(rn) << 5 | r(rd)
+}
+
+/// A signed integer in a general register (64 bits if `wide`) to a float.
+pub fn scvtf(wide: bool, double: bool, rd: u8, rn: u8) -> u32 {
+    sf(wide) | 0x1e22_0000 | ty(double) | r(rn) << 5 | r(rd)
+}
+
+/// A float to a signed integer in a general register, cut off toward zero; what does
+/// not fit is the largest or the smallest integer, and what is not a number is zero.
+pub fn fcvtzs(wide: bool, double: bool, rd: u8, rn: u8) -> u32 {
+    sf(wide) | 0x1e38_0000 | ty(double) | r(rn) << 5 | r(rd)
+}
+
+/// The bits of a general register to a vector register's low element (64 bits if
+/// `wide`, else 32), the rest of it zero; and the other way.
+pub fn fmov_to_fp(wide: bool, rd: u8, rn: u8) -> u32 {
+    (if wide { 0x9e67_0000 } else { 0x1e27_0000 }) | r(rn) << 5 | r(rd)
+}
+
+pub fn fmov_from_fp(wide: bool, rd: u8, rn: u8) -> u32 {
+    (if wide { 0x9e66_0000 } else { 0x1e26_0000 }) | r(rn) << 5 | r(rd)
+}
+
+/// The low element of a vector register to another's, the rest of that one zero.
+pub fn fmov(double: bool, rd: u8, rn: u8) -> u32 {
+    0x1e20_4000 | ty(double) | r(rn) << 5 | r(rd)
+}
+
+/// The low element of a vector register to another's, the rest of that one kept.
+pub fn ins_low(double: bool, rd: u8, rn: u8) -> u32 {
+    (if double { 0x6e08_0400 } else { 0x6e04_0400 }) | r(rn) << 5 | r(rd)
+}
+
+/// The logic of all 128 bits of two vector registers. `Bic` is `rn` and not `rm`.
+#[derive(Clone, Copy)]
+pub enum VLogic {
+    And = 0x4e20_1c00,
+    Bic = 0x4e60_1c00,
+    Orr = 0x4ea0_1c00,
+    Eor = 0x6e20_1c00,
+}
+
+pub fn vlogic(op: VLogic, rd: u8, rn: u8, rm: u8) -> u32 {
+    op as u32 | r(rm) << 16 | r(rn) << 5 | r(rd)
+}
+
+/// How much of a vector register a load or a store is of.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FpSize {
+    S,
+    D,
+    Q,
+}
+
+/// A load (the rest of the register zero) or a store of a vector register at the sum
+/// of two general registers.
+pub fn fp_mem(size: FpSize, load: bool, rt: u8, rn: u8, rm: u8) -> u32 {
+    let form = match size {
+        FpSize::S => 0xbc20_6800,
+        FpSize::D => 0xfc20_6800,
+        FpSize::Q => 0x3ca0_6800,
+    };
+    form | (load as u32) << 22 | r(rm) << 16 | r(rn) << 5 | r(rt)
+}
+
+/// A compare of a register with the negative of a small constant if the condition
+/// holds; else the flags are `nzcv`.
+pub fn ccmn_imm(wide: bool, rn: u8, imm: u32, nzcv: u32, cond: Cond) -> u32 {
+    sf(wide) | 0x3a40_0800 | imm << 16 | (cond as u32) << 12 | r(rn) << 5 | nzcv
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -474,11 +590,55 @@ mod tests {
             (cset(true, 1, Cond::Vs), 0x9a9f77e1, "cset x1, vs"),
             (nop(), 0xd503201f, "nop"),
             (brk(), 0xd4200000, "brk #0"),
+            // Floating point and vectors (Apple clang, 2026-11-25).
+            (fp_arith(true, Fp::Add, 16, 1, 17), 0x1e712830, "fadd d16, d1, d17"),
+            (fp_arith(false, Fp::Add, 16, 1, 17), 0x1e312830, "fadd s16, s1, s17"),
+            (fp_arith(true, Fp::Sub, 3, 4, 5), 0x1e653883, "fsub d3, d4, d5"),
+            (fp_arith(false, Fp::Mul, 31, 0, 15), 0x1e2f081f, "fmul s31, s0, s15"),
+            (fp_arith(true, Fp::Div, 16, 15, 17), 0x1e7119f0, "fdiv d16, d15, d17"),
+            (fsqrt(true, 16, 17), 0x1e61c230, "fsqrt d16, d17"),
+            (fsqrt(false, 2, 3), 0x1e21c062, "fsqrt s2, s3"),
+            (fcmp(true, 16, 16), 0x1e702200, "fcmp d16, d16"),
+            (fcmp(false, 1, 17), 0x1e312020, "fcmp s1, s17"),
+            (fccmp(true, 2, 2, 7, Cond::Vc), 0x1e627447, "fccmp d2, d2, #7, vc"),
+            (fccmp(false, 1, 17, 7, Cond::Vc), 0x1e317427, "fccmp s1, s17, #7, vc"),
+            (fcsel(true, 16, 1, 17, Cond::Mi), 0x1e714c30, "fcsel d16, d1, d17, mi"),
+            (fcsel(false, 16, 1, 17, Cond::Gt), 0x1e31cc30, "fcsel s16, s1, s17, gt"),
+            (fcvt(true, 16, 17), 0x1e22c230, "fcvt d16, s17"),
+            (fcvt(false, 16, 3), 0x1e624070, "fcvt s16, d3"),
+            (scvtf(false, true, 16, 5), 0x1e6200b0, "scvtf d16, w5"),
+            (scvtf(true, true, 16, 5), 0x9e6200b0, "scvtf d16, x5"),
+            (scvtf(false, false, 16, 16), 0x1e220210, "scvtf s16, w16"),
+            (scvtf(true, false, 16, 16), 0x9e220210, "scvtf s16, x16"),
+            (fcvtzs(false, true, 16, 3), 0x1e780070, "fcvtzs w16, d3"),
+            (fcvtzs(true, true, 16, 3), 0x9e780070, "fcvtzs x16, d3"),
+            (fcvtzs(false, false, 0, 17), 0x1e380220, "fcvtzs w0, s17"),
+            (fcvtzs(true, false, 15, 17), 0x9e38022f, "fcvtzs x15, s17"),
+            (fmov_to_fp(false, 3, 16), 0x1e270203, "fmov s3, w16"),
+            (fmov_to_fp(true, 3, 9), 0x9e670123, "fmov d3, x9"),
+            (fmov_from_fp(false, 9, 3), 0x1e260069, "fmov w9, s3"),
+            (fmov_from_fp(true, 16, 15), 0x9e6601f0, "fmov x16, d15"),
+            (fmov(true, 3, 4), 0x1e604083, "fmov d3, d4"),
+            (fmov(false, 3, 4), 0x1e204083, "fmov s3, s4"),
+            (ins_low(true, 1, 16), 0x6e080601, "mov v1.d[0], v16.d[0]"),
+            (ins_low(false, 15, 16), 0x6e04060f, "mov v15.s[0], v16.s[0]"),
+            (vlogic(VLogic::And, 1, 2, 17), 0x4e311c41, "and v1.16b, v2.16b, v17.16b"),
+            (vlogic(VLogic::Bic, 1, 17, 1), 0x4e611e21, "bic v1.16b, v17.16b, v1.16b"),
+            (vlogic(VLogic::Orr, 1, 2, 3), 0x4ea31c41, "orr v1.16b, v2.16b, v3.16b"),
+            (vlogic(VLogic::Eor, 15, 15, 15), 0x6e2f1def, "eor v15.16b, v15.16b, v15.16b"),
+            (fp_mem(FpSize::S, true, 3, 20, 17), 0xbc716a83, "ldr s3, [x20, x17]"),
+            (fp_mem(FpSize::D, true, 3, 20, 17), 0xfc716a83, "ldr d3, [x20, x17]"),
+            (fp_mem(FpSize::Q, true, 17, 20, 4), 0x3ce46a91, "ldr q17, [x20, x4]"),
+            (fp_mem(FpSize::S, false, 3, 20, 17), 0xbc316a83, "str s3, [x20, x17]"),
+            (fp_mem(FpSize::D, false, 15, 20, 17), 0xfc316a8f, "str d15, [x20, x17]"),
+            (fp_mem(FpSize::Q, false, 3, 20, 4), 0x3ca46a83, "str q3, [x20, x4]"),
+            (ccmn_imm(false, 16, 1, 1, Cond::Vc), 0x3a417a01, "ccmn w16, #1, #1, vc"),
+            (ccmn_imm(true, 16, 1, 1, Cond::Vc), 0xba417a01, "ccmn x16, #1, #1, vc"),
         ];
         for (ours, theirs, name) in cases {
             assert_eq!(ours, theirs, "{name}: {ours:08x}, the assembler {theirs:08x}");
         }
-        assert_eq!(cases.len(), 152);
+        assert_eq!(cases.len(), 195);
     }
 
     #[test]

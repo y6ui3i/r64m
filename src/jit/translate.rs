@@ -19,9 +19,9 @@
 //!   adds the block's to it, so that a block may go on to the next without Rust
 //!   between (R009).
 
-use super::a64::{self, Cond, Logic, Mem as Op, Shift, Size};
+use super::a64::{self, Cond, Fp, FpSize, Logic, Mem as Op, Shift, Size, VLogic};
 use super::{BASE, CPU, LEFT_AT_END, LEFT_FOR_THE_INTERPRETER, OUT, RAN, REASON, TABLE, TABLE_BITS};
-use crate::cpu::{Cpu, REC_ADC, REC_ADD, REC_ADD_BY_RESULT, REC_BSF, REC_BSR, REC_IMUL, REC_LOGIC, REC_MUL, REC_SBB, REC_SHIFT, REC_SUB, REC_SUB_BY_RESULT};
+use crate::cpu::{Cpu, REC_ADC, REC_ADD, REC_ADD_BY_RESULT, REC_BSF, REC_BSR, REC_FLOAT, REC_IMUL, REC_LOGIC, REC_MUL, REC_SBB, REC_SHIFT, REC_SUB, REC_SUB_BY_RESULT};
 use crate::mem::Mem;
 use std::mem::offset_of;
 
@@ -40,6 +40,9 @@ const REC_KIND: u8 = 21;
 const REC_A: u8 = 22;
 const REC_B: u8 = 23;
 const RSP: u8 = 4;
+// Scratch among the vector registers (ADR 0015).
+const V0: u8 = 16;
+const V1: u8 = 17;
 
 /// A block as translated: its code, and for the instruction at each place in it where
 /// its code begins (in instructions of the host's) and its address in the guest.
@@ -79,6 +82,43 @@ struct Ins {
     rm: Rm,
     /// The constant, with its sign; for a jump, where it goes.
     imm: i64,
+    /// For an SSE instruction, the prefix that says which it is: 0 none, 1 66h,
+    /// 2 F3h, 3 F2h (the interpreter's numbers). Else 0.
+    pre: u8,
+}
+
+/// Is this opcode an SSE instruction that is translated (ADR 0015)?
+fn is_sse(op: u16) -> bool {
+    matches!(
+        op,
+        0x110 | 0x111 | 0x128 | 0x129 | 0x12a | 0x12c | 0x12e | 0x12f | 0x151 | 0x154..=0x15a | 0x15c..=0x15f
+            | 0x16e | 0x16f | 0x17e | 0x17f | 0x1d6 | 0x1db | 0x1df | 0x1eb | 0x1ef
+    )
+}
+
+/// Is it one with this prefix?
+fn sse_with(op: u16, pre: u8) -> bool {
+    match op {
+        // The moves of 128 bits and of a low element; the scalar ones by F3h and F2h.
+        0x110 | 0x111 => pre < 4,
+        // MOVAPS and MOVAPD, UCOMIS and COMIS, and the logic of the whole register.
+        0x128 | 0x129 | 0x12e | 0x12f | 0x154..=0x157 => pre < 2,
+        // MOVDQA and MOVDQU; MOVD and MOVQ out of a register (66h), MOVQ into one
+        // (F3h).
+        0x16f | 0x17f | 0x17e => pre == 1 || pre == 2,
+        // MOVD and MOVQ into a register, MOVQ out of one, PAND, PANDN, POR, PXOR.
+        0x16e | 0x1d6 | 0x1db | 0x1df | 0x1eb | 0x1ef => pre == 1,
+        // The scalar arithmetic and the conversions.
+        0x12a | 0x12c | 0x151 | 0x158..=0x15a | 0x15c..=0x15f => pre == 2 || pre == 3,
+        _ => false,
+    }
+}
+
+/// Does this instruction's translation spend the host's flags without setting x86's:
+/// the arithmetic and the conversions, which test their result with them (ADR 0015,
+/// point 2), and the smaller and the larger, which are a comparison?
+fn sse_spends_flags(op: u16) -> bool {
+    matches!(op, 0x12c | 0x151 | 0x158..=0x15a | 0x15c..=0x15f)
 }
 
 /// Reads the instruction at `rip` from its bytes, if it is one of those translated.
@@ -96,13 +136,15 @@ fn read(bytes: &[u8], rip: u64) -> Option<Ins> {
         Some(u64::from_le_bytes(v))
     };
     // The prefixes that are read: 66h (16 bits), F3h (kept for the few opcodes it is
-    // allowed before), and the segments that do nothing in 64-bit code. Then REX.
-    let (mut p66, mut f3) = (false, false);
+    // allowed before), F2h (before an SSE opcode only), and the segments that do
+    // nothing in 64-bit code. Then REX.
+    let (mut p66, mut f3, mut f2) = (false, false, false);
     let mut b = next(1)? as u8;
     loop {
         match b {
             0x66 => p66 = true,
             0xf3 => f3 = true,
+            0xf2 => f2 = true,
             0x26 | 0x2e | 0x36 | 0x3e => {}
             _ => break,
         }
@@ -119,14 +161,24 @@ fn read(bytes: &[u8], rip: u64) -> Option<Ins> {
     if byte {
         op |= 1;
     }
+    // An SSE opcode's prefix says which instruction it is, not how wide: `size` is
+    // that of its general register or integer in memory, if it has one.
+    let sse = is_sse(op);
+    let pre = match (p66, f3, f2) {
+        (false, false, false) => 0,
+        (true, false, false) => 1,
+        (false, true, false) => 2,
+        (false, false, true) => 3,
+        _ => 4,
+    };
     // SETcc writes a byte.
-    let size = match (byte || matches!(op, 0x190..=0x19f), rex & 8 != 0, p66) {
+    let size = match (byte || matches!(op, 0x190..=0x19f), rex & 8 != 0, p66 && !sse) {
         (true, _, _) => 8,
         (_, true, _) => 64,
         (_, _, true) => 16,
         _ => 32,
     };
-    let mut ins = Ins { op, len: 0, size, rex: rex != 0, reg: 0, rm: Rm::Reg(0), imm: 0 };
+    let mut ins = Ins { op, len: 0, size, rex: rex != 0, reg: 0, rm: Rm::Reg(0), imm: 0, pre: if sse { pre } else { 0 } };
 
     // What follows the opcode: a ModRM byte, and a constant of how many bytes (for
     // the opcodes whose constant is as wide as the operand, 4 at most).
@@ -136,6 +188,7 @@ fn read(bytes: &[u8], rip: u64) -> Option<Ins> {
         _ => 4,
     };
     let (modrm, mut imm) = match op {
+        _ if sse => (true, 0),
         0x01 | 0x03 | 0x09 | 0x0b | 0x21 | 0x23 | 0x29 | 0x2b | 0x31 | 0x33 | 0x39 | 0x3b => (true, 0),
         0x11 | 0x13 | 0x19 | 0x1b => (true, 0),
         0x1c8..=0x1cf => (false, 0),
@@ -210,6 +263,12 @@ fn read(bytes: &[u8], rip: u64) -> Option<Ins> {
     if matches!(op, 0xe8 | 0xe9 | 0xeb | 0x70..=0x7f | 0x180..=0x18f) {
         ins.imm = end.wrapping_add(ins.imm as u64) as i64;
     }
+    if sse {
+        return sse_with(op, pre).then_some(ins);
+    }
+    if f2 {
+        return None;
+    }
     // The A register and a constant: read as the same instruction in its general form
     // (81h with the kind in the ModRM byte's field; F7h with field 0 for TEST).
     if matches!(op, 0x05 | 0x0d | 0x15 | 0x1d | 0x25 | 0x2d | 0x35 | 0x3d | 0xa9) {
@@ -272,6 +331,8 @@ fn flags_of(ins: &Ins) -> Flags {
     match ins.op {
         0x11 | 0x13 | 0x19 | 0x1b => Flags::Carry,
         0x81 | 0x83 if matches!(field, 2 | 3) => Flags::Carry,
+        // UCOMIS and COMIS.
+        0x12e | 0x12f => Flags::All,
         0x01..=0x3b | 0x81 | 0x83 | 0x85 | 0x1bc | 0x1bd | 0x69 | 0x6b | 0x1af => Flags::All,
         // TEST, NEG, MUL and IMUL write them; NOT, DIV and IDIV leave them.
         0xf7 if matches!(field, 0 | 3 | 4 | 5) => Flags::All,
@@ -300,6 +361,7 @@ fn host_flags_of(ins: &Ins) -> Option<HostFlags> {
         }),
         0xf7 if field == 0 => Some(HostFlags::Logic),
         0xf7 if field == 3 => Some(HostFlags::Sub),
+        0x12e | 0x12f => Some(HostFlags::Float),
         _ => None,
     }
 }
@@ -421,7 +483,7 @@ impl Scan<'_> {
                     // A shift by CL or a rotation leaves the host's flags no longer
                     // what a jump would ask (and a rotation may end the block); so
                     // does a division, which tests its operands with them.
-                    if matches!(ins.op, 0xc1 | 0xd1 | 0xd3 | 0xf7) {
+                    if matches!(ins.op, 0xc1 | 0xd1 | 0xd3 | 0xf7) || sse_spends_flags(ins.op) {
                         host = None;
                     }
                     at = next;
@@ -493,6 +555,11 @@ enum HostFlags {
     Sub,
     /// Of an ANDS: carry and overflow are clear, as x86's are.
     Logic,
+    /// Of a comparison of two floats, with "either is not a number" made 0111 (N Z C
+    /// V): then each of x86's conditions on ZF, PF and CF is one of the host's
+    /// (ADR 0015, point 4; the table there has two branches for equality, which the
+    /// 0111 saves).
+    Float,
 }
 
 /// How one of x86's sixteen conditions is asked of the host's flags.
@@ -507,6 +574,13 @@ fn condition(cc: u8, flags: HostFlags) -> Option<Jump> {
     use HostFlags::*;
     // By pairs: the odd one of each is the even one's opposite.
     let even = match (cc >> 1, flags) {
+        // After a comparison of floats OF and SF are clear, CF is "less or not
+        // numbers", ZF "equal or not numbers", PF "not numbers".
+        (0 | 4 | 6, Float) => Jump::Never,
+        (1, Float) => Jump::If(Lt),
+        (2 | 7, Float) => Jump::If(Eq),
+        (3, Float) => Jump::If(Le),
+        (5, Float) => Jump::If(Vs),
         (0, _) => Jump::If(Vs),                     // overflow
         (1, Sub) => Jump::If(Lo),                   // below: carry
         (1, Add) => Jump::If(Hs),
@@ -546,6 +620,10 @@ struct Emit<'a> {
     /// be: its record is written (something may read the flags), or a jump of the
     /// block will ask the host's.
     host: bool,
+    /// The ways out to the interpreter that are written after the block's end: where
+    /// the conditional jump to each is, the instruction it leaves to the interpreter,
+    /// and how many of the block's instructions came before that one.
+    bails: Vec<(usize, u64, usize)>,
 }
 
 impl Emit<'_> {
@@ -685,16 +763,201 @@ impl Emit<'_> {
             // The distance goes into bits 5 to 23 of a CBZ, CBNZ or B.cond.
             self.w[j] |= ((stub - j) as u32 & 0x7_ffff) << 5;
         }
-        // Not a way out that can be joined: the block that begins at `at` may be this
-        // one, and the instruction is the interpreter's this time whatever begins
-        // there.
+        self.bail_out(at, n);
+        self.w[over] = a64::b((self.w.len() - over) as i32);
+    }
+
+    /// The way out itself. Not one that can be joined: the block that begins at `at`
+    /// may be this one, and the instruction is the interpreter's this time whatever
+    /// begins there.
+    fn bail_out(&mut self, at: u64, n: usize) {
         self.put(a64::arith_imm(true, false, false, RAN, RAN, n as u32, false));
         self.put(a64::mem_imm(Size::X, Op::Store, a64::ZR, CPU, offset_of!(Cpu, left_from) as u32));
         self.constant(T0, at);
         self.put(a64::mem_imm(Size::X, Op::Store, T0, CPU, offset_of!(Cpu, rip) as u32));
         self.put(a64::movz(true, REASON, LEFT_FOR_THE_INTERPRETER as u16, 0));
         self.put(a64::br(OUT));
-        self.w[over] = a64::b((self.w.len() - over) as i32);
+    }
+
+    /// A jump, if what the host's instruction made is not a number (the host's
+    /// overflow flag after a comparison says so), to a way out written after the
+    /// block's end: the instruction at `at` is the interpreter's then, which has
+    /// x86's rules for it (ADR 0015, point 2).
+    fn bail_if_unordered(&mut self, at: u64, n: usize) {
+        self.bails.push((self.w.len(), at, n));
+        self.put(a64::b_cond(Cond::Vs, 0));
+    }
+
+    /// The vector register that holds an SSE instruction's source operand: the
+    /// guest's own, or memory of `size` read into `V1`.
+    fn fsrc(&mut self, rm: Rm, size: FpSize) -> u8 {
+        match rm {
+            Rm::Reg(s) => s,
+            Rm::Mem { base, index, disp } => {
+                let a = self.address(base, index, disp);
+                self.put(a64::fp_mem(size, true, V1, BASE, a));
+                V1
+            }
+        }
+    }
+
+    /// One SSE instruction (ADR 0015). `at` is where it is and `n` how many of the
+    /// block's instructions came before it. The guest's XMM registers are the host's
+    /// v0 to v15; none is changed before the instruction's load, and none at all on
+    /// the way that leaves it to the interpreter.
+    fn sse(&mut self, ins: &Ins, at: u64, n: usize) {
+        let (reg, pre, wide) = (ins.reg, ins.pre, ins.size == 64);
+        // The element of a scalar instruction: F2h is a double, F3h a single.
+        let double = pre == 3;
+        let low = if double { FpSize::D } else { FpSize::S };
+        match ins.op {
+            // Into a register: all of it, or the low element (from a register the
+            // rest of the one written is kept; from memory it is zero).
+            0x110 | 0x128 | 0x16f => match (ins.rm, ins.op == 0x110 && pre >= 2) {
+                (Rm::Reg(s), false) => self.put(a64::vlogic(VLogic::Orr, reg, s, s)),
+                (Rm::Reg(s), true) => self.put(a64::ins_low(double, reg, s)),
+                (Rm::Mem { base, index, disp }, scalar) => {
+                    let a = self.address(base, index, disp);
+                    self.put(a64::fp_mem(if scalar { low } else { FpSize::Q }, true, reg, BASE, a));
+                }
+            },
+            // And out of one.
+            0x111 | 0x129 | 0x17f => match (ins.rm, ins.op == 0x111 && pre >= 2) {
+                (Rm::Reg(d), false) => self.put(a64::vlogic(VLogic::Orr, d, reg, reg)),
+                (Rm::Reg(d), true) => self.put(a64::ins_low(double, d, reg)),
+                (Rm::Mem { base, index, disp }, scalar) => {
+                    let a = self.address(base, index, disp);
+                    self.put(a64::fp_mem(if scalar { low } else { FpSize::Q }, false, reg, BASE, a));
+                }
+            },
+            // MOVD and MOVQ from a general register or memory: the rest is zero.
+            0x16e => match ins.rm {
+                Rm::Reg(s) => self.put(a64::fmov_to_fp(wide, reg, s)),
+                Rm::Mem { base, index, disp } => {
+                    let a = self.address(base, index, disp);
+                    self.put(a64::fp_mem(if wide { FpSize::D } else { FpSize::S }, true, reg, BASE, a));
+                }
+            },
+            // MOVD and MOVQ to a general register or memory (66h).
+            0x17e if pre == 1 => match ins.rm {
+                Rm::Reg(d) => self.put(a64::fmov_from_fp(wide, d, reg)),
+                Rm::Mem { base, index, disp } => {
+                    let a = self.address(base, index, disp);
+                    self.put(a64::fp_mem(if wide { FpSize::D } else { FpSize::S }, false, reg, BASE, a));
+                }
+            },
+            // MOVQ between XMM registers or from memory (F3h): the upper half zero.
+            0x17e => match ins.rm {
+                Rm::Reg(s) => self.put(a64::fmov(true, reg, s)),
+                Rm::Mem { base, index, disp } => {
+                    let a = self.address(base, index, disp);
+                    self.put(a64::fp_mem(FpSize::D, true, reg, BASE, a));
+                }
+            },
+            // MOVQ to an XMM register (its upper half zero) or to memory.
+            0x1d6 => match ins.rm {
+                Rm::Reg(d) => self.put(a64::fmov(true, d, reg)),
+                Rm::Mem { base, index, disp } => {
+                    let a = self.address(base, index, disp);
+                    self.put(a64::fp_mem(FpSize::D, false, reg, BASE, a));
+                }
+            },
+            // AND, ANDN (not the register, and the operand), OR, XOR of all 128 bits.
+            0x154..=0x157 | 0x1db | 0x1df | 0x1eb | 0x1ef => {
+                let b = self.fsrc(ins.rm, FpSize::Q);
+                self.put(match ins.op {
+                    0x154 | 0x1db => a64::vlogic(VLogic::And, reg, reg, b),
+                    0x155 | 0x1df => a64::vlogic(VLogic::Bic, reg, b, reg),
+                    0x156 | 0x1eb => a64::vlogic(VLogic::Orr, reg, reg, b),
+                    _ => a64::vlogic(VLogic::Eor, reg, reg, b),
+                });
+            }
+            // The arithmetic of the low element: the host's, where what it makes is
+            // a number.
+            0x151 | 0x158 | 0x159 | 0x15c | 0x15e => {
+                let b = self.fsrc(ins.rm, low);
+                self.put(match ins.op {
+                    0x151 => a64::fsqrt(double, V0, b),
+                    0x158 => a64::fp_arith(double, Fp::Add, V0, reg, b),
+                    0x159 => a64::fp_arith(double, Fp::Mul, V0, reg, b),
+                    0x15c => a64::fp_arith(double, Fp::Sub, V0, reg, b),
+                    _ => a64::fp_arith(double, Fp::Div, V0, reg, b),
+                });
+                self.put(a64::fcmp(double, V0, V0));
+                self.bail_if_unordered(at, n);
+                self.put(a64::ins_low(double, reg, V0));
+            }
+            // The smaller and the larger: a comparison and a choice, which is x86's
+            // rule in every case (R019).
+            0x15d | 0x15f => {
+                let b = self.fsrc(ins.rm, low);
+                self.put(a64::fcmp(double, reg, b));
+                self.put(a64::fcsel(double, V0, reg, b, if ins.op == 0x15d { Cond::Mi } else { Cond::Gt }));
+                self.put(a64::ins_low(double, reg, V0));
+            }
+            // UCOMIS and COMIS (66h: doubles). The host's flags are the comparison's
+            // if both are numbers, else 0111: three instructions and no jump.
+            0x12e | 0x12f => {
+                let double = pre == 1;
+                let b = self.fsrc(ins.rm, if double { FpSize::D } else { FpSize::S });
+                self.put(a64::fcmp(double, reg, reg));
+                self.put(a64::fccmp(double, b, b, 0b0111, Cond::Vc));
+                self.put(a64::fccmp(double, reg, b, 0b0111, Cond::Vc));
+                if !self.skip {
+                    self.put(a64::fmov_from_fp(double, REC_A, reg));
+                    self.put(a64::fmov_from_fp(double, REC_B, b));
+                    let bits = if double { 64 } else { 32 };
+                    self.put(a64::movz(true, REC_KIND, (REC_FLOAT << 8 | bits) as u16, 0));
+                }
+                self.flags = Some(HostFlags::Float);
+            }
+            // An integer of a general register or memory to a float: exact on both.
+            0x12a => {
+                let src = self.operand(ins, ins.rm);
+                self.put(a64::scvtf(wide, double, V0, src));
+                self.put(a64::ins_low(double, reg, V0));
+            }
+            // A float to an integer, cut off. The host gives the largest or the
+            // smallest integer for what does not fit and zero for what is not a number,
+            // where x86 gives the smallest for all three; so that is chosen here, with
+            // no way out.
+            0x12c if wide => {
+                let b = self.fsrc(ins.rm, low);
+                self.put(a64::fcmp(double, b, b));
+                self.put(a64::fcvtzs(true, double, T0, b));
+                // Overflow set: not a number, or the largest (and one overflows),
+                // which no float is: it is what the host gives for one too large.
+                self.put(a64::ccmn_imm(true, T0, 1, 0b0001, Cond::Vc));
+                self.put(a64::movz(true, T2, 0x8000, 48));
+                self.put(a64::csel(true, reg, T2, T0, Cond::Vs));
+            }
+            // To 32 bits, by way of 64 (the largest of 32 bits is a number a double
+            // can be): it must be its own lower half's extension, and a number.
+            0x12c => {
+                let b = self.fsrc(ins.rm, low);
+                self.put(a64::fcvtzs(true, double, T0, b));
+                self.put(a64::sxt(true, T2, T0, 32));
+                self.put(a64::arith(true, true, true, a64::ZR, T2, T0, 0));
+                // Equal still, if it fits and compares equal to itself.
+                self.put(a64::fccmp(double, b, b, 0b0000, Cond::Eq));
+                self.put(a64::movz(false, T2, 0x8000, 16));
+                self.put(a64::csel(false, reg, T0, T2, Cond::Eq));
+            }
+            // A single to a double (F3h) and a double to a single: the same test as
+            // the arithmetic's, since x86 makes what is not a number quiet its own way.
+            0x15a => {
+                let to_double = pre == 2;
+                let b = self.fsrc(ins.rm, if to_double { FpSize::S } else { FpSize::D });
+                self.put(a64::fcvt(to_double, V0, b));
+                self.put(a64::fcmp(to_double, V0, V0));
+                self.bail_if_unordered(at, n);
+                self.put(a64::ins_low(to_double, reg, V0));
+            }
+            _ => unreachable!("an SSE opcode that is read and not translated"),
+        }
+        if sse_spends_flags(ins.op) {
+            self.flags = None;
+        }
     }
 
     /// MUL (unsigned) and IMUL with one operand: the A register by `b`, the product's
@@ -998,7 +1261,7 @@ fn size(bits: u32) -> Size {
 /// one that is translated. With `exact` every record of the flags is written, whether
 /// or not anything can read them.
 pub fn translate(m: &Mem, rip: u64, exact: bool) -> Option<Built> {
-    let mut e = Emit { w: Vec::new(), flags: None, m, rip, exact, skip: false, seen: None, later: None, host: true };
+    let mut e = Emit { w: Vec::new(), flags: None, m, rip, exact, skip: false, seen: None, later: None, host: true, bails: Vec::new() };
     let mut starts = Vec::new();
     let mut taken: Vec<Taken> = Vec::new();
     let mut at = rip;
@@ -1460,6 +1723,7 @@ pub fn translate(m: &Mem, rip: u64, exact: bool) -> Option<Built> {
                 }
                 ended = true;
             }
+            op if is_sse(op) => e.sse(&ins, at, starts.len() - 1),
             _ => unreachable!("read gave an instruction that is not translated"),
         }
         // What was asked about the flags before this instruction was written was asked
@@ -1490,6 +1754,12 @@ pub fn translate(m: &Mem, rip: u64, exact: bool) -> Option<Built> {
             e.write_later(l);
         }
         e.leave(way.target, way.n);
+    }
+    // And the ways out to the interpreter.
+    for (jump, at, n) in std::mem::take(&mut e.bails) {
+        // The distance goes into bits 5 to 23 of the B.cond.
+        e.w[jump] |= ((e.w.len() - jump) as u32 & 0x7_ffff) << 5;
+        e.bail_out(at, n);
     }
     Some(Built { words: e.w, starts, end: at, seen: e.seen })
 }

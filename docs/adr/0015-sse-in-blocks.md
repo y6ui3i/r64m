@@ -84,6 +84,9 @@ decision changes neither; both are named under "Not yet".
    that the result is neither the largest nor the smallest integer nor zero from a
    value that was not; where it may be, the instruction is the interpreter's. CVTSD2SI,
    which rounds as MXCSR says, is the interpreter's until it is counted.
+   (As built, R020: x86's one answer for all that does not fit is the smallest
+   integer, which a conditional choice makes without a way out; p_dbl_conv converts
+   what does not fit a third of the time.)
 
 6. **What needs nothing special is translated straight**: the moves (MOVSD, MOVSS,
    MOVAPS, MOVUPS, MOVDQA, MOVDQU, MOVD, MOVQ, to and from memory and the integer
