@@ -1358,3 +1358,32 @@ now blocks.) Eleven primitives are past QEMU, five of them at twice or past it.
 the shifts of 8 and 16 bits, MOVZX from a second byte, BSWAP, a jump the host's flags
 do not answer) as R017. Then two larger things, each a decision before it is a change:
 SSE in blocks; and stores to data beside code on a host with 16 KB pages.
+
+## R017: the integer instructions the count names (2026-11-25)
+
+The card, written before the run.
+
+- **Hypothesis**: five primitives are 81 to 99% in blocks and held back by one or two
+  instructions in their loops that the interpreter runs (R016's count): ADC with a
+  constant and MUL (`p_bignum`, `p_bytes`), shifts of 8 and 16 bits (`p_bitfield`),
+  MOVZX from a second byte (`p_pixel`), DIV and IDIV (`p_muldiv`), BSWAP (`p_sha`).
+  With those translated the five are guessed to be wholly in blocks; `p_bytes`,
+  `p_pixel` and `p_bitfield` to pass QEMU; `p_bignum` and `p_muldiv` to come near it
+  (their multiplications and divisions are a host instruction each, as QEMU's are).
+  `p_sha` is not guessed to move: what holds it is its stores beside its code (R016).
+  `p_switch` is not in this: its instruction is a jump the host's flags do not answer,
+  which is another kind of change.
+- **What is changed from before**: ADC and SBB of 32 and 64 bits, where the host's
+  flags say what the carry is (the carry is put into the host's and ADCS or SBCS does
+  the rest; the record has the carry in it); MUL and IMUL with one operand; DIV and
+  IDIV, which leave for the interpreter where they would fault or where the dividend
+  does not fit the host's division (the upper half not the lower's extension); SHL,
+  SHR and SAR of 8 and 16-bit registers by a constant; MOVZX and MOVSX from AH and its
+  like; BSWAP.
+- **Next move for each result**:
+  - Wholly in blocks and as guessed → blocks that go on past a conditional jump is
+    the next entry (`p_switch`, and every block's length), then the two decisions
+    R016 left (SSE; stores beside code on 16 KB pages)
+  - In blocks and far from QEMU → the count and the listing for that one
+  - A program wrong → put right first
+- **Cut-off**: these six kinds. The shorter race for the integer primitives.
