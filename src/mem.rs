@@ -89,11 +89,14 @@ fn host_prot(prot: u8) -> libc::c_int {
 
 impl Mem {
     /// Reserves the guest's address space: 2^47 bytes if the host gives them (all that
-    /// an x86 program can address), else the largest power of two it does give.
+    /// an x86 program can address), else the largest power of two it does give. On
+    /// macOS no more than 2^40 is asked for: a reservation there costs time in
+    /// proportion to its size (ADR 0013).
     pub fn reserve() -> io::Result<Mem> {
         let host_page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64;
         let mut refused = io::Error::other("no size tried");
-        for bits in (36..=47).rev() {
+        let most = if cfg!(target_os = "macos") { 40 } else { 47 };
+        for bits in (36..=most).rev() {
             let size = 1u64 << bits;
             let p = unsafe {
                 libc::mmap(

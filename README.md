@@ -31,6 +31,8 @@ a Python process serving FastAPI, and `Hello, world` comes back
   r64m is made for is arm64 Linux with 4 KB pages. macOS on Apple silicon is where it
   is developed; there the host protects 16 KB at a time, so a closed page beside an
   open one can be read by generated code, and a guard page does not guard.
+  There the guest also has 2^40 bytes of address space and not 2^47
+  ([0013](docs/adr/0013-macos-reserves-less.md)).
 - **64-bit only**: no 16-bit or 32-bit code, no BIOS.
 
 ## Why this exists
