@@ -968,3 +968,56 @@ The card, written before the run.
 - **Cut-off**: the four kinds above, for the three. Timed by the shorter race (one
   round; 200 rounds only where one round is under a tenth of a second; no run over
   15 s), once for all 23 so that a loss anywhere shows.
+
+**Result: the three run wholly in blocks and are past QEMU: `p_rotate` 1.31 times,
+`p_index` 1.44, `p_funcptr` 3.10. Eight primitives are now past QEMU on this Mac, and
+on three r64m's JIT is level with g64m's or ahead of it.**
+
+On a MacBook Air (Apple M1), macOS 27. The shorter race: one round first, and the
+200-round build where one round is under a tenth of a second, r64m `--jit` beside g64m
+`--jit`, three runs, the least, less a program that does nothing, no run over 15 s.
+QEMU and Rosetta as timed earlier (g64m's E186 table).
+
+The three this entry is about, at 200 rounds:
+
+| | before (R010, R011) | now | | g64m `--jit` | QEMU | Rosetta | QEMU's time / r64m's | in blocks |
+|---|---|---|---|---|---|---|---|---|
+| p_rotate | 65.6 s | 3.368 s | 5,292 M/s | 3.359 s | 4.403 s | 3.060 s | **1.31** | 100.0% (78.7%) |
+| p_index | 28.0 s | 1.195 s | 5,009 M/s | 1.076 s | 1.723 s | 0.420 s | **1.44** | 100.0% (75.6%) |
+| p_funcptr | 12.9 s | 2.944 s | 1,423 M/s | 3.317 s | 9.123 s | 2.867 s | **3.10** | 100.0% (91.0%) |
+
+All the primitives that are wholly or nearly in blocks, at 200 rounds:
+
+| | r64m `--jit` | g64m `--jit` | QEMU | Rosetta | QEMU's time / r64m's | g64m's time / r64m's |
+|---|---|---|---|---|---|---|
+| p_recursion | 0.440 s | 0.540 s | 1.567 s | 0.810 s | 3.56 | 1.23 |
+| p_funcptr | 2.944 s | 3.317 s | 9.123 s | 2.867 s | 3.10 | 1.13 |
+| p_loop | 0.444 s | 0.162 s | 0.773 s | 0.240 s | 1.74 | 0.36 |
+| p_index | 1.195 s | 1.076 s | 1.723 s | 0.420 s | 1.44 | 0.90 |
+| p_pointer | 1.377 s | 1.406 s | 1.900 s | 0.723 s | 1.38 | 1.02 |
+| p_rotate | 3.368 s | 3.359 s | 4.403 s | 3.060 s | 1.31 | 1.00 |
+| p_if | 1.510 s | 1.404 s | 1.873 s | 0.997 s | 1.24 | 0.93 |
+| p_fill | 2.506 s | 1.447 s | 2.883 s | 0.497 s | 1.15 | 0.58 |
+| p_shift | 1.910 s | 0.704 s | 0.893 s | 0.680 s | **0.47** | 0.37 |
+
+- **The hypothesis held**: all three are 100% in blocks and past QEMU. `p_funcptr`
+  was guessed to pass it and did by three times; the two others were guessed to come
+  near it and passed it.
+- **None is at twice QEMU yet** but `p_recursion` and `p_funcptr`.
+- **`p_shift` is wholly in blocks now and is half QEMU's speed**: the one program in
+  blocks that loses to QEMU. It is made of shifts, and every shift writes its record
+  of the flags (three or four host instructions) whether anything reads them or not.
+  The first suspect named in the card, now with a program that shows it.
+- **`p_loop` is at 0.36 of g64m's JIT** though it is past QEMU: the same record,
+  written at every addition of a loop that g64m runs without it.
+- **The other fourteen are still mostly the interpreter's** (0 to 59% in blocks, 42
+  to 113 M instructions a second): the floating-point ones (SSE and the x87 are not
+  translated at all), and integer ones that wait for instructions not yet in the list
+  (`p_sha` is 96.8% in blocks and still at 98 M/s: the few that are left are in its
+  loop). Of all 23 primitives' instructions 51.8% are in blocks.
+- 62 programs give the interpreter's output, exit code and count in four JIT modes on
+  macOS and in the Linux container; 58 unit tests on both.
+
+**Next.** Two things, by what this shows: the record of the flags not written where
+nothing can read it (what `p_shift` and `p_loop` wait for, and every block pays); and
+the instructions that end the blocks of the fourteen, counted by program.

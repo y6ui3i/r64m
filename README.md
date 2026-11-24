@@ -13,14 +13,15 @@ and all 23 of its primitives print what they should, on macOS and on arm64 Linux
 (R003). The interpreter runs 72 million instructions a second on a MacBook Air (Apple
 M1), 1.27 times g64m's interpreter and ahead of it on every primitive (R007); QEMU,
 which is a JIT, runs the same primitives at 1,267 million. r64m's own JIT
-([0014](docs/adr/0014-the-jit.md)) translates blocks of integer instructions on 32 and
-64-bit operands, joins them to one another, and checks each against the interpreter
-when asked (`--jit-check`). It is asked for with `--jit` and is not yet what r64m does
-by itself. Where a program is wholly in such blocks and makes no returns, it is at
-QEMU's speed or past it on this Mac (`p_loop` 1.42 times QEMU, `p_if` 1.09, `p_pointer`
-1.02; R010); returns and jumps through a register still come out to Rust each time
-(`p_recursion` 0.43 of QEMU), and a third of the primitives' instructions are in
-blocks at all. g64m's JIT is faster on every one. There is no dynamic linking,
+([0014](docs/adr/0014-the-jit.md)) translates blocks of integer instructions (moves,
+arithmetic and logic on 8 to 64 bits, shifts, rotations, bit scans, the stack, jumps),
+joins them to one another, finds a return's block without leaving generated code, and
+checks each block against the interpreter when asked (`--jit-check`). It is asked for
+with `--jit` and is not yet what r64m does by itself. Nine of the 23 primitives run
+wholly in such blocks: eight of them are past QEMU on this Mac (1.15 to 3.56 times;
+none but two at twice), one is at half of it (`p_shift`), and on three r64m's JIT is
+level with g64m's or ahead (R012). The other fourteen are still mostly interpreted:
+SSE and the x87 are not translated, nor some integer instructions. There is no dynamic linking,
 no system call beyond `write` and `exit`, and no machine yet.
 
 ## The goal
@@ -87,10 +88,11 @@ real CPU does.
 4. Done (R004 to R007): the interpreter timed, and made faster than g64m's on every
    primitive without giving up the simple form.
 5. The JIT, in ADR 0014's order. Done: the encoder; runnable memory and the way in and
-   out; the translator for the first integer instructions with `--jit-check`; a fault
-   in a block; a store to translated code, and to data beside it; blocks joined.
-   Next: a return and a jump through a register without leaving generated code; more
-   instructions translated, by the count of what ends blocks.
+   out; the translator for integer instructions with `--jit-check`; a fault in a
+   block; a store to translated code, and to data beside it; blocks joined; returns
+   and jumps through an operand found in a table. Next: the record of the flags not
+   written where nothing reads it; the instructions the other primitives wait for;
+   SSE.
 
 One case is owed: the x87's square root when what is left over equals the root (the
 rounding there is not touched by any of g64m's cases; found by breaking it on purpose).
