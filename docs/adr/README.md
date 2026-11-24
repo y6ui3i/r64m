@@ -24,3 +24,4 @@ Each file has: **Status** (accepted, or replaced by which), **Context**, **Decis
 | [0009](0009-two-crates.md) | Two crates from outside: `libc` in the program, `libtest-mimic` for the tests |
 | [0010](0010-the-interpreter-asks-the-list.md) | The interpreter asks the list of regions; generated code does not |
 | [0011](0011-the-goal.md) | The goal for 64 bits: HTTPS through nginx to FastAPI, in an x86-64 container |
+| [0012](0012-rust-only-g64m-for-reference.md) | Rust only; g64m is read, not built upon |

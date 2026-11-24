@@ -4,10 +4,12 @@ An x86-64 emulator with a JIT for arm64 hosts, in Rust: a rebuild of
 [g64m](https://github.com/y6ui3i/g64m), which is written in Goose. Not a port of its
 code: what g64m found out is used, and the design begins again (`docs/adr/`).
 
-**Nothing runs yet.** This repository was started on 2026-11-24. So far there is the
-guest's memory (`src/mem.rs`) and the loader of a static program with its first stack
-(`src/elf.rs`): `r64m program` loads it and prints where it would begin. The next step
-is in "What comes first".
+**Static programs of integer instructions run, interpreted.** This repository was
+started on 2026-11-24. So far: the guest's memory (`src/mem.rs`), the loader of a static
+program with its first stack (`src/elf.rs`), an interpreter for the integer instructions
+(`src/cpu.rs`) and three system calls (`src/sys.rs`). Of g64m's 39 cases with a trace
+from the real CPU, the 26 that use neither the x87 nor SSE give that trace. There is no
+JIT, no x87, no SSE, no dynamic linking and no machine yet.
 
 ## The goal
 
@@ -66,8 +68,10 @@ real CPU does.
    no second design.
 2. Done (R002, ADR 0008, `src/mem.rs`): a program's memory is a reservation of the
    host's address space, protected by the host.
-3. A small statically linked program loaded (done) and run by the interpreter on that
-   memory, its trace the real CPU's (g64m's `tests/expected64`).
+3. Done for the integer instructions: a static program loaded and run by the
+   interpreter on that memory, its trace the real CPU's.
+4. The x87 and SSE, to the same traces; then the primitives (`tests/prim64` of g64m),
+   which print what they compute.
 
 ## Rules of this repository
 
@@ -75,12 +79,19 @@ Everything kept here is written in English: source comments, documentation, the 
 commit messages, branch names, pull requests. An experiment gets a card in
 `docs/experiments.md` before it runs, and its result in the same place, kept or not.
 
-## Building
+## Building and testing
 
 ```sh
 cargo build --release
 cargo test
+target/release/r64m program            # run a static x86-64 program
+target/release/r64m --trace program    # print the registers after every instruction
 ```
 
-The toolchain's version is fixed in `rust-toolchain.toml`, and the versions of the two
-crates from outside in `Cargo.lock` ([0009](docs/adr/0009-two-crates.md)).
+Everything here is Rust; nothing is added in another language (0012). The toolchain's
+version is fixed in `rust-toolchain.toml`, and the versions of the two crates from
+outside in `Cargo.lock` ([0009](docs/adr/0009-two-crates.md)).
+
+`cargo test` holds r64m's traces to the real CPU's. The cases and the traces are g64m's
+and are read from its checkout, beside this one or where `R64M_G64M` says; `nasm` builds
+the cases. Without the checkout those tests are shown as ignored.
