@@ -1057,3 +1057,66 @@ The card, written before the run.
     put right before anything is timed
 - **Cut-off**: this one change; the shorter race for the nine primitives that are
   wholly in blocks. One profile if the guess fails.
+
+**Result: as guessed on both counts. `p_shift` came from 0.47 of QEMU to level with it
+(1.91 s to 0.88 s); `p_loop` hardly moved. Three others gained without being aimed at,
+and `p_index` is the third primitive at twice QEMU.**
+
+On a MacBook Air (Apple M1), macOS 27. The shorter race, 200 rounds, r64m `--jit`
+beside g64m `--jit`; QEMU and Rosetta as timed earlier.
+
+| 200 rounds | before (R012) | now | g64m `--jit` | QEMU | Rosetta | QEMU's time / r64m's | g64m's time / r64m's |
+|---|---|---|---|---|---|---|---|
+| p_shift | 1.910 s | 0.879 s | 0.709 s | 0.893 s | 0.680 s | 1.02 (0.47) | 0.81 |
+| p_index | 1.195 s | 0.777 s | 1.041 s | 1.723 s | 0.420 s | **2.22** (1.44) | 1.34 |
+| p_pointer | 1.377 s | 1.143 s | 1.371 s | 1.900 s | 0.723 s | 1.66 (1.38) | 1.20 |
+| p_rotate | 3.368 s | 3.108 s | 3.392 s | 4.403 s | 3.060 s | 1.42 (1.31) | 1.09 |
+| p_loop | 0.444 s | 0.436 s | 0.169 s | 0.773 s | 0.240 s | 1.77 (1.74) | 0.39 |
+| p_if | 1.510 s | 1.546 s | 1.366 s | 1.873 s | 0.997 s | 1.21 (1.24) | 0.88 |
+| p_funcptr | 2.944 s | 2.937 s | 3.321 s | 9.123 s | 2.867 s | 3.11 | 1.13 |
+| p_recursion | 0.440 s | 0.446 s | 0.549 s | 1.567 s | 0.810 s | 3.51 | 1.23 |
+| p_fill | 2.506 s | 2.505 s | 1.474 s | 2.883 s | 0.497 s | 1.15 | 0.59 |
+
+- **The record was the reason for `p_shift`**: twice as fast with it gone where
+  nothing reads it. No program in blocks loses to QEMU now.
+- **`p_loop` as guessed**: its loop ends in a compare read by its own jump, whose way
+  out of the loop may read the flags, so that record is still written every time
+  round. 0.39 of g64m's JIT.
+- **r64m's JIT is ahead of g64m's on five of the nine** (`p_index`, `p_pointer`,
+  `p_rotate`, `p_funcptr`, `p_recursion`) and behind on four.
+- A fault where the flags are dead finds them as they were before the instruction
+  whose record was left out. A test holds this as it is; it is to be met again when
+  signals are delivered to the guest.
+- 62 programs in four JIT modes and 62 unit tests on macOS and in the Linux container.
+
+**Next.** The card's first case: the second half, as R014.
+
+## R014: a loop's last record made only on the way out that needs it (2026-11-25)
+
+The card, written before the run.
+
+- **Hypothesis**: a loop ends `cmp; jne` (or `sub; jne`, `test; je`, `add; jne`). The
+  jump is answered by the host's flags; the way back into the loop writes the flags
+  again; the way out may read them. So the record is needed on one way only, and R013
+  writes it on both because it writes it at the compare. If an instruction that sets
+  the flags and is followed at once by a jump that the host's flags answer writes no
+  record itself, and the jump writes one on each of its two ways only where the flags
+  are not dead, a loop's body loses those three host instructions. `p_loop` is guessed
+  to gain a tenth to a quarter (its loop is some ten host instructions), `p_if` and
+  the others with compares in their loops something. It is not guessed to bring
+  `p_loop` to g64m's speed: g64m is 2.6 times faster there, which three instructions
+  in ten do not explain.
+- **What is changed from before**: for ADD, SUB, AND, OR, XOR, CMP and TEST of 32 or
+  64 bits on a register with a register or a constant, followed at once by such a
+  jump. What the record needs must still be there at the jump: for CMP and TEST the
+  operands are; for the others the result is, and two new kinds of record say "this
+  is the result and the second operand", from which the first is had again. Not where
+  the two operands are one register (the second is then lost).
+- **Next move for each result**:
+  - `p_loop` gains as guessed and is still far from g64m → a profile of `p_loop`'s
+    loop as generated (what the host instructions are, against g64m's for the same
+    loop), which is its own entry
+  - `p_loop` gains nothing → the record on the way out was not what it costs; the same
+    profile, sooner
+  - A program wrong → put right first
+- **Cut-off**: this one change, the shorter race for the nine.
