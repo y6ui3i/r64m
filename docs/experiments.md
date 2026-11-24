@@ -887,3 +887,44 @@ The card, written before the run.
 - **Cut-off**: `p_recursion` and `p_funcptr` at 200 rounds beside g64m's JIT, three
   races of three runs each, with the counts; the other five of R010's table once, to
   see that nothing is lost. macOS.
+
+**Result: `p_recursion` is past QEMU by 3.7 times, steady over three races, and past
+g64m's JIT and Rosetta too. `p_funcptr` came from 48 s to 12.9 s and is still short of
+QEMU.**
+
+On a MacBook Air (Apple M1), macOS 27. 200 rounds, r64m `--jit` beside g64m `--jit`,
+three runs each, the least, less a program that does nothing; QEMU and Rosetta as timed
+earlier (g64m's E186 table).
+
+| 200 rounds | r64m `--jit` | | g64m `--jit` | QEMU | Rosetta | QEMU's time / r64m's | in blocks | entries |
+|---|---|---|---|---|---|---|---|---|
+| p_recursion, race 1 | 0.428 s | 5,681 M/s | 0.553 s | 1.567 s | 0.810 s | 3.66 | 100.0% | 6,773 |
+| p_recursion, race 2 | 0.426 s | 5,711 M/s | 0.554 s | | | 3.68 | | |
+| p_recursion, race 3 | 0.425 s | 5,724 M/s | 0.552 s | | | **3.68** | | |
+| p_funcptr | 12.870 s | 326 M/s | 3.435 s | 9.123 s | 2.867 s | 0.71 | 91.0% | 185 M |
+| p_loop | 0.562 s | 5,352 M/s | 0.165 s | 0.773 s | 0.240 s | 1.38 | 99.8% | |
+| p_if | 1.763 s | 2,610 M/s | 1.375 s | 1.873 s | 0.997 s | 1.06 | 99.7% | |
+| p_pointer | 1.858 s | 3,549 M/s | 1.422 s | 1.900 s | 0.723 s | 1.02 | 99.6% | |
+
+- **`p_recursion`**: 3.66 s (R010) to 0.43 s. It goes into generated code 6,773 times
+  where it went 144 million. It is the first primitive on which r64m's JIT is faster
+  than g64m's (by 1.3) and than Rosetta (by 1.9). Steady: 0.428, 0.426, 0.425 s. What
+  made it unsteady in R010 (2.03 s and 3.66 s) was on the way that is no longer
+  taken, the look-up in Rust's hash table after every return; it was not found, it
+  went away.
+- **`p_funcptr`**: 48.1 s to 12.9 s; 91.0% of its instructions in blocks where 79.3%
+  were (the calls through a register are translated now). It still goes in 185
+  million times: what it is not translated for is in its loop. Not past QEMU, as the
+  card allowed.
+- **Nothing lost** on `p_loop`, `p_if`, `p_pointer`.
+- **Not done as the card had it**: `p_funcptr` was raced once and not three times, and
+  `p_index` and `p_rotate` not at all. At 200 rounds a primitive that is partly
+  interpreted takes a minute a run, and the race was stopped at the owner's word that
+  it takes too long. From here a race is one round first, and the 200-round build only
+  for what is under a tenth of a second at one round, no run over fifteen seconds.
+- A mistake of the work, not of the code: the commit that brought this in said its
+  unit tests had passed in the Linux container, and three had not (a limit of eight
+  pieces of generated code in a process, met by tests run at once). The command that
+  ran them went on to commit. Put right in the next commit, which says so.
+
+**Next.** R012: what `p_rotate`, `p_index` and `p_funcptr` are not translated for.
