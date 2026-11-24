@@ -13,14 +13,9 @@ use libtest_mimic::{Arguments, Failed, Trial};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Cases by the first letters of their names, and what each waits for.
-const NOT_YET: [(&str, &str); 5] = [
-    ("a_prefix", "the x87"),
-    ("x_fxsave", "the x87, whose state FXSAVE keeps"),
-    ("f_", "the x87"),
-    ("j_x87", "the x87"),
-    ("c_ld", "the x87 (long double)"),
-];
+/// Cases by the first letters of their names that wait for something r64m does not
+/// have yet, and what. (None now.)
+const NOT_YET: [(&str, &str); 0] = [];
 
 fn g64m() -> PathBuf {
     match std::env::var_os("R64M_G64M") {

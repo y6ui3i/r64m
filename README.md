@@ -4,13 +4,14 @@ An x86-64 emulator with a JIT for arm64 hosts, in Rust: a rebuild of
 [g64m](https://github.com/y6ui3i/g64m), which is written in Goose. Not a port of its
 code: what g64m found out is used, and the design begins again (`docs/adr/`).
 
-**Static programs run, interpreted, if they do not use the x87.** This repository was
-started on 2026-11-24. So far: the guest's memory (`src/mem.rs`), the loader of a static
-program with its first stack (`src/elf.rs`), an interpreter for the integer instructions
-and SSE and SSE2 (`src/cpu.rs`, `src/cpu/sse.rs`) and three system calls (`src/sys.rs`).
-Of g64m's 39 cases with a trace from the real CPU, 34 give that trace; the five others
-wait for the x87. Of its 23 primitives, 22 print what they should (the other is long
-double). There is no JIT, no x87, no dynamic linking and no machine yet.
+**Static programs run, interpreted.** This repository was started on 2026-11-24. So
+far: the guest's memory (`src/mem.rs`), the loader of a static program with its first
+stack (`src/elf.rs`), an interpreter for the integer instructions, SSE and SSE2 and the
+x87 (`src/cpu.rs`, `src/cpu/sse.rs`, `src/cpu/x87.rs`) and three system calls
+(`src/sys.rs`). All 39 of g64m's cases with a trace from the real CPU give that trace,
+and all 23 of its primitives print what they should. There is no JIT, no dynamic
+linking, no system call beyond `write` and `exit`, and no machine yet; nothing has been
+timed, and nothing has been run on Linux.
 
 ## The goal
 
@@ -69,10 +70,13 @@ real CPU does.
    no second design.
 2. Done (R002, ADR 0008, `src/mem.rs`): a program's memory is a reservation of the
    host's address space, protected by the host.
-3. Done for the integer instructions and SSE: a static program loaded and run by the
-   interpreter on that memory, its trace the real CPU's.
-4. The x87, to the same traces.
-5. The first translated block.
+3. Done: a static program loaded and run by the interpreter on that memory, its trace
+   the real CPU's, for the integer instructions, SSE and the x87.
+4. The first translated block, with the handler of faults it needs (ADR 0008).
+
+One case is owed: the x87's square root when what is left over equals the root (the
+rounding there is not touched by any of g64m's cases; found by breaking it on purpose).
+It needs a trace from the real CPU, and so the oracle in Rust (ADR 0012).
 
 ## Rules of this repository
 

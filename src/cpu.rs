@@ -5,7 +5,7 @@
 //! did (the traces under g64m's `tests/expected64`); where the manual leaves a flag
 //! undefined, what is here is what that CPU does, as g64m found it.
 //!
-//! So far the integer instructions and SSE and SSE2 (`sse`). The x87 is not written yet.
+//! The integer instructions are here; SSE and SSE2 are in `sse`, the x87 in `x87`.
 //!
 //! An instruction that cannot go on gives a `Stop` and leaves RIP on itself. It may
 //! have changed registers or memory before it stopped: nothing is delivered to the
@@ -14,6 +14,7 @@
 use crate::mem::{Access, Fault, Mem};
 
 mod sse;
+mod x87;
 
 pub const CF: u64 = 0x0001;
 pub const PF: u64 = 0x0004;
@@ -47,6 +48,7 @@ pub struct Cpu {
     /// The XMM registers, two words each, low then high.
     pub xmm: [u64; 32],
     pub mxcsr: u32,
+    pub x87: x87::X87,
 }
 
 impl Cpu {
@@ -54,7 +56,7 @@ impl Cpu {
     pub fn new(rip: u64, rsp: u64) -> Cpu {
         let mut reg = [0; 16];
         reg[RSP] = rsp;
-        Cpu { reg, rip, rflags: 0x202, fs_base: 0, gs_base: 0, steps: 0, xmm: [0; 32], mxcsr: 0x1f80 }
+        Cpu { reg, rip, rflags: 0x202, fs_base: 0, gs_base: 0, steps: 0, xmm: [0; 32], mxcsr: 0x1f80, x87: x87::X87::new() }
     }
 }
 
@@ -67,6 +69,8 @@ pub enum Stop {
     Divide,
     /// Not an instruction (UD2, or a form the CPU refuses).
     Undefined,
+    /// What the CPU refuses of an instruction that is one: a general protection fault.
+    Protection,
     /// An instruction r64m has not been taught yet, with its bytes.
     NotWritten(String),
 }
@@ -742,6 +746,37 @@ impl Run<'_> {
         self.c.reg[RDX] = d;
     }
 
+    /// An x87 instruction (D8h to DFh). The unit touches no memory itself: the bytes
+    /// of a memory operand are read for it before, or written for it after. A store
+    /// that cannot be made faults before anything has changed.
+    fn x87(&mut self, op: u8) -> R<()> {
+        self.modrm(0)?;
+        // REX names no other register stack: the fields are 0 to 7.
+        let (md, r, rm) = (self.md, self.reg as u8 & 7, self.rm as u8 & 7);
+        let mut io =
+            x87::Io { buf: [0; 112], env32: !self.p66, rflags: self.c.rflags, ax: None };
+        let mut stores = 0;
+        if md != 3 {
+            let Some((n, store)) = x87::shape(op & 7, r, io.env32) else {
+                return Err(self.not_written());
+            };
+            if store {
+                self.m.check(self.ea, n as u64, Access::Write)?;
+                stores = n;
+            } else {
+                self.m.read_bytes(self.ea, &mut io.buf[..n])?;
+            }
+        }
+        if self.c.x87.escape(op, md, r, rm, &mut io).is_err() {
+            return Err(self.not_written());
+        }
+        self.c.rflags = io.rflags;
+        if let Some(ax) = io.ax {
+            self.sr(RAX, 16, ax as u64);
+        }
+        Ok(self.m.write_bytes(self.ea, &io.buf[..stores])?)
+    }
+
     // ---- one instruction ------------------------------------------------------------
 
     /// Runs it; gives back where to go on and what it asks.
@@ -894,6 +929,8 @@ impl Run<'_> {
                 let sign = self.c.reg[RAX] & msb(osz) != 0;
                 self.sr(RDX, osz, if sign { !0 } else { 0 });
             }
+            // FWAIT: there is never an exception waiting.
+            0x9b => {}
             0x9c => self.push(self.c.rflags & 0xfc_ffff, self.ssz())?,
             0x9d => {
                 // A program may not change IF or IOPL.
@@ -988,6 +1025,7 @@ impl Run<'_> {
                 let d = self.fs8()?;
                 next = Some(self.ip.wrapping_add(d));
             }
+            0xd8..=0xdf => self.x87(op)?,
             0xf5 => self.c.rflags ^= CF,
             0xf8 => self.c.rflags &= !CF,
             0xf9 => self.c.rflags |= CF,

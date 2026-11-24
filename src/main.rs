@@ -14,7 +14,7 @@ use std::io::Write;
 /// What `r64m` says of itself.
 fn banner() -> String {
     format!(
-        "r64m {}: a rebuild of g64m in Rust; runs static programs without the x87, interpreted",
+        "r64m {}: a rebuild of g64m in Rust; runs static programs, interpreted",
         env!("CARGO_PKG_VERSION")
     )
 }
@@ -108,6 +108,7 @@ fn main() {
                     cpu::Stop::Fault(f) => format!("{:?} of {:#x} that is not allowed", f.access, f.addr),
                     cpu::Stop::Divide => "a division that cannot be done".to_string(),
                     cpu::Stop::Undefined => "not an instruction".to_string(),
+                    cpu::Stop::Protection => "an instruction the CPU refuses".to_string(),
                     cpu::Stop::NotWritten(bytes) => format!("an instruction not written yet: {bytes}"),
                 };
                 // Nothing is delivered to the guest yet (ADR 0008's signals): it ends.

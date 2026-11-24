@@ -427,9 +427,56 @@ impl Run<'_> {
         Ok(())
     }
 
-    /// 0F AE: LDMXCSR and STMXCSR by the reg field with a memory operand; the fences
-    /// with a register one, and CLFLUSH, which have nothing to do here. FXSAVE and
-    /// FXRSTOR wait for the x87, whose state they keep.
+    /// FXSAVE: the x87's and SSE's state in 512 bytes of memory, which is how a kernel
+    /// keeps it for a program that is not running. The control and status words, a bit
+    /// for each x87 register in use, MXCSR and the bits of it that exist, the eight x87
+    /// registers as 80-bit values in sixteen bytes each, and the sixteen XMM registers.
+    /// The last x87 instruction's address and operand are not kept, and are written as
+    /// zero. The bytes after the XMM registers are left as they were.
+    fn fxsave(&mut self) -> R<()> {
+        let (cw, sw, used, st) = self.c.x87.fx_get();
+        let mut b = [0u8; 416];
+        let mut put = |at: usize, bytes: usize, v: u64| b[at..at + bytes].copy_from_slice(&v.to_le_bytes()[..bytes]);
+        put(0, 2, cw as u64);
+        put(2, 2, sw as u64);
+        put(4, 2, used as u64);
+        put(24, 4, self.c.mxcsr as u64);
+        put(28, 4, 0xffff);
+        for (i, (m, se)) in st.into_iter().enumerate() {
+            put(32 + i * 16, 8, m);
+            put(40 + i * 16, 2, se as u64);
+        }
+        for (i, v) in self.c.xmm.into_iter().enumerate() {
+            put(160 + i * 8, 8, v);
+        }
+        Ok(self.m.write_bytes(self.ea, &b)?)
+    }
+
+    /// FXRSTOR. An MXCSR with a bit that does not exist is refused.
+    fn fxrstor(&mut self) -> R<()> {
+        let mut b = [0u8; 416];
+        self.m.read_bytes(self.ea, &mut b)?;
+        let get = |at: usize, bytes: usize| {
+            let mut v = [0u8; 8];
+            v[..bytes].copy_from_slice(&b[at..at + bytes]);
+            u64::from_le_bytes(v)
+        };
+        let mxcsr = get(24, 4);
+        if mxcsr & 0xffff_0000 != 0 {
+            return Err(Stop::Protection);
+        }
+        self.c.mxcsr = mxcsr as u32;
+        let st = std::array::from_fn(|i| (get(32 + i * 16, 8), get(40 + i * 16, 2) as u16));
+        self.c.x87.fx_set(get(0, 2) as u16, get(2, 2) as u16, get(4, 2) as u8, st);
+        for i in 0..32 {
+            self.c.xmm[i] = get(160 + i * 8, 8);
+        }
+        Ok(())
+    }
+
+    /// 0F AE: FXSAVE, FXRSTOR, LDMXCSR and STMXCSR by the reg field with a memory
+    /// operand; the fences with a register one, and CLFLUSH, which have nothing to do
+    /// here.
     fn group15(&mut self) -> R<()> {
         self.modrm(0)?;
         let field = self.reg & 7;
@@ -437,6 +484,8 @@ impl Run<'_> {
             return if field < 5 { Err(self.not_written()) } else { Ok(()) };
         }
         match field {
+            0 => self.fxsave()?,
+            1 => self.fxrstor()?,
             2 => self.c.mxcsr = self.rd(self.ea, 32)? as u32 & 0xffff,
             3 => self.wr(self.ea, 32, self.c.mxcsr as u64)?,
             7 => {}
