@@ -443,3 +443,55 @@ The card, written before the run.
 - **Cut-off**: the string change, and for the x87 what the profile shows first and
   second, no more. Raced as in R005: against g64m's interpreter, two at once, five
   runs of each program, three races, the middle one.
+
+**Result: `p_fill` is past g64m's interpreter; `p_ldbl` is nearer and not past (0.90
+of its speed, from 0.75). The cut-off is reached; the x87 goes on under a new card.**
+
+The profile of `p_ldbl` first (`sample`), by where the samples ended: `exec` 806, the
+x87's `escape` 451, the hand-over of the x87's operand (`Run::x87`, with the `memmove`
+and `memcpy` it called, 134 more) 400, **the search of the list of regions 368**,
+`step` 233, the f64 of an 80-bit value (`now`) 212, `soft_add` 158, `arith_to` 142,
+`soft_div` with the library's 128-bit division 186.
+
+- The search was not guessed. R005 remembered one region for each kind of access;
+  this program reads its stack and its data in turn, and the one was wrong every
+  time.
+- The guess (ST(0) and ST(1) made into f64 before the instruction is known) is there,
+  as `now`, but fourth.
+
+What was changed, by the card: the string instructions, and for the x87 the first and
+second of the profile.
+
+1. `rep movs` and `rep stos` going up, with 64-bit addresses, do all their repetitions
+   in one step when no trace is written (`Cpu::rep_whole`): a fill (`Mem::fill`) or a
+   forward copy (`Mem::copy_up`, refused where the copy would read what it wrote: then,
+   and when any of it would fault, a repetition to a step as before). The count goes
+   on by one for each repetition.
+2. Two regions remembered for each kind of access, not one.
+3. The x87's operand handed over by its size (one or two reads or writes of the
+   memory) and not as a copy of a length known only when run.
+
+Raced as the card says (r64m and g64m's interpreter at once, five runs of each
+program, three races):
+
+| race | r64m | g64m, interpreter | all 23 | `p_fill` | `p_ldbl` |
+|---|---|---|---|---|---|
+| 1 | 73.7 M/s | 58.6 M/s | 1.26 | 0.013 s against 0.014 s | 0.328 s against 0.290 s (0.88) |
+| 2 | **72.0 M/s** | **57.0 M/s** | **1.26** | 0.013 s against 0.018 s | 0.331 s against 0.300 s (0.91) |
+| 3 | 70.9 M/s | 56.0 M/s | 1.27 | 0.013 s against 0.022 s | 0.335 s against 0.307 s (0.92) |
+
+- **`p_fill`**: 0.120 s before, 0.013 s now. It is past g64m's, though at a hundredth
+  of a second for either the two cannot be told far apart: what can be said is that
+  it is no longer behind.
+- **`p_ldbl`**: 0.415 s before, 0.33 s now; g64m's 0.30 s. In every other program
+  r64m is ahead; this is the one left.
+- **All 23 together**: 1.26 times g64m's interpreter (1.21 in R005). The second
+  remembered region helped more than the x87: it is every program's.
+- **What holds**: the count of instructions and the output are g64m's for all 23; 23
+  unit tests (six new: the fill, the forward copy, the remembered regions outliving no
+  change, a `rep` in one step against one at a time in registers, flags, memory and
+  count, and one that faults part of the way), the 39 traces.
+- A mistake in the new tests, found by the tests: the first form ended its programs
+  with SYSCALL, which writes RCX, and then compared RCX. They end with UD2 now.
+
+**Next.** R007: the x87's own work, which the profile showed third and after.

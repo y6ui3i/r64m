@@ -94,6 +94,7 @@ fn main() {
         .unwrap_or_else(|e| fail(format_args!("{path}: {e}")));
 
     let mut c = cpu::Cpu::new(loaded.entry, rsp);
+    c.rep_whole = !trace;
     let output = if trace { sys::Output::Nowhere } else { sys::Output::Host };
     let mut lines = std::io::BufWriter::new(std::io::stdout().lock());
     let code = loop {

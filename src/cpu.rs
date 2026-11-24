@@ -49,6 +49,9 @@ pub struct Cpu {
     pub xmm: [u64; 32],
     pub mxcsr: u32,
     pub x87: x87::X87,
+    /// A `rep movs` or `rep stos` may do all its repetitions in one step (R006). Off
+    /// when each is to be seen (a trace). The count goes on by one for each either way.
+    pub rep_whole: bool,
 }
 
 impl Cpu {
@@ -56,7 +59,7 @@ impl Cpu {
     pub fn new(rip: u64, rsp: u64) -> Cpu {
         let mut reg = [0; 16];
         reg[RSP] = rsp;
-        Cpu { reg, rip, rflags: 0x202, fs_base: 0, gs_base: 0, steps: 0, xmm: [0; 32], mxcsr: 0x1f80, x87: x87::X87::new() }
+        Cpu { reg, rip, rflags: 0x202, fs_base: 0, gs_base: 0, steps: 0, xmm: [0; 32], mxcsr: 0x1f80, x87: x87::X87::new(), rep_whole: false }
     }
 }
 
@@ -720,6 +723,28 @@ impl Run<'_> {
         if self.rep != 0 && self.c.reg[RCX] & am == 0 {
             return Ok(self.ip);
         }
+        if self.rep != 0 && self.c.rep_whole && !self.flag(DF) && !self.asz32 && op & 0xfc != 0xac {
+            // MOVS and STOS going up, all the repetitions at once, if all of it can be
+            // done: a fault part of the way is left to the repetitions one at a time.
+            let n = self.c.reg[RCX];
+            let bytes = w as u64 / 8;
+            let len = n.saturating_mul(bytes);
+            let (si, di) = (self.c.reg[RSI], self.c.reg[RDI]);
+            let done = match op & 0xfe {
+                0xa4 => self.m.copy_up(di, si.wrapping_add(self.seg_base()), len),
+                0xaa => Some(self.m.fill(di, self.c.reg[RAX], bytes, n)),
+                _ => None,
+            };
+            if let Some(Ok(())) = done {
+                if op & 0xfe == 0xa4 {
+                    self.c.reg[RSI] = si.wrapping_add(len);
+                }
+                self.c.reg[RDI] = di.wrapping_add(len);
+                self.c.reg[RCX] = 0;
+                self.c.steps += n - 1;
+                return Ok(self.ip);
+            }
+        }
         let began = self.c.rflags;
         let step = if self.flag(DF) { (w as u64 / 8).wrapping_neg() } else { w as u64 / 8 };
         let si = self.c.reg[RSI] & am;
@@ -805,7 +830,16 @@ impl Run<'_> {
                 self.m.check(self.ea, n as u64, Access::Write)?;
                 stores = n;
             } else {
-                self.m.read_bytes(self.ea, &mut io.buf[..n])?;
+                // The usual sizes as one or two reads; an environment as bytes.
+                match n {
+                    2 | 4 | 8 => io.buf[..8].copy_from_slice(&self.rd(self.ea, n as u32 * 8)?.to_le_bytes()),
+                    10 => {
+                        self.m.check(self.ea, 10, Access::Read)?;
+                        io.buf[..8].copy_from_slice(&self.rd(self.ea, 64)?.to_le_bytes());
+                        io.buf[8..16].copy_from_slice(&self.rd(self.ea.wrapping_add(8), 16)?.to_le_bytes());
+                    }
+                    _ => self.m.read_bytes(self.ea, &mut io.buf[..n])?,
+                }
             }
         }
         if self.c.x87.escape(op, md, r, rm, &mut io).is_err() {
@@ -815,7 +849,17 @@ impl Run<'_> {
         if let Some(ax) = io.ax {
             self.sr(RAX, 16, ax as u64);
         }
-        Ok(self.m.write_bytes(self.ea, &io.buf[..stores])?)
+        let word = u64::from_le_bytes(io.buf[..8].try_into().unwrap());
+        match stores {
+            0 => {}
+            2 | 4 | 8 => self.wr(self.ea, stores as u32 * 8, word)?,
+            10 => {
+                self.wr(self.ea, 64, word)?;
+                self.wr(self.ea.wrapping_add(8), 16, io.buf[8] as u64 | (io.buf[9] as u64) << 8)?;
+            }
+            _ => self.m.write_bytes(self.ea, &io.buf[..stores])?,
+        }
+        Ok(())
     }
 
     // ---- one instruction ------------------------------------------------------------
@@ -1261,5 +1305,141 @@ impl Run<'_> {
             _ => return Err(self.not_written()),
         }
         Ok((next.unwrap_or(self.ip), what))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mem::{R as READ, W, X};
+
+    const CODE: u64 = 0x40_0000;
+    const DATA: u64 = 0x50_0000;
+
+    /// Runs `code` until its UD2 (which changes nothing and is not counted), with a page
+    /// of data that holds `data`, and gives back the CPU and that page.
+    fn run(code: &[u8], data: &[u8], set: impl Fn(&mut Cpu), rep_whole: bool) -> (Cpu, Vec<u8>) {
+        let mut m = Mem::reserve().unwrap();
+        m.map(CODE, 4096, READ | W).unwrap();
+        m.write_bytes(CODE, code).unwrap();
+        m.protect(CODE, 4096, READ | X).unwrap();
+        m.map(DATA, 4096, READ | W).unwrap();
+        m.write_bytes(DATA, data).unwrap();
+        let mut c = Cpu::new(CODE, DATA + 4096);
+        c.rep_whole = rep_whole;
+        set(&mut c);
+        loop {
+            match step(&mut c, &mut m) {
+                Ok(_) => {}
+                Err(Stop::Undefined) => break,
+                Err(other) => panic!("the program stopped: {other:?}"),
+            }
+        }
+        let mut page = vec![0u8; 4096];
+        m.read_bytes(DATA, &mut page).unwrap();
+        (c, page)
+    }
+
+    /// The same program with every repetition a step and with a `rep` in one step:
+    /// the registers, the flags, the memory and the count must all be the same.
+    fn both_ways(code: &[u8], data: &[u8], set: impl Fn(&mut Cpu) + Copy) -> (Cpu, Vec<u8>) {
+        let (one, page_one) = run(code, data, set, false);
+        let (whole, page_whole) = run(code, data, set, true);
+        assert_eq!(whole.reg, one.reg);
+        assert_eq!(whole.rflags, one.rflags);
+        assert_eq!(whole.rip, one.rip);
+        assert_eq!(whole.steps, one.steps);
+        assert_eq!(page_whole, page_one);
+        (whole, page_whole)
+    }
+
+    // rep movsb; ud2, and the like.
+    const REP_MOVSB: &[u8] = &[0xf3, 0xa4, 0x0f, 0x0b];
+    const REP_MOVSQ: &[u8] = &[0xf3, 0x48, 0xa5, 0x0f, 0x0b];
+    const REP_STOSB: &[u8] = &[0xf3, 0xaa, 0x0f, 0x0b];
+    const REP_STOSW: &[u8] = &[0xf3, 0x66, 0xab, 0x0f, 0x0b];
+    const REP_STOSD: &[u8] = &[0xf3, 0xab, 0x0f, 0x0b];
+    const REP_STOSQ: &[u8] = &[0xf3, 0x48, 0xab, 0x0f, 0x0b];
+    const STD_REP_MOVSB: &[u8] = &[0xfd, 0xf3, 0xa4, 0x0f, 0x0b];
+    const REP_MOVSB_32: &[u8] = &[0x67, 0xf3, 0xa4, 0x0f, 0x0b];
+
+    fn regs(rsi: u64, rdi: u64, rcx: u64, rax: u64) -> impl Fn(&mut Cpu) + Copy {
+        move |c| {
+            c.reg[RSI] = rsi;
+            c.reg[RDI] = rdi;
+            c.reg[RCX] = rcx;
+            c.reg[RAX] = rax;
+        }
+    }
+
+    #[test]
+    fn a_rep_in_one_step_is_the_repetitions_one_at_a_time() {
+        let text = b"0123456789abcdef";
+        // Apart.
+        let (c, page) = both_ways(REP_MOVSB, text, regs(DATA, DATA + 100, 16, 0));
+        assert_eq!(&page[100..116], text);
+        assert_eq!((c.reg[RSI], c.reg[RDI], c.reg[RCX]), (DATA + 16, DATA + 116, 0));
+        // Sixteen repetitions, each counted.
+        assert_eq!(c.steps, 16);
+        // Downward over itself.
+        let (_, page) = both_ways(REP_MOVSB, text, regs(DATA + 4, DATA, 12, 0));
+        assert_eq!(&page[..16], b"456789abcdefcdef");
+        // Upward over itself: what was written is read again, and the first byte fills
+        // all of it. This is the case a copy of memory would get wrong.
+        let (_, page) = both_ways(REP_MOVSB, text, regs(DATA, DATA + 1, 15, 0));
+        assert_eq!(&page[..16], b"0000000000000000");
+        let (_, page) = both_ways(REP_MOVSB, text, regs(DATA, DATA + 3, 13, 0));
+        assert_eq!(&page[..16], b"0120120120120120");
+        // Eight bytes at a time, apart and over itself by less than an element.
+        let (c, page) = both_ways(REP_MOVSQ, text, regs(DATA, DATA + 64, 2, 0));
+        assert_eq!(&page[64..80], text);
+        assert_eq!((c.reg[RSI], c.reg[RDI]), (DATA + 16, DATA + 80));
+        both_ways(REP_MOVSQ, text, regs(DATA, DATA + 4, 3, 0));
+        // A count of zero does nothing, in one instruction.
+        let (c, page) = both_ways(REP_MOVSB, text, regs(DATA, DATA + 100, 0, 0));
+        assert_eq!(page[100], 0);
+        assert_eq!(c.steps, 1);
+        // Going down, and with 32-bit addresses: left to the one at a time.
+        both_ways(STD_REP_MOVSB, text, regs(DATA + 15, DATA + 115, 16, 0));
+        let (c, _) = both_ways(REP_MOVSB_32, text, regs(DATA | 7 << 32, DATA + 100 | 7 << 32, 16, 0));
+        assert_eq!(c.reg[RDI], DATA + 116);
+    }
+
+    #[test]
+    fn a_rep_stos_in_one_step_fills_with_the_a_register() {
+        let a = 0x1122_3344_5566_7788;
+        let (c, page) = both_ways(REP_STOSB, &[], regs(0, DATA + 1, 5, a));
+        assert_eq!(&page[..8], [0, 0x88, 0x88, 0x88, 0x88, 0x88, 0, 0]);
+        assert_eq!((c.reg[RDI], c.reg[RCX], c.steps), (DATA + 6, 0, 5));
+        let (_, page) = both_ways(REP_STOSW, &[], regs(0, DATA + 1, 2, a));
+        assert_eq!(&page[..6], [0, 0x88, 0x77, 0x88, 0x77, 0]);
+        let (_, page) = both_ways(REP_STOSD, &[], regs(0, DATA + 2, 2, a));
+        assert_eq!(&page[..11], [0, 0, 0x88, 0x77, 0x66, 0x55, 0x88, 0x77, 0x66, 0x55, 0]);
+        let (c, page) = both_ways(REP_STOSQ, &[], regs(0, DATA + 8, 511, a));
+        assert_eq!(page[8..].chunks(8).filter(|q| *q == a.to_le_bytes()).count(), 511);
+        assert_eq!(c.reg[RDI], DATA + 4096);
+    }
+
+    #[test]
+    fn a_rep_that_cannot_be_done_whole_stops_where_one_at_a_time_stops() {
+        for whole in [false, true] {
+            let mut m = Mem::reserve().unwrap();
+            m.map(CODE, 4096, READ | W).unwrap();
+            m.write_bytes(CODE, REP_STOSQ).unwrap();
+            m.protect(CODE, 4096, READ | X).unwrap();
+            m.map(DATA, 4096, READ | W).unwrap();
+            let mut c = Cpu::new(CODE, 0);
+            c.rep_whole = whole;
+            // Three elements fit before the page's end; five are asked for.
+            regs(0, DATA + 4096 - 24, 5, 0x55)(&mut c);
+            let stop = loop {
+                if let Err(stop) = step(&mut c, &mut m) {
+                    break stop;
+                }
+            };
+            assert_eq!(stop, Stop::Fault(Fault { addr: DATA + 4096, access: Access::Write }));
+            assert_eq!((c.reg[RDI], c.reg[RCX], c.rip, c.steps), (DATA + 4096, 2, CODE, 3));
+            assert_eq!(m.read_u64(DATA + 4096 - 8), Ok(0x55));
+        }
     }
 }

@@ -64,9 +64,10 @@ pub struct Mem {
     host_page: u64,
     /// In order of address, none overlapping, neighbours of one protection joined.
     regions: Vec<Region>,
-    /// For each kind of access, the region the last one was found in, so that the next
-    /// one nearby is not searched for (R005). Emptied whenever the list changes.
-    near: [Cell<Region>; 3],
+    /// For each kind of access, the two regions the last ones were found in, so that
+    /// the next one nearby is not searched for (R005; two since R006: a program goes
+    /// to and fro between its stack and its data). Emptied whenever the list changes.
+    near: [[Cell<Region>; 2]; 3],
 }
 
 const NOWHERE: Region = Region { start: 0, end: 0, prot: 0 };
@@ -120,7 +121,7 @@ impl Mem {
                     size,
                     host_page,
                     regions: Vec::new(),
-                    near: [const { Cell::new(NOWHERE) }; 3],
+                    near: [const { [const { Cell::new(NOWHERE) }; 2] }; 3],
                 });
             }
             refused = io::Error::last_os_error();
@@ -251,6 +252,38 @@ impl Mem {
         Ok(())
     }
 
+    /// Writes the low `bytes` bytes of `v`, `n` times over, from `addr` up: all of it or,
+    /// if any of it cannot be written, none.
+    pub fn fill(&mut self, addr: u64, v: u64, bytes: u64, n: u64) -> Result<(), Fault> {
+        let len = n.checked_mul(bytes).unwrap_or(u64::MAX);
+        self.check(addr, len, Access::Write)?;
+        let at = self.host(addr);
+        unsafe {
+            match bytes {
+                1 => ptr::write_bytes(at, v as u8, n as usize),
+                2 => std::slice::from_raw_parts_mut(at as *mut [u8; 2], n as usize).fill((v as u16).to_le_bytes()),
+                4 => std::slice::from_raw_parts_mut(at as *mut [u8; 4], n as usize).fill((v as u32).to_le_bytes()),
+                _ => std::slice::from_raw_parts_mut(at as *mut [u8; 8], n as usize).fill(v.to_le_bytes()),
+            }
+        }
+        Ok(())
+    }
+
+    /// Copies `len` bytes from `from` to `to` as a copy from the lowest address up
+    /// does, which is what a forward `rep movs` does: all of it or none. `None` when
+    /// the two overlap so that such a copy would read what it has itself written; the
+    /// caller then goes an element at a time.
+    pub fn copy_up(&mut self, to: u64, from: u64, len: u64) -> Option<Result<(), Fault>> {
+        if to > from && to - from < len {
+            return None;
+        }
+        if let Err(f) = self.check(from, len, Access::Read).and_then(|()| self.check(to, len, Access::Write)) {
+            return Some(Err(f));
+        }
+        unsafe { ptr::copy(self.host(from), self.host(to), len as usize) };
+        Some(Ok(()))
+    }
+
     #[inline(always)]
     fn copy_out(&self, addr: u64, into: &mut [u8], access: Access) -> Result<(), Fault> {
         self.check(addr, into.len() as u64, access)?;
@@ -294,10 +327,12 @@ impl Mem {
     /// the fault names the first that is not. An access may run over several regions.
     #[inline(always)]
     pub fn check(&self, addr: u64, len: u64, access: Access) -> Result<(), Fault> {
-        // Nearly always in the region the last access of this kind was in.
-        let last = self.near[access as usize].get();
-        if addr >= last.start && addr < last.end && len <= last.end - addr {
-            return Ok(());
+        // Nearly always in one of the two regions the last accesses of this kind were in.
+        for near in &self.near[access as usize] {
+            let last = near.get();
+            if addr >= last.start && addr < last.end && len <= last.end - addr {
+                return Ok(());
+            }
         }
         self.search(addr, len, access)
     }
@@ -312,10 +347,12 @@ impl Mem {
         if let Some(at) = self.walk(addr, end, |prot| allows(prot, access)) {
             return Err(Fault { addr: at, access });
         }
-        // Remembered if it lies in one region (a region found here allows the access).
+        // Remembered if it lies in one region (a region found here allows the access),
+        // in place of the one found longer ago.
         if let Some(r) = self.regions.get(self.first_ending_after(addr)) {
             if r.start <= addr && end <= r.end {
-                near.set(*r);
+                near[1].set(near[0].get());
+                near[0].set(*r);
             }
         }
         Ok(())
@@ -390,7 +427,7 @@ impl Mem {
     }
 
     fn forget_near(&mut self) {
-        for near in &self.near {
+        for near in self.near.iter().flatten() {
             near.set(NOWHERE);
         }
     }
@@ -710,6 +747,89 @@ mod tests {
         m.map(A + 5 * PAGE, PAGE, RW).unwrap();
         assert_eq!(m.read_u64(A + 5 * PAGE), Ok(0));
         assert_eq!(m.read_u64(A + 4 * PAGE), Ok(8));
+    }
+
+    #[test]
+    fn a_fill_writes_all_of_it_or_none() {
+        let mut m = mem();
+        m.map(A, 2 * PAGE, RW).unwrap();
+        m.fill(A + 3, 0xab, 1, 5).unwrap();
+        assert_eq!(m.read::<10>(A), Ok([0, 0, 0, 0xab, 0xab, 0xab, 0xab, 0xab, 0, 0]));
+        // Wider elements, off their own boundary, low byte first; only the low bytes of
+        // the value count.
+        m.fill(A + 17, 0x9911_2233, 2, 3).unwrap();
+        assert_eq!(m.read::<8>(A + 16), Ok([0, 0x33, 0x22, 0x33, 0x22, 0x33, 0x22, 0]));
+        m.fill(A + 33, 0x55_1122_3344, 4, 2).unwrap();
+        assert_eq!(m.read::<10>(A + 32), Ok([0, 0x44, 0x33, 0x22, 0x11, 0x44, 0x33, 0x22, 0x11, 0]));
+        m.fill(A + 65, 0x0102_0304_0506_0708, 8, 2).unwrap();
+        assert_eq!(m.read_u64(A + 65), Ok(0x0102_0304_0506_0708));
+        assert_eq!(m.read_u64(A + 73), Ok(0x0102_0304_0506_0708));
+        assert_eq!(m.read_u8(A + 81), Ok(0));
+        // Up to the last byte that is mapped; one more and nothing is written.
+        let top = A + 2 * PAGE;
+        m.fill(top - 16, 0x77, 8, 2).unwrap();
+        assert_eq!(m.fill(top - 16, 0x88, 8, 3), Err(fault(top, Access::Write)));
+        assert_eq!(m.read_u64(top - 8), Ok(0x77));
+        // A count that no memory could hold is a fault, not a wrapped length.
+        assert_eq!(m.fill(A, 0, 8, u64::MAX), Err(fault(top, Access::Write)));
+        m.fill(A, 1, 8, 0).unwrap();
+    }
+
+    #[test]
+    fn a_copy_up_is_a_forward_copy_or_is_not_made() {
+        let mut m = mem();
+        m.map(A, 2 * PAGE, RW).unwrap();
+        m.write_bytes(A, b"abcdefgh").unwrap();
+        // Apart, and downward over itself: as a copy from the lowest byte up gives.
+        assert!(matches!(m.copy_up(A + 100, A, 8), Some(Ok(()))));
+        assert_eq!(m.read::<8>(A + 100), Ok(*b"abcdefgh"));
+        assert!(matches!(m.copy_up(A + 98, A + 100, 8), Some(Ok(()))));
+        assert_eq!(m.read::<10>(A + 98), Ok(*b"abcdefghgh"));
+        // Touching is not overlapping.
+        assert!(matches!(m.copy_up(A + 8, A, 8), Some(Ok(()))));
+        assert_eq!(m.read::<16>(A), Ok(*b"abcdefghabcdefgh"));
+        // Upward over itself, such a copy would read what it wrote: not made.
+        assert!(m.copy_up(A + 1, A, 8).is_none());
+        assert!(m.copy_up(A + 7, A, 8).is_none());
+        assert_eq!(m.read::<16>(A), Ok(*b"abcdefghabcdefgh"));
+        // A source or a target that is not all there: a fault and nothing copied.
+        let top = A + 2 * PAGE;
+        assert_eq!(m.copy_up(A + 200, top - 4, 8), Some(Err(fault(top, Access::Read))));
+        assert_eq!(m.copy_up(top - 4, A, 8), Some(Err(fault(top, Access::Write))));
+        assert_eq!(m.read_u32(top - 4), Ok(0));
+        m.protect(A + PAGE, PAGE, R).unwrap();
+        assert_eq!(m.copy_up(A + PAGE, A, 8), Some(Err(fault(A + PAGE, Access::Write))));
+    }
+
+    #[test]
+    fn what_is_remembered_of_the_last_accesses_does_not_outlive_a_change() {
+        let mut m = mem();
+        m.map(A, PAGE, RW).unwrap();
+        m.map(A + 4 * PAGE, PAGE, RW).unwrap();
+        // To and fro between two regions, then a third: each is found.
+        m.map(A + 8 * PAGE, PAGE, RW).unwrap();
+        for at in [A, A + 4 * PAGE, A, A + 8 * PAGE, A + 4 * PAGE, A] {
+            m.write_u64(at, at).unwrap();
+            assert_eq!(m.read_u64(at), Ok(at));
+        }
+        // What was just read and written is then closed, cut, and taken away.
+        m.protect(A, PAGE, R).unwrap();
+        assert_eq!(m.write_u8(A, 1), Err(fault(A, Access::Write)));
+        assert_eq!(m.read_u64(A), Ok(A));
+        m.protect(A, PAGE, 0).unwrap();
+        assert_eq!(m.read_u8(A), Err(fault(A, Access::Read)));
+        m.read_u8(A + 4 * PAGE).unwrap();
+        m.unmap(A + 4 * PAGE, PAGE).unwrap();
+        assert_eq!(m.read_u8(A + 4 * PAGE), Err(fault(A + 4 * PAGE, Access::Read)));
+        // An access that begins in a remembered region and runs out of it is not let by.
+        m.read_u8(A + 8 * PAGE).unwrap();
+        assert_eq!(m.read_u64(A + 9 * PAGE - 4), Err(fault(A + 9 * PAGE, Access::Read)));
+        // Code likewise.
+        m.map(A + 12 * PAGE, PAGE, R | X).unwrap();
+        assert_eq!(m.code_at(A + 12 * PAGE).1, 15);
+        assert_eq!(m.code_at(A + 13 * PAGE - 3).1, 3);
+        m.protect(A + 12 * PAGE, PAGE, R).unwrap();
+        assert_eq!(m.code_at(A + 12 * PAGE).1, 0);
     }
 
     #[test]
