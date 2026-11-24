@@ -631,8 +631,8 @@ mod tests {
                 assert_eq!(both(&mut joined, &mut joined_m, rip, &set).reg[RDX], c.reg[RDX]);
             }
         }
-        // Each program is three blocks; both ways out of each first were joined.
-        assert!(joined.stats.joined as usize >= programs.len(), "{} joined", joined.stats.joined);
+        // The ways out of the programs' blocks were joined to the blocks they go to.
+        assert!(joined.stats.joined > 0);
         let all = (pairs.len() * programs.len()) as u32;
         // Both ways were gone, and often: a condition and its opposite are each other's.
         assert_eq!(taken * 2, all);
@@ -1129,6 +1129,16 @@ mod tests {
         }
     }
 
+    /// How many of the guest's instructions the block at `CODE` holds, and how many
+    /// records of the flags its code writes (an instruction that puts the kind of a
+    /// record into x21), with every record written (`exact`) or only those needed.
+    fn shape(code: &[u8], exact: bool) -> (usize, usize) {
+        let m = guest(code, &[]);
+        let built = translate(&m, CODE, exact).expect("a block");
+        let records = built.words.iter().filter(|&&w| w & 0xffe0_001f == 0xd280_0015).count();
+        (built.starts.len(), records)
+    }
+
     /// The end of a small program that shows its flags: a jump on condition `cc` that
     /// picks RDX, and SYSCALL.
     fn pick(cc: u8) -> [u8; 16] {
@@ -1396,17 +1406,25 @@ mod tests {
         // and three moves each).
         let shifts = [0xc1, 0xe0, 0x03, 0xc1, 0xe8, 0x05, 0xc1, 0xe0, 0x07, 0xc1, 0xf8, 0x02, 0x0f, 0x05];
         assert_eq!(words(&shifts, true) - words(&shifts, false), 3 * 4);
-        // A compare read by its own jump, both ways then writing the flags: no record.
+        // A compare read by its own jump, both ways then writing the flags: no record
+        // of it. The block goes on past the jump (R018): four instructions, and one
+        // record, the last addition's, which the SYSCALL may read.
         //  0 cmp eax, ebx; 2 jne +2; 4 add ecx, edx (falls to 6); 6 add esi, edi; syscall
         let both_die = [0x39, 0xd8, 0x75, 0x02, 0x01, 0xd1, 0x01, 0xfe, 0x0f, 0x05];
-        assert_eq!(words(&both_die, true) - words(&both_die, false), 3);
-        // The same with one way that reads them (jb at the jump's target): recorded.
-        //  0 cmp; 2 jne +2; 4 add ecx, edx; 6 jb ...
+        assert_eq!(shape(&both_die, false), (4, 1));
+        // With every record written a block ends at its jump: the compare's.
+        assert_eq!(shape(&both_die, true), (2, 1));
+        // The same with a way that reads them (jb at the first jump's target, which
+        // is another block there and has no flags of the host's): the compare's
+        // record on that way; and the addition's, read by the jb when it is come to
+        // in the block, on both of the jb's ways (the SYSCALL after may read them).
+        //  0 cmp; 2 jne +2; 4 add ecx, edx; 6 jb +0; 8 syscall
         let one_reads = [0x39, 0xd8, 0x75, 0x02, 0x01, 0xd1, 0x72, 0x00, 0x0f, 0x05];
-        assert_eq!(words(&one_reads, true), words(&one_reads, false));
-        // A jump that the host's flags cannot answer (parity) reads the record.
+        assert_eq!(shape(&one_reads, false), (4, 3));
+        // A jump that the host's flags cannot answer (parity) reads the record, and
+        // is the interpreter's: the block is the compare alone, with its record.
         let parity = [0x39, 0xd8, 0x7a, 0x02, 0x01, 0xd1, 0x01, 0xfe, 0x0f, 0x05];
-        assert_eq!(words(&parity, true), words(&parity, false));
+        assert_eq!(shape(&parity, false), (1, 1));
         // Across a jump and a call to constants: add; jmp +0; add: dead.
         let across = [0x01, 0xd8, 0xeb, 0x00, 0x01, 0xd1, 0x0f, 0x05];
         assert_eq!(words(&across, true) - words(&across, false), 3);
@@ -1502,11 +1520,10 @@ mod tests {
         let mut last = [0x89, 0xf7].repeat(63);
         last.extend(carry_picked_after(&[]));
         assert_eq!(checked(&last, &[], &set).0.reg[RDX], 2);
-        // And answered in the block, no record is needed: one fewer than exact.
+        // And answered in the block, no record of the first addition is needed: the
+        // block goes on past the jump, and has one record, the second addition's.
         let direct = carry_picked_after(&[]);
-        let m = guest(&direct, &[]);
-        let words = |exact| translate(&m, CODE, exact).unwrap().words.len();
-        assert_eq!(words(true) - words(false), 3);
+        assert_eq!(shape(&direct, false), (5, 1));
         assert_eq!(checked(&direct, &[], &set).0.reg[RDX], 2);
     }
 
@@ -2011,5 +2028,101 @@ mod tests {
         assert_eq!(run(&[0x66, 0x90, 0x89, 0xc2, 0x0f, 0xca]), 0x888f_6655); // mov edx, eax; bswap edx
         assert_eq!(run(&[0x48, 0x89, 0xc2, 0x48, 0x0f, 0xca]), 0x888f_6655_4433_2211); // bswap rdx
         assert_eq!(run(&[0x48, 0x89, 0xda, 0x49, 0x89, 0xd0, 0x49, 0x0f, 0xc8, 0x4c, 0x89, 0xc2]), 0x087f_0605_0403_0201); // bswap r8
+    }
+
+    #[test]
+    fn a_block_goes_on_past_conditional_jumps() {
+        // Two jumps on one compare, every pair of conditions:
+        //      cmp eax, ebx; jcc1 one; jcc2 two; mov edx, 1; jmp end
+        // one: mov edx, 2; jmp end
+        // two: mov edx, 3
+        // end: syscall
+        // Whichever way is gone, RDX, the flags (read by the SYSCALL) and the count of
+        // instructions must be the interpreter's.
+        let mut code = Vec::new();
+        let mut programs = Vec::new();
+        for first in [&[0x39u8, 0xd8][..], &[0x48, 0x39, 0xd8], &[0x01, 0xd8], &[0x85, 0xd8], &[0x83, 0xe8, 0x01]] {
+            for c1 in 0..16u8 {
+                for c2 in 0..16u8 {
+                    programs.push(CODE + code.len() as u64);
+                    code.extend(first);
+                    code.extend([0x70 | c1, 9, 0x70 | c2, 14, 0xba, 1, 0, 0, 0, 0xeb, 12, 0xba, 2, 0, 0, 0, 0xeb, 5, 0xba, 3, 0, 0, 0, 0x0f, 0x05]);
+                }
+            }
+        }
+        let mut seen = [0u32; 4];
+        for check in [true, false] {
+            let mut m = guest(&code, &[]);
+            let mut jit = Jit::new(check, 1).unwrap();
+            for (a, b) in [(1u64, 1u64), (1, 2), (2, 1), (0x8000_0000, 1), (0, 0xffff_ffff), (0x7fff_ffff, 0x8000_0000)] {
+                for &rip in &programs {
+                    let c = both(&mut jit, &mut m, rip, &|c| {
+                        c.reg[RAX] = a;
+                        c.reg[RBX] = b;
+                    });
+                    seen[c.reg[RDX] as usize] += 1;
+                }
+            }
+        }
+        // All three ends were come to, often.
+        assert!(seen[1] > 500 && seen[2] > 500 && seen[3] > 500, "{seen:?}");
+        // The block is the compare, both jumps, the move and the jump to the end:
+        // five instructions, where it was two.
+        assert_eq!(shape(&code[..27], false).0, 5);
+        assert_eq!(shape(&code[..27], true).0, 2);
+    }
+
+    #[test]
+    fn what_comes_after_a_jump_gone_past_is_counted_and_faults_where_it_is() {
+        //  0 again: add edx, 1
+        //  3        cmp edx, 5
+        //  6        je out            (taken once, the fifth time round)
+        //  8        mov [rsi], edx    (a store: to nowhere the third time round)
+        // 10        sub ebx, 1
+        // 13        jne again
+        // 15        syscall
+        // 17 out:   mov eax, 7; syscall
+        let code = [0x83, 0xc2, 0x01, 0x83, 0xfa, 0x05, 0x74, 0x09, 0x89, 0x16, 0x83, 0xeb, 0x01, 0x75, 0xf1, 0x0f, 0x05, 0xb8, 7, 0, 0, 0, 0x0f, 0x05];
+        // Taken the fifth time: four whole rounds of six, then three, and two at `out`.
+        let mut m = guest(&code, &[]);
+        let mut jit = Jit::new(false, 1).unwrap();
+        let c = both(&mut jit, &mut m, CODE, &|c| {
+            c.reg[RBX] = 100;
+            c.reg[RSI] = DATA;
+        });
+        assert_eq!((c.reg[RAX], c.reg[RDX], c.steps), (7, 5, 4 * 6 + 3 + 2));
+        assert_eq!(m.read_u32(DATA), Ok(4));
+        // Never taken: three rounds of six, and the SYSCALL.
+        let mut m = guest(&code, &[]);
+        let mut jit = Jit::new(false, 1).unwrap();
+        let c = both(&mut jit, &mut m, CODE, &|c| {
+            c.reg[RBX] = 3;
+            c.reg[RSI] = DATA;
+        });
+        assert_eq!((c.reg[RDX], c.steps), (3, 19));
+        // A fault after the jump that was gone past: RIP on the store, the three
+        // instructions before it counted, the flags the compare's.
+        let mut m = guest(&code, &[]);
+        let mut jit = Jit::new(false, 1).unwrap();
+        let mut c = Cpu::new(CODE, DATA + 4096);
+        c.reg[RBX] = 100;
+        c.reg[RSI] = 0x90_0000;
+        let Event::Stop(stop) = jit.run(&mut c, &mut m) else { panic!("it went on") };
+        assert_eq!(stop, Stop::Fault(crate::mem::Fault { addr: 0x90_0000, access: Access::Write }));
+        assert_eq!((c.rip, c.steps, c.reg[RDX]), (CODE + 8, 3, 1));
+    }
+
+    #[test]
+    fn a_jump_after_a_loops_own_jump_is_another_blocks() {
+        // again: add edx, 1; cmp edx, ebx; jne again; je two; add esi, edi; mov edx, 1;
+        // jmp end; two: add esi, edi; mov edx, 2; end: syscall
+        // The loop's jump goes to its own block's start and ends the block. The jump
+        // after it is the next block's first, has no flags of the host's, and reads
+        // the compare's record: which must be there, though both of that jump's ways
+        // write the flags again. (Equal when the loop is left: `two`.)
+        let code = [0x83, 0xc2, 0x01, 0x39, 0xda, 0x75, 0xf9, 0x74, 0x09, 0x01, 0xfe, 0xba, 1, 0, 0, 0, 0xeb, 0x07, 0x01, 0xfe, 0xba, 2, 0, 0, 0, 0x0f, 0x05];
+        let (c, _) = checked(&code, &[], &|c| c.reg[RBX] = 40);
+        assert_eq!(c.reg[RDX], 2);
+        assert_eq!(shape(&code, false).0, 3);
     }
 }

@@ -359,6 +359,14 @@ fn later_of(ins: &Ins) -> Option<Later> {
     Some(Later { kind, bits: ins.size, a, b })
 }
 
+/// Does a block go on past a conditional jump that the host's flags answer? Where
+/// blocks do at all, the jump is not to the block's own start (that is a loop, whose
+/// jump goes there itself and ends the block), and the block has room for an
+/// instruction more.
+fn goes_on(blocks_do: bool, block: u64, target: u64, room: usize) -> bool {
+    blocks_do && target != block && room > 0
+}
+
 /// The reading on from an instruction that sets the flags, to find whether anything
 /// can read them before they are written whole again.
 struct Scan<'a> {
@@ -370,6 +378,11 @@ struct Scan<'a> {
     /// A conditional jump of the block was passed that the host's flags answer: the
     /// flags are dead as a record, but the host's are asked for.
     asked: bool,
+    /// Where the block the question is asked for begins, and whether its blocks go
+    /// on past a conditional jump (R018): the translator's own rule for which jumps
+    /// end a block, which this reading must have the same.
+    block: u64,
+    goes_on: bool,
 }
 
 impl Scan<'_> {
@@ -431,7 +444,17 @@ impl Scan<'_> {
                             return false;
                         }
                         self.asked = true;
-                        return self.dead(next, None, 0, depth - 1) && self.dead(ins.imm as u64, None, 0, depth - 1);
+                        // The way taken is another block's from here.
+                        if !self.dead(ins.imm as u64, None, 0, depth - 1) {
+                            return false;
+                        }
+                        // The way not taken is this block's still, with the host's
+                        // flags as they are, if the block goes on past the jump.
+                        if goes_on(self.goes_on, self.block, ins.imm as u64, room) {
+                            at = next;
+                        } else {
+                            return self.dead(next, None, 0, depth - 1);
+                        }
                     }
                     // A jump or a call to a constant: on from there, in another block.
                     0xe8 | 0xe9 | 0xeb => {
@@ -444,6 +467,20 @@ impl Scan<'_> {
             }
         }
     }
+}
+
+/// The way taken of a conditional jump that its block goes on past: written after the
+/// block's end.
+struct Taken {
+    /// Where the jump is in the block's code, to be given its distance.
+    jump: usize,
+    cond: Cond,
+    /// Where it goes in the guest, and how many of the block's instructions were run
+    /// when it is taken.
+    target: u64,
+    n: usize,
+    /// The record that was left for the jump, if this way needs it.
+    later: Option<Later>,
 }
 
 /// What kind of instruction last set the host's flags, so that a conditional jump
@@ -515,7 +552,7 @@ impl Emit<'_> {
     /// Are the flags dead from `at` on (`Scan::dead`)? What is read to say so becomes
     /// part of what the block rests on, and must lie within a few pages of it.
     fn dead(&mut self, at: u64, host: Option<HostFlags>, room: usize) -> bool {
-        let mut scan = Scan { m: self.m, budget: 48, span: (at, at), asked: false };
+        let mut scan = Scan { m: self.m, budget: 48, span: (at, at), asked: false, block: self.rip, goes_on: !self.exact };
         if !scan.dead(at, host, room, 2) {
             return false;
         }
@@ -963,6 +1000,7 @@ fn size(bits: u32) -> Size {
 pub fn translate(m: &Mem, rip: u64, exact: bool) -> Option<Built> {
     let mut e = Emit { w: Vec::new(), flags: None, m, rip, exact, skip: false, seen: None, later: None, host: true };
     let mut starts = Vec::new();
+    let mut taken: Vec<Taken> = Vec::new();
     let mut at = rip;
     loop {
         let (code, have) = m.code_at(at);
@@ -1369,6 +1407,33 @@ pub fn translate(m: &Mem, rip: u64, exact: bool) -> Option<Built> {
                         e.put(count);
                         e.leave_way(target, later);
                     }
+                    // The block goes on past the jump (R018): the way taken is written
+                    // after the block's end, and the way not taken is the next
+                    // instruction, with the host's flags as they are. The record that
+                    // was left for the jump is written here if anything on from here
+                    // can read it.
+                    Some(Jump::If(cond)) if goes_on(!e.exact, rip, target, MOST - n) => {
+                        let needed = e.way_needs(target, later);
+                        taken.push(Taken { jump: e.w.len(), cond, target, n, later: needed });
+                        e.put(a64::nop());
+                        if let Some(l) = later {
+                            if !e.dead(next, e.flags, MOST - n) {
+                                e.write_later(l);
+                            }
+                        }
+                        at = next;
+                        continue;
+                    }
+                    Some(Jump::Never) if goes_on(!e.exact, rip, target, MOST - n) => {
+                        // Never taken: on, as if it were not there.
+                        if let Some(l) = later {
+                            if !e.dead(next, e.flags, MOST - n) {
+                                e.write_later(l);
+                            }
+                        }
+                        at = next;
+                        continue;
+                    }
                     Some(Jump::Never) => {
                         e.put(count);
                         e.leave_way(next, later);
@@ -1416,6 +1481,15 @@ pub fn translate(m: &Mem, rip: u64, exact: bool) -> Option<Built> {
         if ended {
             break;
         }
+    }
+    // The ways taken of the jumps the block went on past.
+    for way in taken {
+        let here = e.w.len();
+        e.w[way.jump] = a64::b_cond(way.cond, (here - way.jump) as i32);
+        if let Some(l) = way.later {
+            e.write_later(l);
+        }
+        e.leave(way.target, way.n);
     }
     Some(Built { words: e.w, starts, end: at, seen: e.seen })
 }
