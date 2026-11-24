@@ -713,3 +713,59 @@ The card, written before the run.
 - **Cut-off**: the race of R008 again (interpreted against `--jit`, five runs, both at
   once), and one profile of the slowest of the four. What a return and a jump through
   a register cost is seen and not changed here.
+
+**Result: where blocks stay made, joining does what was guessed (`p_loop` 5,029 M
+instructions a second, 1.29 times QEMU). But on macOS most primitives lose their blocks
+after eight rounds, for a reason that is the host's page and not the joining: found
+here, and the next entry's to put right.**
+
+On a MacBook Air (Apple M1), macOS 27.
+
+One round each, interpreted, with the JIT as it was (R008's build) and joined, the
+three at once, five runs: the four primitives that are wholly in blocks became too
+short to time (`p_loop` 0.177 s interpreted, 0.047 s before, 0.002 s joined; `p_if`
+0.281, 0.155, 0.010; `p_pointer` 0.409, 0.097, 0.010; `p_recursion` 0.147, 0.041,
+0.010). So they were timed at 200 rounds, beside g64m's JIT (two at once, three runs,
+less a program that does nothing), with QEMU's and Rosetta's times for the same builds
+from earlier today (g64m's E186 table) set beside:
+
+| 200 rounds | guest instructions | r64m `--jit` | | g64m `--jit` | QEMU | Rosetta | in blocks |
+|---|---|---|---|---|---|---|---|
+| p_loop | 3,005 M | 0.598 s | 5,029 M/s | 0.232 s | 0.773 s | 0.240 s | 99.8% |
+| p_recursion | 2,434 M | 2.030 s | 1,199 M/s | 0.648 s | 1.567 s | 0.810 s | 100.0% |
+| p_if | 4,602 M | 62.9 s | 73 M/s | 1.694 s | 1.873 s | 0.997 s | **0.5%** |
+| p_pointer | 6,595 M | 98.8 s | 67 M/s | 1.816 s | 1.900 s | 0.723 s | **0.5%** |
+| p_index | 5,986 M | 86.3 s | 69 M/s | 1.217 s | 1.723 s | 0.420 s | **0.4%** |
+| p_rotate | 17,822 M | 242.9 s | 73 M/s | 3.359 s | 4.403 s | 3.060 s | **0.4%** |
+| p_funcptr | 4,191 M | 66.9 s | 63 M/s | 3.463 s | 9.123 s | 2.867 s | **0.4%** |
+
+- **`p_loop`**: 5,029 M/s where it was some 330 before joining: 1.29 times QEMU, and
+  2.6 times slower than g64m's JIT beside it. Past a thousand million, as guessed.
+- **`p_recursion`**: 1,199 M/s, 0.77 of QEMU: less than the others, as guessed, and
+  for the reason guessed. It went into generated code 144 million times for 2,434
+  million instructions: every return comes out to Rust to be looked up.
+- **The five others at 200 rounds are interpreted**: 0.4 to 0.5% of their
+  instructions in blocks, where one round has 75 to 99.7%. The JIT gave their code
+  up. Why: these programs' code is at 401000h and their data at 403000h, which on
+  macOS are one host page of 16 KB. Translated code makes that host page unwritable;
+  each round the program writes the line it prints into its data, which is a store to
+  that page; the page's blocks are forgotten for it, and after eight times the page is
+  not translated from again (`GIVEN_UP`, meant for a page whose code is really written
+  over). One round is one forgetting and nothing shows: R008's race and this one's
+  could not see it. `p_loop` and `p_recursion` write nothing but their stack.
+- **On Linux it does not happen**: the same builds at 200 rounds in the container run
+  `p_if` with 99.7% of 4,602 M instructions in blocks and no page forgotten, `p_pointer`
+  99.6% of 6,595 M. (Not timed there.) It is ADR 0008's point B, met for the first
+  time: on a host with 16 KB pages a page of data beside a page of code is caught by
+  the code's protection.
+- **The two that lost in R008** at one round: `p_switch` 0.395 s interpreted, 0.451 s
+  before, 0.408 s joined (3% slower than interpreted, from 14%); `p_bytes` 0.514 s,
+  0.566 s, 0.600 s: still 17% slower. By the card that is looked at before more is
+  translated; it is the same host page for all that can be told yet, and is looked at
+  again when that is put right.
+- All 23 at one round: interpreted 61.5 M/s, joined 73.8 M/s (three programs running
+  at once, and warm: the figures are for comparing across, not with other entries).
+
+**Next.** R010: a store to data that shares a host page with translated code is made
+without forgetting the code, when the guest's own page that is written holds none.
+Then this entry's race again at 200 rounds, which is the length that shows it.
