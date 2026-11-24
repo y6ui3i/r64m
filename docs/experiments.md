@@ -1903,3 +1903,34 @@ The card, written before the run.
   - Far more calls than guessed → the ADR orders by count of use, and the first
     milestone is still hello
 - **Cut-off**: one count of each, on hal.
+
+The result (hal, an x86-64 Linux 7.0; Alpine with GCC 14.2 in a container; the calls
+counted by `strace -f -c` on the container's first process; `exit_group` does not
+return and is not counted).
+
+**As guessed: fewer than guessed for both, and none of a kind that cannot be handed
+on.**
+
+| | different calls | which, by how often |
+|---|---|---|
+| hello, dynamically linked | 8 (and `exit_group`) | brk 2, mprotect 2, execve, arch_prctl, set_tid_address, mmap, ioctl, writev |
+| `gcc -O2 h.c -o h2` | 33 | mmap 835, lseek 655, munmap 611, readv 537, stat 129, open 120, read 93, readlink 89, rt_sigaction 77, close 70, fstat 68, writev 64, fcntl 56, access 45, mprotect 26, rt_sigprocmask 20, brk 20, ioctl 14, prlimit64 9, execve 8, wait4 6, set_tid_address 6, arch_prctl 6, unlink 5, pipe2 4, clone 4, sysinfo 3, umask 2, lstat 2, getrusage 2, getcwd 2, rt_sigreturn, chmod |
+
+Hello opens no file: with musl the dynamic loader and the C library are one file,
+which the kernel (here: r64m's loader) maps as the program's interpreter. The compile
+is eight programs started by `clone` (musl's `posix_spawn`) and `execve`.
+
+What differs between the two kernels, for the handing on: x86-64 has `open`, `stat`,
+`lstat`, `access`, `readlink`, `unlink`, `chmod` where arm64 has only their forms
+that take a directory (`openat` and the rest); `stat`'s structure is laid out
+differently; `arch_prctl` is x86's own (r64m sets FS itself).
+
+Seen besides, on this Mac, with what is on it already (nothing fetched):
+
+- r64m built for arm64 Linux runs inside the x86-64 Alpine container as it is
+  (`docker run --platform linux/amd64 ... /r/r64m --jit p_loop.elf`): an arm64
+  program is the kernel's own to run wherever its file is.
+- The Docker VM's kernel has 4 KB pages: nothing of 0008's point B applies there.
+- That container's own x86-64 programs are run by Rosetta, and a user-mode QEMU
+  (`qemu-x86_64`) is in an arm64 image from g64m's work. Both yardsticks are at hand;
+  how each is put to the same container's programs is not shown yet.
