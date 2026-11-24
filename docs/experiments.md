@@ -928,3 +928,43 @@ earlier (g64m's E186 table).
   ran them went on to commit. Put right in the next commit, which says so.
 
 **Next.** R012: what `p_rotate`, `p_index` and `p_funcptr` are not translated for.
+
+## R012: what `p_rotate`, `p_index` and `p_funcptr` are not translated for (2026-11-25)
+
+The owner's word: put the three right at one stroke.
+
+The card, written before the run.
+
+- **What was looked at first** (their code, disassembled; nothing run): the
+  instructions in them that the translator does not read are of four kinds:
+  1. shifts and rotations of 32 and 64-bit registers: SHL, SHR, ROL, ROR by a constant,
+     by one and by CL (`p_rotate` 14 places, `p_index` 9, `p_funcptr` 5);
+  2. operands of 8 and 16 bits: MOV of a byte or of 16 bits to memory, MOV of a
+     constant byte, `test dl, dl`, `or ah, 1`, `and cx, 3ffh`, `xor byte [..], 1`
+     (in all three, in the loops of two);
+  3. BSR and TZCNT (`p_rotate`);
+  4. NOT, CDQE, and the long NOP with prefixes that pads a loop's start.
+- **Hypothesis**: with these four kinds translated the three run wholly in blocks
+  (they are 78.7%, 75.6% and 91.0% in blocks now, and go in and out of generated code
+  a hundred million times and more), and come from 65.6 s, 28.0 s and 12.9 s at 200
+  rounds to a few seconds: near QEMU (4.40 s, 1.72 s, 9.12 s), past it for `p_funcptr`.
+  The other primitives that use the same instructions gain without being aimed at.
+- **What is changed from before**: the translator reads an operand's size as 8, 16, 32
+  or 64 bits where it read 32 or 64; the prefixes 66h (16 bits), F3h before BSF and
+  BSR, and the segment prefixes that do nothing. New records of the flags: a shift
+  (its operand and count), a bit scan (its operand). A rotation changes two flags and
+  leaves four, which one record cannot say: it is translated where the flags are
+  written whole by a later instruction of the block before anything reads them, and
+  left to the interpreter elsewhere. The flags of an 8 or 16-bit operation are had
+  from the host by doing it on the operands moved to the top of a 32-bit register.
+- **Next move for each result**:
+  - The three in blocks (over 99%) and near QEMU → the race of all 23 against QEMU
+    is the next entry, with what is still not translated counted by program
+  - In blocks but far from QEMU → a profile of the slowest: the record of the flags
+    written at every instruction that sets them is the first suspect
+  - One not in blocks → what still ends its blocks is listed as here, and said
+  - A program that no longer gives the interpreter's output, exit code or count →
+    put right before anything is timed
+- **Cut-off**: the four kinds above, for the three. Timed by the shorter race (one
+  round; 200 rounds only where one round is under a tenth of a second; no run over
+  15 s), once for all 23 so that a loss anywhere shows.
