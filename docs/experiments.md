@@ -1438,3 +1438,33 @@ primitives' instructions are in blocks.
 past a conditional jump (what `p_switch` waits for, and ADR 0014's second "not yet");
 SSE in blocks (six primitives); stores to data beside code on a host with 16 KB pages
 (`p_sha`, and whatever real program keeps its hot data next to its code).
+
+## R018: a block that goes on past a conditional jump (2026-11-25)
+
+The card, written before the run.
+
+- **Hypothesis**: a block ends at its first conditional jump. So `cmp; je; jbe` is two
+  blocks, and the second begins with a jump for which no flags of the host's are
+  known: it is the interpreter's every time (`p_switch`: 1.08 million such jumps a
+  round, 0.71 of QEMU). If a block goes on past a conditional jump, with the way taken
+  out of line after the block's end and the way not taken continuing in the block, the
+  second jump is answered by the same flags and nothing leaves generated code.
+  `p_switch` is guessed to pass QEMU (it is all in blocks but for that jump). Every
+  other program's blocks become longer and fewer, with fewer jumps from block to
+  block; what that gains is not guessed beyond "something, nowhere a loss".
+- **What is changed from before**: a conditional jump that the host's flags answer and
+  that does not go to its own block's start no longer ends the block, while the block
+  has room. The way taken is a piece of code after the block's end (the count of the
+  instructions run so far, the record if that way needs it, a way out that can be
+  joined); the way not taken is the next instruction. The reading that finds flags
+  dead follows the same rule, so that it and the translator agree about which jumps
+  are inside a block. Not with `--jit-check` (the check is of a block run from start
+  to end, and such a block has more than one end).
+- **Next move for each result**:
+  - `p_switch` past QEMU and no primitive the worse → SSE is the next entry
+  - `p_switch` not past QEMU → the count and the listing for it
+  - A primitive slower by more than a twentieth → why, before this is kept: longer
+    blocks are made once and the ways taken are now further from the code they leave
+  - A program wrong → put right first
+- **Cut-off**: this one change. The shorter race for the sixteen integer primitives
+  that are in blocks, set beside R017's.
