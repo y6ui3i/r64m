@@ -1694,3 +1694,30 @@ Two things found about the measuring:
   for by the owner): each with what its C is made of, and five tests each, the
   interpreter against what is right and the JIT's four ways against the interpreter.
   What the scratch script `jitall` did for them is done by `cargo test`.
+
+## R021: the packed integer instructions in blocks (2026-11-25)
+
+ADR 0015's second part (point 8): by a count of what is executed.
+
+The card, written before the run.
+
+- **Hypothesis**: p_simd has 40% of its instructions in blocks and is 30 times behind
+  QEMU a round (0.311 s for 0.010 s) because a dozen or so packed integer opcodes end
+  its blocks. Each works on whole numbers, where the host's vector instruction gives
+  x86's bits in every case (nothing is "not a number", nothing saturates differently
+  unless the opcode says so), so each is translated straight, with no way out. With
+  those the count names, p_simd is over 90% in blocks and past QEMU.
+- **What is changed from before** (R020): the translator reads the packed opcodes the
+  count names; the encoder gains their forms. Nothing else.
+- **Next move for each result**:
+  - Over 90% in blocks and past QEMU → the stores beside code on 16 KB pages (p_sha),
+    which needs a decision first
+  - An opcode the count names has no host instruction that is the same in every case
+    (a shuffle by a constant, a shift of the whole register by bytes) → it is written
+    as several, or left to the interpreter and named here with its count
+  - In blocks but not past QEMU → the inner loop's code is read (`R64M_JIT_DUMP`)
+    before anything is changed
+  - A primitive that was in blocks is slower by more than 1% (the race is to the
+    millisecond now) → looked into before the commit
+- **Cut-off**: one count, one shorter race (three at once: this build, R020's, g64m's
+  JIT), after every test passes on both hosts.
