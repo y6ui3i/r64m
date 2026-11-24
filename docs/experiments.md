@@ -1021,3 +1021,39 @@ All the primitives that are wholly or nearly in blocks, at 200 rounds:
 **Next.** Two things, by what this shows: the record of the flags not written where
 nothing can read it (what `p_shift` and `p_loop` wait for, and every block pays); and
 the instructions that end the blocks of the fourteen, counted by program.
+
+## R013: the record of the flags not written where nothing reads it (2026-11-25)
+
+The card, written before the run.
+
+- **Hypothesis**: every instruction that sets the flags writes its record (two to four
+  host instructions) whether or not anything reads the flags before they are set
+  again. `p_shift` is wholly in blocks and at 0.47 of QEMU, `p_loop` past QEMU and at
+  0.36 of g64m's JIT (R012), and the record is guessed to be why, though no profile
+  has said so. If the translator looks at the guest's code after an instruction that
+  sets the flags, and finds that on every way from it the flags are written whole
+  before anything reads them, the record is not written. `p_shift`, whose shifts
+  follow one another, is guessed to gain most (to QEMU's speed or past it); a loop
+  whose last compare is read by its own jump still writes that one record, since the
+  way out of the loop may read the flags, so `p_loop` is guessed to gain little by
+  this alone.
+- **What is changed from before**: the translator reads on from a flag-setting
+  instruction (through the rest of its block, and past the block's end along jumps
+  whose targets are constants) until it finds an instruction that writes all the
+  flags (dead: no record), or one that reads them, or one it does not know, or a
+  return (live: the record is written as before). What it read to decide is part of
+  what the block rests on: a store there forgets the block. With `--jit-check` every
+  record is written, since the check compares the flags after each block.
+  A fault in the stretch where the flags are dead finds them stale: nothing reads
+  them there by the same proof, but what would be shown to a signal handler is not
+  what the CPU would show. (No signal is delivered yet.)
+- **Next move for each result**:
+  - `p_shift` to QEMU's speed or past it, `p_loop` little changed → the second half:
+    the record of a loop's last compare made only on the way out that needs it, which
+    is its own entry's worth of change and is done here only if this result asks
+  - `p_shift` little changed → the record was not the reason: a profile of `p_shift`
+    says what is, before anything more is built on the guess
+  - A program that no longer gives the interpreter's output, exit code or count →
+    put right before anything is timed
+- **Cut-off**: this one change; the shorter race for the nine primitives that are
+  wholly in blocks. One profile if the guess fails.
