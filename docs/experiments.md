@@ -1120,3 +1120,53 @@ The card, written before the run.
     profile, sooner
   - A program wrong → put right first
 - **Cut-off**: this one change, the shorter race for the nine.
+
+**Result: nothing gained. `p_loop` is 0.436 s as before; the guess of a tenth to a
+quarter was wrong. The record was already gone from its loop.**
+
+| 200 rounds | before (R013) | now | g64m `--jit` | QEMU |
+|---|---|---|---|---|
+| p_loop | 0.436 s | 0.436 s | 0.216 s | 0.773 s |
+| p_if | 1.546 s | 1.584 s | 1.405 s | 1.873 s |
+| p_shift | 0.879 s | 0.922 s | 0.751 s | 0.893 s |
+| p_index | 0.777 s | 0.769 s | 1.081 s | 1.723 s |
+| p_pointer | 1.143 s | 1.138 s | 1.408 s | 1.900 s |
+| p_rotate | 3.108 s | 3.138 s | 3.307 s | 4.403 s |
+| p_funcptr | 2.937 s | 2.934 s | 3.406 s | 9.123 s |
+| p_recursion | 0.446 s | 0.439 s | 0.536 s | 1.567 s |
+
+Nothing moved beyond what two races differ by (`p_shift` 0.88 and 0.92 s: the same).
+
+- **Why the guess was wrong**: R013 had already taken the record out of `p_loop`'s
+  loop. Its last instruction is `sub rax, 1`, and both ways of the jump after it
+  write the flags before anything reads them (the loop's head by its XOR, the way on
+  by an ADD): R013's reading follows both ways of a jump that the host's flags answer,
+  so it found the flags dead and left the record out. This entry's case (dead one way,
+  live the other) is not in `p_loop`. The card's hypothesis rested on R013's own
+  guess about `p_loop` ("still writes that one record"), which was not looked at
+  before it was built on.
+- The change is kept: it is right (63 unit tests, 62 programs, both hosts) and it is
+  the general form of what R013 does for the case of both ways dead. No primitive
+  among the nine is the worse for it. That it gains something somewhere is not shown.
+- **What `p_loop`'s loop is, looked at** (`R64M_JIT_DUMP`, the block's code given to
+  the assembler to read back). Five guest instructions (`mov rcx, rsi; xor rcx, rax;
+  add rdx, rcx; sub rax, 1; jne`) are nine of the host's:
+
+  ```
+  mov  x1, x6
+  eor  x1, x1, x0
+  tst  x1, x1          ; the host's flags of the XOR, which nothing asks for
+  adds x2, x2, x1
+  mov  x26, #1         ; the constant one, put in a register
+  subs x0, x0, x26
+  b.ne taken           ; taken every time round
+  ...
+  taken: add x27, x27, #5
+         b   start     ; and a second jump taken every time round
+  ```
+
+  No record, no leaving generated code. Two jumps taken a round, one instruction to
+  set flags that are not used, one to load a constant an instruction could carry.
+  600 million rounds in 0.436 s is 2.3 cycles a round; g64m's is about one.
+
+**Next.** R015: the three things that listing shows.

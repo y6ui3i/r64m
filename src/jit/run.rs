@@ -285,6 +285,12 @@ impl Jit {
         let Some(Built { words, starts, end, seen }) = translate(m, rip, self.check) else {
             return false;
         };
+        if std::env::var_os("R64M_JIT_DUMP").is_some() {
+            // For looking at what was made: each block's address, its instructions'
+            // addresses, and its code as words an assembler can be given.
+            eprintln!("block {rip:#x}..{end:#x} guest {:x?}", starts.iter().map(|s| s.1).collect::<Vec<_>>());
+            eprintln!("{}", words.iter().map(|w| format!(".inst {w:#010x}")).collect::<Vec<_>>().join("\n"));
+        }
         // What the block rests on: its own instructions, and what was read past them
         // to leave a record of the flags unwritten. A store to any of it forgets it.
         let (from, to) = seen.map_or((rip, end), |(lo, hi)| (lo.min(rip), hi.max(end)));
