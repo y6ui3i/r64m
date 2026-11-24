@@ -1,6 +1,8 @@
-//! The JIT (ADR 0014). So far its ground: the arm64 encoder (`a64`), the memory that
-//! generated code is written to and run from (`Code`), the one way in and out
-//! (`enter`), and the handler that turns a fault in generated code into a way out.
+//! The JIT (ADR 0014): the arm64 encoder (`a64`), the translator (`translate`), the
+//! runner that keeps the blocks and checks them (`run`), and here the ground they stand
+//! on: the memory that generated code is written to and run from (`Code`), the one way
+//! in and out (`enter`), and the handler that turns a fault in generated code into a
+//! way out.
 //!
 //! While generated code runs:
 //!
@@ -15,7 +17,11 @@
 //! | x24 | the address of the way out |
 //! | x25 to x28 | scratch that the way in saves |
 
+// Some of its forms wait for the instructions that will use them.
+#[allow(dead_code)]
 pub mod a64;
+pub mod run;
+mod translate;
 
 use crate::cpu::Cpu;
 use std::io;

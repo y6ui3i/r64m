@@ -38,6 +38,7 @@ pub const RDI: usize = 7;
 /// The layout is fixed (`repr(C)`): the JIT's way in and out reads and writes the
 /// first fields by their offsets.
 #[repr(C)]
+#[derive(Clone)]
 pub struct Cpu {
     /// In the order of their numbers in an instruction: RAX, RCX, RDX, RBX, RSP, RBP,
     /// RSI, RDI, R8 to R15.
@@ -146,6 +147,71 @@ fn szp(r: u64, w: u32) -> u64 {
         f |= SF;
     }
     f
+}
+
+/// The result and the six flags of one of the eight of the opcodes 00h to 3Fh, by its
+/// number there (ADD, OR, ADC, SBB, AND, SUB, XOR, CMP), on operands `w` bits wide.
+#[inline(always)]
+fn alu_flags(op: u8, a: u64, b: u64, w: u32, carry: bool) -> (u64, u64) {
+    let (m, s) = (mask(w), msb(w));
+    let (a, b) = (a & m, b & m);
+    let mut f = 0;
+    let r;
+    match op {
+        0 | 2 => {
+            let c = (op == 2 && carry) as u64;
+            r = a.wrapping_add(b).wrapping_add(c) & m;
+            // The carry out of the top bit: both operands had it, or one had it and
+            // the result has lost it.
+            if (a & b | (a | b) & !r) & s != 0 {
+                f |= CF;
+            }
+            if (a ^ r) & (b ^ r) & s != 0 {
+                f |= OF;
+            }
+            f |= (a ^ b ^ r) & AF;
+        }
+        3 | 5 | 7 => {
+            let c = (op == 3 && carry) as u64;
+            r = a.wrapping_sub(b).wrapping_sub(c) & m;
+            if (!a & b | (!a | b) & r) & s != 0 {
+                f |= CF;
+            }
+            if (a ^ b) & (a ^ r) & s != 0 {
+                f |= OF;
+            }
+            f |= (a ^ b ^ r) & AF;
+        }
+        1 => r = a | b,
+        4 => r = a & b,
+        _ => r = a ^ b,
+    }
+    (r, f | szp(r, w))
+}
+
+/// The kinds of the JIT's record of the flags (`Cpu::flag_rec`): the first word is
+/// the kind times 256 and the operands' width in bits, or zero when RFLAGS is as it
+/// should be; the two others are the operands, or for `REC_LOGIC` the result.
+pub const REC_ADD: u64 = 1;
+pub const REC_SUB: u64 = 2;
+pub const REC_LOGIC: u64 = 3;
+
+/// Works the flags out from the JIT's record, if generated code left one, so that
+/// RFLAGS is as the interpreter would have left it.
+pub fn settle(c: &mut Cpu) {
+    let [kind, a, b] = c.flag_rec;
+    if kind == 0 {
+        return;
+    }
+    let w = (kind & 0xff) as u32;
+    let (_, f) = match kind >> 8 {
+        REC_ADD => alu_flags(0, a, b, w, false),
+        REC_SUB => alu_flags(5, a, b, w, false),
+        // A result and nothing: OR's flags are the result's.
+        _ => alu_flags(1, a, 0, w, false),
+    };
+    c.rflags = c.rflags & !ARITH | f;
+    c.flag_rec[0] = 0;
 }
 
 /// How many bytes a constant of an operand `w` bits wide takes: never more than four.
@@ -454,40 +520,8 @@ impl Run<'_> {
     /// AND, SUB, XOR, CMP.
     #[inline(always)]
     fn alu(&mut self, op: u8, a: u64, b: u64, w: u32) -> u64 {
-        let (m, s) = (mask(w), msb(w));
-        let (a, b) = (a & m, b & m);
-        let mut f = 0;
-        let r;
-        match op {
-            0 | 2 => {
-                let c = (op == 2 && self.flag(CF)) as u64;
-                r = a.wrapping_add(b).wrapping_add(c) & m;
-                // The carry out of the top bit: both operands had it, or one had it and
-                // the result has lost it.
-                if (a & b | (a | b) & !r) & s != 0 {
-                    f |= CF;
-                }
-                if (a ^ r) & (b ^ r) & s != 0 {
-                    f |= OF;
-                }
-                f |= (a ^ b ^ r) & AF;
-            }
-            3 | 5 | 7 => {
-                let c = (op == 3 && self.flag(CF)) as u64;
-                r = a.wrapping_sub(b).wrapping_sub(c) & m;
-                if (!a & b | (!a | b) & r) & s != 0 {
-                    f |= CF;
-                }
-                if (a ^ b) & (a ^ r) & s != 0 {
-                    f |= OF;
-                }
-                f |= (a ^ b ^ r) & AF;
-            }
-            1 => r = a | b,
-            4 => r = a & b,
-            _ => r = a ^ b,
-        }
-        self.c.rflags = self.c.rflags & !ARITH | f | szp(r, w);
+        let (r, f) = alu_flags(op, a, b, w, self.flag(CF));
+        self.c.rflags = self.c.rflags & !ARITH | f;
         r
     }
 

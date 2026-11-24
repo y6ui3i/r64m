@@ -24,6 +24,9 @@ pub const PAGE: u64 = 4096;
 pub const R: u8 = 1;
 pub const W: u8 = 2;
 pub const X: u8 = 4;
+/// Not the guest's: the page holds code that has been translated (ADR 0008, point 3).
+/// While it is set nothing may write the page, the host included, whatever `W` says.
+pub const C: u8 = 8;
 
 /// What an access was, for the fault it may end in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,6 +71,10 @@ pub struct Mem {
     /// the next one nearby is not searched for (R005; two since R006: a program goes
     /// to and fro between its stack and its data). Emptied whenever the list changes.
     near: [[Cell<Region>; 2]; 3],
+    /// While there is one, what every write through `write_bytes` wrote over: where,
+    /// and the bytes that were there (for `--jit-check`, which runs the same
+    /// instructions twice from the same memory).
+    log: Option<Vec<(u64, Vec<u8>)>>,
 }
 
 const NOWHERE: Region = Region { start: 0, end: 0, prot: 0 };
@@ -77,7 +84,7 @@ const NOWHERE: Region = Region { start: 0, end: 0, prot: 0 };
 fn allows(prot: u8, access: Access) -> bool {
     match access {
         Access::Read => prot != 0,
-        Access::Write => prot & W != 0,
+        Access::Write => prot & (W | C) == W,
         Access::Fetch => prot & X != 0,
     }
 }
@@ -88,7 +95,7 @@ fn host_prot(prot: u8) -> libc::c_int {
     if prot != 0 {
         p |= libc::PROT_READ;
     }
-    if prot & W != 0 {
+    if prot & (W | C) == W {
         p |= libc::PROT_WRITE;
     }
     p
@@ -122,6 +129,7 @@ impl Mem {
                     host_page,
                     regions: Vec::new(),
                     near: [const { [const { Cell::new(NOWHERE) }; 2] }; 3],
+                    log: None,
                 });
             }
             refused = io::Error::last_os_error();
@@ -185,8 +193,17 @@ impl Mem {
         if self.walk(start, end, |_| true).is_some() {
             return Err(MapError::NotMapped);
         }
+        // What is marked as holding translated code stays marked.
+        let pieces: Vec<Region> = self
+            .regions
+            .iter()
+            .filter(|r| r.start < end && start < r.end)
+            .map(|r| Region { start: r.start.max(start), end: r.end.min(end), prot: prot | r.prot & C })
+            .collect();
         self.carve(start, end);
-        self.insert(Region { start, end, prot });
+        for r in pieces {
+            self.insert(r);
+        }
         self.host_sync(start, end).map_err(MapError::Host)
     }
 
@@ -247,9 +264,76 @@ impl Mem {
     #[inline(always)]
     pub fn write_bytes(&mut self, addr: u64, from: &[u8]) -> Result<(), Fault> {
         self.check(addr, from.len() as u64, Access::Write)?;
+        if self.log.is_some() {
+            self.note(addr, from.len());
+        }
         // The list allowed it, and the host is at least as open as the list.
         unsafe { ptr::copy_nonoverlapping(from.as_ptr(), self.host(addr), from.len()) };
         Ok(())
+    }
+
+    #[cold]
+    fn note(&mut self, addr: u64, len: usize) {
+        let mut old = vec![0u8; len];
+        unsafe { ptr::copy_nonoverlapping(self.host(addr), old.as_mut_ptr(), len) };
+        self.log.as_mut().unwrap().push((addr, old));
+    }
+
+    /// Begins to keep what writes write over. (`fill` and `copy_up` are not kept:
+    /// whoever keeps a log has every repetition a step.)
+    pub fn log_writes(&mut self) {
+        self.log = Some(Vec::new());
+    }
+
+    /// Ends the keeping and puts back everything written since it began, the last
+    /// first. Gives back where the writes were and what each wrote, in their order
+    /// (so the last to a byte is what stood there at the end).
+    pub fn undo_writes(&mut self) -> Vec<(u64, Vec<u8>)> {
+        let log = self.log.take().unwrap_or_default();
+        let mut written = Vec::with_capacity(log.len());
+        for (addr, old) in log.iter().rev() {
+            let mut new = vec![0u8; old.len()];
+            unsafe {
+                ptr::copy_nonoverlapping(self.host(*addr), new.as_mut_ptr(), old.len());
+                ptr::copy_nonoverlapping(old.as_ptr(), self.host(*addr), old.len());
+            }
+            written.push((*addr, new));
+        }
+        written.reverse();
+        written
+    }
+
+    /// Says of the host pages that hold `[start, end)` that code from them has been
+    /// translated (`on`), or that it no longer is: while it is, nothing may write
+    /// them. It is the host's page that is marked, since that is what the host can
+    /// protect: on a host with 16 KB pages three more of the guest's go with each.
+    pub fn mark_code(&mut self, start: u64, end: u64, on: bool) -> Result<(), MapError> {
+        let (start, end) = (self.host_down(start), self.host_up(end).min(self.size));
+        let inside: Vec<Region> = self
+            .regions
+            .iter()
+            .filter(|r| r.start < end && start < r.end)
+            .map(|r| Region {
+                start: r.start.max(start),
+                end: r.end.min(end),
+                prot: if on { r.prot | C } else { r.prot & !C },
+            })
+            .collect();
+        for r in inside {
+            self.carve(r.start, r.end);
+            self.insert(r);
+        }
+        self.host_sync(start, end).map_err(MapError::Host)
+    }
+
+    /// Does the page at `addr` hold translated code?
+    pub fn is_code(&self, addr: u64) -> bool {
+        self.regions.get(self.first_ending_after(addr)).is_some_and(|r| r.start <= addr && r.prot & C != 0)
+    }
+
+    /// The start and end of the host pages that hold `[start, end)`.
+    pub fn host_pages(&self, start: u64, end: u64) -> (u64, u64) {
+        (self.host_down(start), self.host_up(end))
     }
 
     /// Writes the low `bytes` bytes of `v`, `n` times over, from `addr` up: all of it or,
@@ -830,6 +914,67 @@ mod tests {
         assert_eq!(m.code_at(A + 13 * PAGE - 3).1, 3);
         m.protect(A + 12 * PAGE, PAGE, R).unwrap();
         assert_eq!(m.code_at(A + 12 * PAGE).1, 0);
+    }
+
+    #[test]
+    fn a_page_with_translated_code_is_written_by_no_one() {
+        let mut m = mem();
+        let hp = m.host_page();
+        m.map(A, 2 * hp, RW).unwrap();
+        m.map(A + 2 * hp, hp, RX).unwrap();
+        m.write_u64(A + 8, 5).unwrap();
+        // Marked from the middle of the first host page to the middle of the third:
+        // whole host pages are.
+        m.mark_code(A + hp - 1, A + 2 * hp + 1, true).unwrap();
+        assert!(m.is_code(A) && m.is_code(A + hp) && m.is_code(A + 3 * hp - 1));
+        assert!(!m.is_code(A + 3 * hp) && !m.is_code(A - 1));
+        // Read and run as before, written by neither the interpreter nor the host.
+        assert_eq!(m.read_u64(A + 8), Ok(5));
+        assert_eq!(m.code_at(A + 2 * hp).1, 15);
+        assert_eq!(m.write_u64(A + 8, 6), Err(fault(A + 8, Access::Write)));
+        assert_eq!(m.fill(A, 0, 8, 1), Err(fault(A, Access::Write)));
+        assert!(host_refuses(&m, A + 8, true));
+        assert!(!host_refuses(&m, A + 8, false));
+        // A change of protection by the guest does not take the mark off.
+        m.protect(A, hp, RW).unwrap();
+        assert!(m.is_code(A));
+        assert_eq!(m.write_u64(A + 8, 6), Err(fault(A + 8, Access::Write)));
+        // Unmarked, it is what it was: the guest's protection, the contents.
+        m.mark_code(A, A + 3 * hp, false).unwrap();
+        assert!(!m.is_code(A) && !m.is_code(A + 2 * hp));
+        m.write_u64(A + 8, 6).unwrap();
+        assert!(!host_refuses(&m, A + 8, true));
+        assert_eq!(m.write_u8(A + 2 * hp, 0), Err(fault(A + 2 * hp, Access::Write)));
+        assert_eq!(m.regions(), &[
+            Region { start: A, end: A + 2 * hp, prot: RW },
+            Region { start: A + 2 * hp, end: A + 3 * hp, prot: RX },
+        ]);
+        // A mark over a hole marks what is there.
+        m.unmap(A + hp, hp).unwrap();
+        m.mark_code(A, A + 3 * hp, true).unwrap();
+        assert!(m.is_code(A) && !m.is_code(A + hp) && m.is_code(A + 2 * hp));
+    }
+
+    #[test]
+    fn writes_that_are_kept_can_be_put_back() {
+        let mut m = mem();
+        m.map(A, PAGE, RW).unwrap();
+        m.write_bytes(A, b"abcdefgh").unwrap();
+        m.log_writes();
+        m.write_u16(A + 2, 0x5a59).unwrap();
+        m.write_u8(A + 3, b'!').unwrap();
+        m.write_u32(A + 100, 7).unwrap();
+        assert_eq!(m.read::<8>(A), Ok(*b"abY!efgh"));
+        let written = m.undo_writes();
+        // Everything as it was, and what each write wrote, in their order: the first as
+        // it was written, before the second wrote over half of it.
+        assert_eq!(m.read::<8>(A), Ok(*b"abcdefgh"));
+        assert_eq!(m.read_u32(A + 100), Ok(0));
+        assert_eq!(written, vec![(A + 2, b"YZ".to_vec()), (A + 3, b"!".to_vec()), (A + 100, vec![7, 0, 0, 0])]);
+        // Nothing is kept after.
+        m.write_u8(A, b'z').unwrap();
+        assert!(m.undo_writes().is_empty());
+        assert_eq!(m.read_u8(A), Ok(b'z'));
     }
 
     #[test]

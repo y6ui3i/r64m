@@ -4,8 +4,6 @@
 
 mod cpu;
 mod elf;
-// Until the translator uses it.
-#[allow(dead_code)]
 mod jit;
 // Some of it waits for the calls that map and unmap.
 #[allow(dead_code)]
@@ -67,10 +65,17 @@ impl SeenXmm {
 
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
-    let count = args.first().is_some_and(|a| a == "--count");
-    if count {
-        args.remove(0);
-    }
+    // The options, in any order, before the program.
+    let mut option = |name: &str| {
+        let found = args.iter().take_while(|a| a.starts_with("--")).position(|a| a == name);
+        found.map(|i| args.remove(i)).is_some()
+    };
+    let count = option("--count");
+    let jit_check = option("--jit-check");
+    let jit_stats = option("--jit-stats");
+    // For the tests: every block made the first time its address is arrived at.
+    let jit_now = option("--jit-now");
+    let jit = option("--jit") || jit_check;
     let trace_xmm = args.first().is_some_and(|a| a == "--trace-xmm");
     let trace = trace_xmm || args.first().is_some_and(|a| a == "--trace");
     if trace {
@@ -86,7 +91,7 @@ fn main() {
             mem.size().trailing_zeros(),
             mem.host_page() / 1024
         );
-        println!("usage: r64m [--count] [--trace | --trace-xmm] program [arguments]");
+        println!("usage: r64m [--count] [--jit | --jit-check] [--jit-now] [--jit-stats] [--trace | --trace-xmm] program [arguments]");
         return;
     };
 
@@ -100,8 +105,30 @@ fn main() {
     c.rep_whole = !trace;
     let output = if trace { sys::Output::Nowhere } else { sys::Output::Host };
     let mut lines = std::io::BufWriter::new(std::io::stdout().lock());
+    if jit && trace {
+        fail(format_args!("a trace is of the interpreter: not with --jit"));
+    }
+    let mut blocks = if jit {
+        // With the check every repetition is a step, as the check counts them.
+        c.rep_whole = !jit_check;
+        Some(jit::run::Jit::new(jit_check, if jit_now { 1 } else { jit::run::HOT }).unwrap_or_else(|e| fail(format_args!("no memory for generated code: {e}"))))
+    } else {
+        None
+    };
     let code = loop {
-        match cpu::step(&mut c, &mut mem) {
+        let stepped = match &mut blocks {
+            None => cpu::step(&mut c, &mut mem),
+            Some(blocks) => match blocks.run(&mut c, &mut mem) {
+                jit::run::Event::Syscall => Ok(cpu::Step::Syscall),
+                jit::run::Event::Stop(stop) => Err(stop),
+                jit::run::Event::Differs(what) => {
+                    lines.flush().ok();
+                    eprintln!("r64m: --jit-check: {what}");
+                    std::process::exit(3);
+                }
+            },
+        };
+        match stepped {
             Ok(cpu::Step::Next) => {}
             Ok(cpu::Step::Syscall) => {
                 // The exit that ends a program is not a line of the trace: there is
@@ -135,6 +162,13 @@ fn main() {
     lines.flush().ok();
     if count {
         eprintln!("r64m: {} instructions", c.steps);
+    }
+    if let (true, Some(blocks)) = (jit_stats, &blocks) {
+        let s = &blocks.stats;
+        eprintln!(
+            "r64m: jit: {} blocks, entered {} times, {} of {} instructions in blocks, {} checked, {} left by a fault, {} pages' blocks forgotten, emptied {} times",
+            s.blocks, s.entered, s.in_blocks, c.steps, s.checked, s.faults, s.forgotten, s.emptied
+        );
     }
     std::process::exit(code);
 }

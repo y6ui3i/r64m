@@ -45,6 +45,7 @@ enum Value {
     X(u64, u16),
 }
 
+#[derive(Clone)]
 pub struct X87 {
     /// The physical registers; ST(i) is `reg[(top + i) & 7]`.
     reg: [Value; 8],
