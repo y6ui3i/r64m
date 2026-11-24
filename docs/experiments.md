@@ -678,3 +678,38 @@ goes to the next block and not out to Rust (ADR 0014's first "not yet", now coun
 95% of `p_loop`'s time). With it, the flags settled only when something outside
 generated code is about to read them. Then the count of which instructions end the
 blocks of the other nineteen.
+
+## R009: blocks joined to one another (2026-11-24)
+
+The card, written before the run.
+
+- **Hypothesis**: 95% of `p_loop`'s time with `--jit` is between blocks (R008). If a
+  block's end whose target is a constant (a jump, either side of a conditional jump,
+  a call, the instruction a block stops before) goes to the target's block by a jump
+  written into the code, and the flags are worked out from their record only when the
+  interpreter is about to run, then a loop made of such blocks stays in generated code.
+  The four primitives that are wholly in blocks are guessed to come to over a
+  thousand million instructions a second (their generated code alone ran at several
+  times that in R008's profile), `p_recursion` less than the others (a return's target
+  is not a constant: it still comes out to Rust and is looked up). The two that lost
+  (`p_bytes`, `p_switch`) are guessed to stop losing where their short blocks follow
+  one another, and not where each is followed by an instruction of the interpreter's.
+- **What is changed from before**: three things in the code, all part of joining:
+  a jump that can be rewritten at each such end (first to its own way out, then to the
+  target's block once there is one); the count of instructions kept in a host register
+  while generated code runs, since Rust no longer sees each block end; the flags
+  settled before the interpreter runs and not after every block. With `--jit-check`
+  nothing is joined: the check is of one block at a time.
+- **Next move for each result**:
+  - The four past a thousand million → what the other nineteen are not translated for
+    is counted, and instructions are added in the order of that count
+  - The four well short of it → a profile says where the time is now (the record of
+    the flags written at every instruction is the first suspect), and that is next
+  - `p_bytes` or `p_switch` still slower than interpreted by more than a tenth → the
+    cost of one entry and exit is taken apart (the look-up, the sixteen loads and
+    stores) before more is translated
+  - A joined run that does not give the interpreter's output, exit code or count →
+    put right before anything is timed
+- **Cut-off**: the race of R008 again (interpreted against `--jit`, five runs, both at
+  once), and one profile of the slowest of the four. What a return and a jump through
+  a register cost is seen and not changed here.
