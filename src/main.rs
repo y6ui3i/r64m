@@ -166,8 +166,8 @@ fn main() {
     if let (true, Some(blocks)) = (jit_stats, &blocks) {
         let s = &blocks.stats;
         eprintln!(
-            "r64m: jit: {} blocks, entered {} times, {} of {} instructions in blocks, {} jumps joined, {} checked, {} left by a fault, {} pages' blocks forgotten, emptied {} times",
-            s.blocks, s.entered, s.in_blocks, c.steps, s.joined, s.checked, s.faults, s.forgotten, s.emptied
+            "r64m: jit: {} blocks, entered {} times, {} of {} instructions in blocks, {} jumps joined, {} checked, {} left by a fault, {} stores made beside code, {} pages' blocks forgotten, emptied {} times",
+            s.blocks, s.entered, s.in_blocks, c.steps, s.joined, s.checked, s.faults, s.beside, s.forgotten, s.emptied
         );
     }
     std::process::exit(code);

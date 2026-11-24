@@ -5,7 +5,7 @@
 use super::translate::{translate, Built};
 use super::{a64, enter, Code, LEFT_AT_END};
 use crate::cpu::{self, Cpu, Step, Stop};
-use crate::mem::{Access, Mem};
+use crate::mem::{Access, Mem, PAGE};
 use std::collections::HashMap;
 
 /// A block is made when its first address has been arrived at this often (g64m's
@@ -24,6 +24,8 @@ struct Block {
     starts: Vec<(u32, u64)>,
     /// The host pages of the guest's memory its instructions lie in.
     pages: (u64, u64),
+    /// Where its instructions begin and end in the guest.
+    guest: (u64, u64),
     /// The jumps in other blocks (or in this one) that were rewritten to come here.
     incoming: Vec<u64>,
 }
@@ -39,6 +41,7 @@ pub struct Stats {
     pub emptied: u64,
     pub checked: u64,
     pub joined: u64,
+    pub beside: u64,
 }
 
 pub struct Jit {
@@ -50,6 +53,9 @@ pub struct Jit {
     heat: HashMap<u64, u8>,
     /// How often a host page's blocks were forgotten for a write.
     writes: HashMap<u64, u8>,
+    /// For each of the guest's own 4 KB pages, how many blocks have an instruction
+    /// in it. A host page may be larger: a store to it need not be a store to code.
+    holds: HashMap<u64, u32>,
     /// Every block is compared with the interpreter.
     check: bool,
     /// How often an address is arrived at before its block is made.
@@ -76,6 +82,7 @@ impl Jit {
             at: HashMap::new(),
             heat: HashMap::new(),
             writes: HashMap::new(),
+            holds: HashMap::new(),
             check,
             hot: hot.max(1),
             from: 0,
@@ -122,14 +129,43 @@ impl Jit {
             self.from = 0;
             cpu::settle(c);
             let before = c.rip;
+            // An instruction that faults at its store may have changed the flags or a
+            // register on the way to it (ADC to memory has its carry, XADD its
+            // register): what they were is kept, for the two cases below in which the
+            // instruction is run again.
+            let (regs, flags) = (c.reg, c.rflags);
             match cpu::step(c, m) {
                 Ok(Step::Next) => arrived = c.rip < before || c.rip > before.wrapping_add(15),
                 Ok(Step::Syscall) => return Event::Syscall,
-                // A store to a page whose code was translated: the translations are
-                // forgotten, the page can be written again, and the store is made.
+                // A store to a host page that holds translated code. If it is to the
+                // code (the guest's own page written has a block's instruction in it):
+                // the translations are forgotten, the page can be written again, and
+                // the store is made. If it is to data that only shares the host's page
+                // with code (R010): the page is opened for this one instruction.
                 Err(Stop::Fault(f)) if f.access == Access::Write && m.is_code(f.addr) => {
-                    self.forget(f.addr, m);
-                    arrived = false;
+                    (c.reg, c.rflags) = (regs, flags);
+                    // An instruction writes 512 bytes at most: two of the guest's pages.
+                    let page = f.addr & !(PAGE - 1);
+                    if self.holds.contains_key(&page) || self.holds.contains_key(&(page + PAGE)) {
+                        self.forget(f.addr, m);
+                        arrived = false;
+                        continue;
+                    }
+                    let (start, end) = m.host_pages(page, page + 2 * PAGE);
+                    self.stats.beside += 1;
+                    let _ = m.mark_code(start, end, false);
+                    let stepped = cpu::step(c, m);
+                    // Closed again where code is: every host page that a block lies in.
+                    for at in (start..end).step_by(m.host_page() as usize) {
+                        if (at..at + m.host_page()).step_by(PAGE as usize).any(|p| self.holds.contains_key(&p)) {
+                            let _ = m.mark_code(at, at + 1, true);
+                        }
+                    }
+                    match stepped {
+                        Ok(Step::Next) => arrived = c.rip < before || c.rip > before.wrapping_add(15),
+                        Ok(Step::Syscall) => return Event::Syscall,
+                        Err(stop) => return Event::Stop(stop),
+                    }
                 }
                 Err(stop) => return Event::Stop(stop),
             }
@@ -224,7 +260,10 @@ impl Jit {
             return false;
         }
         self.at.insert(rip, self.blocks.len());
-        self.blocks.push(Block { code, starts, pages, incoming: Vec::new() });
+        for page in (rip & !(PAGE - 1)..end).step_by(PAGE as usize) {
+            *self.holds.entry(page).or_insert(0) += 1;
+        }
+        self.blocks.push(Block { code, starts, pages, guest: (rip, end), incoming: Vec::new() });
         self.stats.blocks += 1;
         true
     }
@@ -238,11 +277,14 @@ impl Jit {
         // A block that reaches into the page from a neighbour keeps the neighbour
         // marked: only this page is let go, and only blocks that touch it are dropped.
         let mut dropped = Vec::new();
-        self.at.retain(|_, id| {
+        let heat = &mut self.heat;
+        self.at.retain(|rip, id| {
             let (from, to) = blocks[*id].pages;
             let kept = to <= start || from >= end;
             if !kept {
                 dropped.push(*id);
+                // To be arrived at as often again before it is made again.
+                heat.remove(rip);
             }
             kept
         });
@@ -250,7 +292,19 @@ impl Jit {
             for site in std::mem::take(&mut self.blocks[id].incoming) {
                 unsafe { self.code.rewrite(site as *const u8, a64::b(1)) };
             }
+            let (from, to) = self.blocks[id].guest;
+            for page in (from & !(PAGE - 1)..to).step_by(PAGE as usize) {
+                if let Some(n) = self.holds.get_mut(&page) {
+                    *n -= 1;
+                    if *n == 0 {
+                        self.holds.remove(&page);
+                    }
+                }
+            }
         }
+        // A block of a neighbouring host page may reach into this one and was dropped
+        // with the rest: its other page stays marked until it is written, which is
+        // more than is needed and never less.
         let _ = m.mark_code(start, end, false);
         *self.writes.entry(start).or_insert(0) += 1;
         self.stats.forgotten += 1;
@@ -264,6 +318,7 @@ impl Jit {
         self.blocks.clear();
         self.at.clear();
         self.heat.clear();
+        self.holds.clear();
         self.from = 0;
         self.code.empty();
         self.stats.emptied += 1;
@@ -690,6 +745,112 @@ mod tests {
             // Seven the first time round, nine the three after.
             assert_eq!(c.reg[RDX], 7 + 3 * 9);
             assert!(jit.stats.forgotten >= 1);
+        }
+    }
+
+    #[test]
+    fn a_store_to_data_beside_code_keeps_the_code() {
+        // The code and, two of the guest's pages on, its data: one host page where
+        // the host's pages are 16 KB, two where they are 4 KB.
+        // again: add [rsi], ebx (the store); add edx, [rsi]; sub ebx, 1; jne again;
+        // syscall
+        let code = [0x01, 0x1e, 0x03, 0x16, 0x83, 0xeb, 0x01, 0x75, 0xf7, 0x0f, 0x05];
+        let rounds = 300u64;
+        for check in [true, false] {
+            let mut m = Mem::reserve().unwrap();
+            m.map(CODE, 4096, R | W | X).unwrap();
+            m.write_bytes(CODE, &code).unwrap();
+            m.map(CODE + 0x2000, 4096, R | W).unwrap();
+            m.map(DATA, 4096, R | W).unwrap();
+            let mut jit = Jit::new(check, 1).unwrap();
+            let c = both(&mut jit, &mut m, CODE, &|c| {
+                c.reg[RBX] = rounds;
+                c.reg[RSI] = CODE + 0x2000;
+            });
+            // The sum of the sums of 300 down to each round's count.
+            let total: u64 = (1..=rounds).map(|k| (k..=rounds).sum::<u64>()).sum();
+            assert_eq!(c.reg[RDX], total & 0xffff_ffff);
+            assert_eq!(m.read_u32(CODE + 0x2000), Ok((rounds * (rounds + 1) / 2) as u32));
+            // Nothing was forgotten for it, however often it was written, and the
+            // loop's other instructions went on running in their block.
+            assert_eq!(jit.stats.forgotten, 0);
+            if m.host_page() > 4096 {
+                // Where the host cannot tell the two pages apart, every store was
+                // made beside the code.
+                assert_eq!(jit.stats.beside, rounds);
+            } else {
+                assert_eq!((jit.stats.beside, jit.stats.faults), (0, 0));
+            }
+            assert!(m.is_code(CODE));
+        }
+    }
+
+    #[test]
+    fn a_store_that_runs_from_data_into_code_forgets_the_code() {
+        // The code begins at a page's start, and a store of eight bytes begins four
+        // bytes before it: its upper half lands on the code's first four bytes.
+        // again: mov [rsi], rcx; sub ebx, 1; jne again; syscall, at CODE + 4096, with
+        // RSI just under it.
+        let code = [0x48, 0x89, 0x0e, 0x83, 0xeb, 0x01, 0x75, 0xf8, 0x0f, 0x05];
+        let mut m = Mem::reserve().unwrap();
+        m.map(CODE, 8192, R | W | X).unwrap();
+        // The four bytes of the store that land on the code are what is there
+        // already: the program goes on unchanged.
+        m.write_bytes(CODE + 4096, &code).unwrap();
+        let low = u32::from_le_bytes([code[0], code[1], code[2], code[3]]) as u64;
+        m.map(DATA, 4096, R | W).unwrap();
+        let mut jit = Jit::new(false, 1).unwrap();
+        let c = both(&mut jit, &mut m, CODE + 4096, &|c| {
+            c.reg[RBX] = 3;
+            c.reg[RSI] = CODE + 4096 - 4;
+            c.reg[crate::cpu::RCX] = low << 32 | 0xdddd_dddd;
+        });
+        assert_eq!(c.reg[RBX], 0);
+        assert_eq!(m.read_u32(CODE + 4096 - 4), Ok(0xdddd_dddd));
+        // Each round the store reached the code's own page: forgotten each time.
+        assert_eq!(jit.stats.forgotten, 3);
+        assert_eq!(jit.stats.beside, 0);
+    }
+
+    #[test]
+    fn an_instruction_run_again_after_its_store_faulted_begins_as_it_began() {
+        // Each stores to data that lies beside the code (one host page where pages
+        // are 16 KB) or to the code's own page, so that the store faults the first
+        // time and the instruction is run again: adc [rsi], ebx with the carry set
+        // (its own carry out must not be its carry in); xadd [rsi], ebx (the register
+        // it changes is one of its operands); sbb; cmpxchg; pop [rsi] (RSP).
+        let programs: &[&[u8]] = &[
+            &[0xf9, 0x11, 0x1e, 0x0f, 0x05],
+            &[0x0f, 0xc1, 0x1e, 0x0f, 0x05],
+            &[0xf9, 0x19, 0x1e, 0x0f, 0x05],
+            &[0x0f, 0xb1, 0x1e, 0x0f, 0x05],
+            &[0x6a, 0x77, 0x8f, 0x06, 0x0f, 0x05],
+            &[0xf9, 0xd1, 0x16, 0x0f, 0x05],
+        ];
+        for (i, code) in programs.iter().enumerate() {
+            for data_at in [CODE + 0x2000, CODE + 0x800] {
+                let mut m = Mem::reserve().unwrap();
+                m.map(CODE, 0x3000, R | W | X).unwrap();
+                m.write_bytes(CODE, code).unwrap();
+                m.write_u32(data_at, 0xffff_fff0).unwrap();
+                m.map(DATA, 4096, R | W).unwrap();
+                // A block on the code's page first, so that the page is marked: the
+                // program is arrived at once before it is run for the comparison.
+                let mut jit = Jit::new(false, 1).unwrap();
+                let set = |c: &mut Cpu| {
+                    c.reg[RSI] = data_at;
+                    c.reg[RBX] = 0x1f;
+                    c.reg[RAX] = 0xffff_fff0;
+                };
+                // (A program of the interpreter's instructions only makes no block:
+                // one that is translated is put before it.)
+                let mut with_block = vec![0x83, 0xc2, 0x01];
+                with_block.extend(*code);
+                m.write_bytes(CODE, &with_block).unwrap();
+                both(&mut jit, &mut m, CODE, &set);
+                assert!(jit.stats.blocks >= 1, "program {i}: no block");
+                assert!(jit.stats.beside + jit.stats.forgotten >= 1 || m.host_page() == 4096 && data_at != CODE + 0x800, "program {i}: the store did not fault");
+            }
         }
     }
 }
