@@ -56,3 +56,39 @@ Linux that refuses a mapping both writable and runnable, and any core but the M1
 
 **Next.** The guest's memory: how a program without a kernel has it from the host, with
 the host's protection for what lies outside it; written as a decision before any code.
+
+----
+
+## R002: what each host lets a program do with memory (2026-11-24)
+
+The next decision is how r64m holds the memory of a program without a kernel. g64m holds
+it as an array and tests every address (is it inside, does the store's page hold
+translated code): thirteen of 28 host instructions in one loop (E184). QEMU's user mode
+and FEX-Emu let the host's own protection do that: the guest's memory is the host's at an
+offset or at the same address, a wild address faults, and a page with translated code is
+kept unwritable so that a store to it faults too. Whether r64m can do the same, and how
+far, is a matter of what the two hosts allow, which is to be seen and not guessed:
+
+1. the page's size (x86 programs expect 4 KB; a host with larger pages cannot protect a
+   guest's page by itself);
+2. how many bits a user address has, and how much can be reserved with no access at one
+   stroke;
+3. whether memory can be had at a fixed low address (an x86 program that is not
+   position-independent is linked at 400000h);
+4. whether a fault's handler is told the address and can go on at another place;
+5. what a fault taken and gone on from costs.
+
+- **Hypothesis**: **macOS on Apple silicon has 16 KB pages and 47 bits, refuses memory
+  below 4 GB to a program built as usual, and reserves at least 2^40 bytes at one stroke;
+  Docker's Linux has 4 KB pages and 48 bits, gives 400000h, and reserves 2^40 too; on
+  both the handler is told the address and can go on, at a cost of some microseconds.**
+- **What changed since last time**: nothing; first look.
+- **Next move for each result**:
+  - As guessed → the decision is written for Linux first (4 KB pages: the host's
+    protection can stand for the guest's page by page), with macOS's larger pages a
+    case it names
+  - Linux has larger pages too, or will not reserve → the choices change: what is left
+    is g64m's tests made cheaper
+  - No going on from a fault → no host protection at all; the same
+- **Cut-off**: one probe, in C (no crate fetched for it), run on the Mac and in the
+  container of R001; it is a look, not part of r64m.
