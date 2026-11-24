@@ -1,0 +1,45 @@
+# Programs of an x86-64 Alpine container and what the real machine printed for each
+# (hal, an x86-64 Linux; alpine:3.22; 2026-11-25). A case is the line after "$ ", split
+# at its spaces into a program and its arguments; then what it wrote to its standard
+# output; then "? " and the code it ended with.
+#
+# These need no file but the program's own: ADR 0017's first step.
+$ /bin/busybox echo Hello, world
+Hello, world
+? 0
+$ /bin/busybox true
+? 0
+$ /bin/busybox false
+? 1
+$ /bin/busybox expr 6 * 7
+42
+? 0
+$ /bin/busybox expr 7 / 0
+? 2
+$ /bin/busybox seq 1 5
+1
+2
+3
+4
+5
+? 0
+$ /bin/busybox seq 3 -1 1
+3
+2
+1
+? 0
+$ /bin/busybox basename /a/b.c .c
+b
+? 0
+$ /bin/busybox dirname /usr/lib/x
+/usr/lib
+? 0
+$ /bin/busybox printf %05d\n 42
+00042
+? 0
+$ /bin/busybox printf %s-%x\n abc 255
+abc-ff
+? 0
+$ /bin/busybox factor 1234567890
+1234567890: 2 3 3 5 3607 3803
+? 0

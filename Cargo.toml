@@ -23,3 +23,7 @@ harness = false
 [[test]]
 name = "prim"
 harness = false
+
+[[test]]
+name = "container"
+harness = false

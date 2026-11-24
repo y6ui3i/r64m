@@ -20,6 +20,14 @@ fn banner() -> String {
     )
 }
 
+/// r64m's own environment, as the guest's.
+fn environment() -> Vec<Vec<u8>> {
+    use std::os::unix::ffi::OsStrExt;
+    std::env::vars_os()
+        .map(|(k, v)| [k.as_bytes(), b"=", v.as_bytes()].concat())
+        .collect()
+}
+
 fn fail(what: std::fmt::Arguments) -> ! {
     eprintln!("r64m: {what}");
     std::process::exit(2)
@@ -98,14 +106,25 @@ fn main() {
     };
 
     let img = std::fs::read(path).unwrap_or_else(|e| fail(format_args!("{path}: {e}")));
-    let loaded = elf::load(&mut mem, &img).unwrap_or_else(|e| fail(format_args!("{path}: {e}")));
+    let mut loaded = elf::load(&mut mem, &img).unwrap_or_else(|e| fail(format_args!("{path}: {e}")));
+    // A program that names an interpreter begins there (ADR 0017).
+    let mut entry = loaded.entry;
+    if let Some(name) = elf::interpreter(&img) {
+        let name = String::from_utf8_lossy(&name).into_owned();
+        let img = std::fs::read(&name).unwrap_or_else(|e| fail(format_args!("{path}: its interpreter {name}: {e}")));
+        entry = elf::load_interpreter(&mut mem, &img, &mut loaded).unwrap_or_else(|e| fail(format_args!("{name}: {e}")));
+    }
     let guest_args: Vec<&[u8]> = args.iter().map(|a| a.as_bytes()).collect();
-    let rsp = elf::first_stack(&mut mem, &loaded, &guest_args, &[])
+    // The environment is r64m's own, but for a trace: the real CPU's traces were
+    // taken with none, and the stack pointer is in every line.
+    let own_env: Vec<Vec<u8>> = if trace { Vec::new() } else { environment() };
+    let guest_env: Vec<&[u8]> = own_env.iter().map(|e| e.as_slice()).collect();
+    let rsp = elf::first_stack(&mut mem, &loaded, &guest_args, &guest_env)
         .unwrap_or_else(|e| fail(format_args!("{path}: {e}")));
 
-    let mut c = cpu::Cpu::new(loaded.entry, rsp);
+    let mut c = cpu::Cpu::new(entry, rsp);
     c.rep_whole = !trace;
-    let output = if trace { sys::Output::Nowhere } else { sys::Output::Host };
+    let mut system = sys::Sys::new(if trace { sys::Output::Nowhere } else { sys::Output::Host }, loaded.brk);
     let mut lines = std::io::BufWriter::new(std::io::stdout().lock());
     if jit && trace {
         fail(format_args!("a trace is of the interpreter: not with --jit"));
@@ -140,8 +159,13 @@ fn main() {
             Ok(cpu::Step::Syscall) => {
                 // The exit that ends a program is not a line of the trace: there is
                 // nothing after it to show.
-                if let Some(code) = sys::call(&mut c, &mem, &output) {
+                if let Some(code) = sys::call(&mut c, &mut mem, &mut system) {
                     break code;
+                }
+                // Blocks made from pages the call unmapped, mapped over or protected
+                // otherwise are of what is no longer there (ADR 0016, point 2).
+                if let (Some((start, end)), Some(blocks)) = (system.changed.take(), &mut blocks) {
+                    blocks.guest_changed(start, end, &mut mem);
                 }
             }
             Err(stop) => {

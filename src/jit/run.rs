@@ -392,6 +392,39 @@ impl Jit {
     /// lets the page be written again. The jumps that were rewritten to come to those
     /// blocks go to their own ways out again.
     fn forget(&mut self, addr: u64, m: &mut Mem) {
+        let start = self.drop_page(addr, m);
+        *self.writes.entry(start).or_insert(0) += 1;
+        self.stats.forgotten += 1;
+    }
+
+    /// The guest's pages `[start, end)` were unmapped, mapped anew or given another
+    /// protection: what was made from them, or learnt of addresses in them, is of
+    /// what is no longer there. (It may be made again: if the pages can now be
+    /// written, guarded; ADR 0016, point 2.)
+    pub fn guest_changed(&mut self, start: u64, end: u64, m: &mut Mem) {
+        let mut pages: Vec<u64> = self
+            .places
+            .values()
+            .filter_map(|place| match place {
+                Place::Block(id) => {
+                    let block = &self.blocks[*id];
+                    (block.guest.0 < end && start < block.guest.1).then_some(block.pages.0)
+                }
+                _ => None,
+            })
+            .collect();
+        pages.sort();
+        pages.dedup();
+        for page in pages {
+            self.drop_page(page, m);
+        }
+        self.places.retain(|rip, place| matches!(place, Place::Block(_)) || *rip < start || *rip >= end);
+        self.from = 0;
+    }
+
+    /// Drops every block with an instruction in the host page that holds `addr`; the
+    /// page's start is given back.
+    fn drop_page(&mut self, addr: u64, m: &mut Mem) -> u64 {
         let (start, end) = m.host_pages(addr, addr + 1);
         let blocks = &self.blocks;
         // A block that reaches into the page from a neighbour keeps the neighbour
@@ -438,8 +471,7 @@ impl Jit {
         // with the rest: its other page stays marked until it is written, which is
         // more than is needed and never less.
         let _ = m.mark_code(start, end, false);
-        *self.writes.entry(start).or_insert(0) += 1;
-        self.stats.forgotten += 1;
+        start
     }
 
     /// Forgets all generated code: the piece of memory is full.

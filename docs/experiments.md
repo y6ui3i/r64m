@@ -1964,3 +1964,46 @@ The card, written before the run.
   - Right by the interpreter and not with `--jit-check` → the block that differs is
     the finding: a translation that the primitives never met
 - **Cut-off**: hello in the three ways, and the busybox cases, in the container.
+
+The result (this Mac's Docker VM: arm64 Linux 7.2, 4 KB pages; the x86-64 Alpine
+container with GCC 14.2 that was on it; r64m built for arm64 Linux, static).
+
+**As guessed: hello ran the first time it was tried, in all three ways.**
+
+`./h` (C, compiled by the container's GCC, dynamically linked against musl) printed
+`Hello, world` and ended with 0 by the interpreter, with `--jit` and with
+`--jit-check`: 31,517 instructions, most of them the dynamic linker's. No instruction
+was lacking and no block differed from the interpreter.
+
+busybox then asked for six calls beyond the eight (it gives up privileges and blocks
+signals as it starts): `getuid`, `getgid`, `setuid`, `setgid`, `rt_sigprocmask`, and
+`fcntl` for `printf`. Answered: the identities by the host; the set of blocked signals
+kept as the program's own and blocked on the host without SIGSEGV and SIGBUS, which
+r64m needs; what each signal is to do (`rt_sigaction`) kept and given back, no
+handler called; `fcntl` for copying a descriptor and for its flags, with the four
+flags of an open file that are numbered differently on the two kernels renumbered.
+
+Twelve cases of busybox with no file but its own (`echo`, `true`, `false`, `expr`
+twice, `seq` twice, `basename`, `dirname`, `printf` twice, `factor`) give what hal
+printed for the same commands in alpine:3.22, each in the three ways: 36 of 36
+(`tests/container.rs`, run inside the x86-64 container; shown as ignored on macOS and
+wherever the dynamic linker's file is not).
+
+What was built: `ET_DYN` at a place of r64m's choosing and the interpreter at another
+(Linux's, brought under 2^40); the first stack with where the interpreter is and who
+the process is, for a program that has one (a static program's stack is as it was:
+the traces have the stack pointer in every line); the environment handed on, but for
+a trace; `mmap` downwards from under the interpreter, at a fixed address over what is
+there, and of a file by reading it into the guest's own memory (private mappings
+only); and ADR 0016's point 2: after a call that unmaps, maps over or protects pages,
+the blocks made from them are dropped.
+
+99 unit tests on macOS and in the Linux container (nine new: the loader with a
+program that can be put anywhere and its interpreter, and each call of r64m's own);
+the 62 programs in the four JIT modes on both; the 116 of the primitives and the 39
+traces on macOS.
+
+Not shown, and owed to the steps that will meet them: a mapping of a file that is
+shared and written; an address freed by `munmap` given out again (they are not: the
+reservation is 2^39 bytes below the interpreter, and a long-lived program could use
+it up); a handler called; `set_tid_address`'s word cleared at a thread's end.

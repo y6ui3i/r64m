@@ -26,8 +26,10 @@ past QEMU on this Mac (1.06 to 8.56 times), thirteen of them at twice QEMU or pa
 and on nineteen r64m's JIT is level with g64m's or ahead (R023). The one behind QEMU
 is long double's: the x87 is interpreted, by soft arithmetic of 80 bits. Translated
 code is guarded against writes only where the guest may write it
-([0016](docs/adr/0016-only-writable-code-is-guarded.md)). There is no dynamic linking,
-no system call beyond `write` and `exit`, and no machine yet.
+([0016](docs/adr/0016-only-writable-code-is-guarded.md)). On a Linux host a dynamically
+linked program runs, with the system calls a "Hello, world" and a few of busybox's
+programs ask for (R025); there are no files, no processes and no threads yet, and no
+machine.
 
 ## The goal
 
@@ -100,8 +102,13 @@ real CPU does.
    (R016, R017); a block goes on past a conditional jump (R018); the scalar SSE
    instructions (R020) and the packed integer ones (R021); stores to data beside
    code on 16 KB pages go straight to memory (R023).
-6. Next: what the goal's programs need before they run at all (ADR 0011): dynamic
-   linking, system calls, threads, signals.
+6. The container's way ([0017](docs/adr/0017-the-containers-way.md)): x86-64
+   programs of a container image as processes on the host's own Linux kernel. Done
+   (R025): a program that is dynamically linked and its interpreter loaded; memory
+   by `brk` and `mmap`; a dozen of busybox's programs that need no file, held to
+   what the real machine prints (`tests/container.rs`). Next: the shell and a pipe
+   (`fork`, `execve`, files); GCC compiling a file; then NetHack built in the
+   container, beside user-mode QEMU.
 
 One case is owed: the x87's square root when what is left over equals the root (the
 rounding there is not touched by any of g64m's cases; found by breaking it on purpose).

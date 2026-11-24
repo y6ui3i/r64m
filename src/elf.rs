@@ -2,9 +2,11 @@
 //! guest's memory, each with the protection its header asks, and the first stack made
 //! as Linux makes it.
 //!
-//! So far only an executable linked to a fixed address (`ET_EXEC`). One that is
-//! position-independent, and the dynamic linker beside it, come with the first program
-//! that needs them.
+//! An executable linked to a fixed address (`ET_EXEC`) is put there. One that is
+//! not (`ET_DYN`) is put at `PIE_AT`; and if the program names an interpreter (the
+//! dynamic linker), that file is put at `INTERP_AT` and is where the program begins
+//! to run: it finds the program by the auxiliary vector, as it does under Linux
+//! (ADR 0017, point 3).
 
 use crate::mem::{Fault, MapError, Mem, PAGE, R, W, X};
 
@@ -12,6 +14,20 @@ use crate::mem::{Fault, MapError, Mem, PAGE, R, W, X};
 pub const STACK_SIZE: u64 = 8 << 20;
 
 const PT_LOAD: u32 = 1;
+const PT_INTERP: u32 = 3;
+const ET_DYN: u16 = 3;
+const AT_BASE: u64 = 7;
+const AT_UID: u64 = 11;
+const AT_EUID: u64 = 12;
+const AT_GID: u64 = 13;
+const AT_EGID: u64 = 14;
+const AT_SECURE: u64 = 23;
+
+/// Where a program that is not linked to a fixed address is put, and where its
+/// interpreter is: Linux's places for them with randomizing off, brought down to
+/// fit the smallest reservation (2^40 bytes, ADR 0013).
+pub const PIE_AT: u64 = 0x55_5555_4000;
+pub const INTERP_AT: u64 = 0x7f_f7fc_0000;
 const ET_EXEC: u16 = 2;
 const EM_X86_64: u16 = 62;
 
@@ -59,6 +75,9 @@ pub struct Loaded {
     pub phnum: u64,
     /// The page after its highest segment: where `brk` begins.
     pub brk: u64,
+    /// Where its interpreter was put, if it has one and that was loaded (`AT_BASE`);
+    /// else 0.
+    pub interp: u64,
 }
 
 fn bad<T>(what: &'static str) -> Result<T, ElfError> {
@@ -78,18 +97,56 @@ fn own(r: Result<(), Fault>) {
     r.expect("the loader writes only what it mapped")
 }
 
-/// Puts the program's segments into `mem`.
+/// The file a program asks to be started by (`PT_INTERP`), if it names one.
+pub fn interpreter(img: &[u8]) -> Option<Vec<u8>> {
+    if img.len() < 64 || img[..4] != *b"\x7fELF" {
+        return None;
+    }
+    let (phoff, phent, phnum) = (le::<8>(img, 32), le::<2>(img, 54), le::<2>(img, 56));
+    for i in 0..phnum {
+        let ph = phoff.checked_add(i * phent)? as usize;
+        if img.len() < ph + 56 || le::<4>(img, ph) != PT_INTERP as u64 {
+            continue;
+        }
+        let (offset, size) = (le::<8>(img, ph + 8) as usize, le::<8>(img, ph + 32) as usize);
+        let name = img.get(offset..offset.checked_add(size)?)?;
+        // Without the zero that ends it.
+        return Some(name.split(|&b| b == 0).next().unwrap_or(name).to_vec());
+    }
+    None
+}
+
+/// Puts the program's segments into `mem`: where it is linked to be, or at `PIE_AT`
+/// if it can be put anywhere.
 pub fn load(mem: &mut Mem, img: &[u8]) -> Result<Loaded, ElfError> {
+    load_at(mem, img, PIE_AT)
+}
+
+/// Puts a program's interpreter into `mem` at `INTERP_AT`, and says in `program`
+/// where: the program then begins at the interpreter's entry, which is given back.
+pub fn load_interpreter(mem: &mut Mem, img: &[u8], program: &mut Loaded) -> Result<u64, ElfError> {
+    if img.len() >= 18 && le::<2>(img, 16) != ET_DYN as u64 {
+        return bad("the interpreter is linked to a fixed address");
+    }
+    let interp = load_at(mem, img, INTERP_AT)?;
+    program.interp = INTERP_AT;
+    Ok(interp.entry)
+}
+
+fn load_at(mem: &mut Mem, img: &[u8], anywhere: u64) -> Result<Loaded, ElfError> {
     if img.len() < 64 || img[..4] != *b"\x7fELF" {
         return bad("not an ELF file");
     }
     if img[4] != 2 || img[5] != 1 || le::<2>(img, 18) != EM_X86_64 as u64 {
         return bad("not an x86-64 ELF");
     }
-    if le::<2>(img, 16) != ET_EXEC as u64 {
-        return bad("not an executable linked to a fixed address (a static, non-PIE one)");
-    }
-    let entry = le::<8>(img, 24);
+    // What is added to every address the file names.
+    let bias = match le::<2>(img, 16) as u16 {
+        ET_EXEC => 0,
+        ET_DYN => anywhere,
+        _ => return bad("not an executable (a file to be linked, or a core)"),
+    };
+    let entry = le::<8>(img, 24).wrapping_add(bias);
     let phoff = le::<8>(img, 32);
     let phent = le::<2>(img, 54);
     let phnum = le::<2>(img, 56);
@@ -101,7 +158,7 @@ pub fn load(mem: &mut Mem, img: &[u8]) -> Result<Loaded, ElfError> {
         _ => return bad("a program header is past the end of the file"),
     }
 
-    let mut loaded = Loaded { entry, phdr: 0, phent, phnum, brk: 0 };
+    let mut loaded = Loaded { entry, phdr: 0, phent, phnum, brk: 0, interp: 0 };
     // The ends of what is mapped so far, to refuse two segments on one page.
     let mut taken: Vec<(u64, u64)> = Vec::new();
 
@@ -112,7 +169,9 @@ pub fn load(mem: &mut Mem, img: &[u8]) -> Result<Loaded, ElfError> {
         }
         let flags = le::<4>(img, ph + 4);
         let offset = le::<8>(img, ph + 8);
-        let vaddr = le::<8>(img, ph + 16);
+        let Some(vaddr) = le::<8>(img, ph + 16).checked_add(bias) else {
+            return bad("a segment does not fit in the guest's memory");
+        };
         let filesz = le::<8>(img, ph + 32);
         let memsz = le::<8>(img, ph + 40);
         if memsz == 0 {
@@ -209,8 +268,23 @@ pub fn first_stack(
         (AT_PAGESZ, PAGE),
         (AT_ENTRY, loaded.entry),
         (AT_RANDOM, random),
-        (AT_NULL, 0),
     ];
+    let mut aux = aux.to_vec();
+    // What a dynamic linker asks besides: where it is itself, who the process is, and
+    // that it need not distrust its environment. (A static program's stack is left
+    // as it was: the traces of the real CPU have the stack pointer in every line.)
+    if loaded.interp != 0 {
+        let (uid, euid, gid, egid) = unsafe { (libc::getuid(), libc::geteuid(), libc::getgid(), libc::getegid()) };
+        aux.extend([
+            (AT_BASE, loaded.interp),
+            (AT_UID, uid as u64),
+            (AT_EUID, euid as u64),
+            (AT_GID, gid as u64),
+            (AT_EGID, egid as u64),
+            (AT_SECURE, 0),
+        ]);
+    }
+    aux.push((AT_NULL, 0));
     let mut words = Vec::with_capacity(3 + args.len() + env.len() + 2 * aux.len());
     words.push(args.len() as u64);
     words.extend(&arg_at);
@@ -306,7 +380,7 @@ mod tests {
         let l = load(&mut m, &img).unwrap();
         assert_eq!(
             l,
-            Loaded { entry: 0x40_1004, phdr: 0x40_0040, phent: 56, phnum: 3, brk: 0x40_6000 }
+            Loaded { entry: 0x40_1004, phdr: 0x40_0040, phent: 56, phnum: 3, brk: 0x40_6000, interp: 0 }
         );
         assert_eq!(
             m.regions(),
@@ -336,6 +410,50 @@ mod tests {
     }
 
     #[test]
+    fn a_program_that_can_be_put_anywhere_is_put_at_its_place_and_its_interpreter_at_another() {
+        // The same file said to be position-independent: every address it names is
+        // as far from `PIE_AT` as it was from nothing.
+        let mut img = program();
+        img[16] = 3;
+        let mut m = mem();
+        let mut l = load(&mut m, &img).unwrap();
+        let fixed = load(&mut mem(), &program()).unwrap();
+        assert_eq!((l.entry, l.phdr, l.brk), (fixed.entry + PIE_AT, fixed.phdr + PIE_AT, fixed.brk + PIE_AT));
+        assert_eq!(m.read::<8>(0x40_3ff8 + PIE_AT), Ok(*b"datadata"));
+        assert_eq!((l.interp, interpreter(&img)), (0, None));
+        // As an interpreter it goes to `INTERP_AT`, beside the program, and the
+        // program is told where; one linked to a fixed address is not an interpreter.
+        let entry = load_interpreter(&mut m, &img, &mut l).unwrap();
+        assert_eq!((entry, l.interp), (fixed.entry + INTERP_AT, INTERP_AT));
+        assert_eq!(m.read::<8>(0x40_3ff8 + INTERP_AT), Ok(*b"datadata"));
+        assert!(matches!(load_interpreter(&mut mem(), &program(), &mut l), Err(ElfError::Bad(_))));
+        // The first stack then says where the interpreter is (AT_BASE, 7), which a
+        // static program's does not.
+        let has_base = |m: &mut Mem, l: &Loaded| {
+            let rsp = first_stack(m, l, &[], &[]).unwrap();
+            // Past the count, the end of the arguments and the end of the environment.
+            (0..20).map(|i| m.read_u64(rsp + 24 + 16 * i).unwrap()).take_while(|&k| k != 0).any(|k| k == 7)
+        };
+        assert!(has_base(&mut m, &l));
+        assert!(!has_base(&mut mem(), &fixed));
+    }
+
+    #[test]
+    fn the_interpreter_a_program_names_is_read_from_its_header() {
+        // One header of kind 3 whose bytes in the file are a name and its zero.
+        let mut img = program();
+        let name = b"/lib/ld-musl-x86_64.so.1\0";
+        let at = img.len() as u64;
+        img.extend(name);
+        let ph = 64 + 56 * 2;
+        img[ph..ph + 4].copy_from_slice(&3u32.to_le_bytes());
+        img[ph + 8..ph + 16].copy_from_slice(&at.to_le_bytes());
+        img[ph + 32..ph + 40].copy_from_slice(&(name.len() as u64).to_le_bytes());
+        assert_eq!(interpreter(&img).as_deref(), Some(&name[..name.len() - 1]));
+        assert_eq!(interpreter(b"not a program"), None);
+    }
+
+    #[test]
     fn what_is_not_a_static_x86_64_executable_is_refused_in_words() {
         let refused = |img: &[u8]| match load(&mut mem(), img) {
             Err(ElfError::Bad(what)) => what,
@@ -351,8 +469,8 @@ mod tests {
         img[4] = 1; // 32-bit
         assert_eq!(refused(&img), "not an x86-64 ELF");
         let mut img = good.clone();
-        img[16] = 3; // position-independent
-        assert!(refused(&img).starts_with("not an executable linked to a fixed address"));
+        img[16] = 1; // a file to be linked
+        assert!(refused(&img).starts_with("not an executable"));
         let mut img = good.clone();
         img[56] = 200; // more headers than the file holds
         assert_eq!(refused(&img), "a program header is past the end of the file");
