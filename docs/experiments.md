@@ -852,3 +852,38 @@ Rosetta's times for the same builds are those taken earlier today (g64m's E186 t
 without leaving generated code (what `p_recursion` and `p_funcptr` wait for); and the
 count of which instructions end the blocks of the other primitives, translated in the
 order of that count. The race with QEMU for all 23 follows them.
+
+## R011: a return and a jump through an operand, without leaving generated code (2026-11-25)
+
+The card, written before the run.
+
+- **Hypothesis**: a return's target is not a constant, so every return comes out to
+  Rust, which looks the address up in a hash table and goes in again: 144 million
+  times in `p_recursion`'s 2,434 million instructions, 984 million in `p_funcptr`'s
+  4,191 million (R010). If generated code looks the address up itself in a small table
+  of its own (the address's low bits choose a place; the place holds an address and
+  where its block's code is; equal, it jumps there; not equal, it leaves as before),
+  a return is some seven host instructions and no leaving. `p_recursion`, which is
+  wholly in blocks, is guessed to pass QEMU (1.567 s at 200 rounds; r64m took 2.03 s
+  and 3.66 s in two races). `p_funcptr` also needs CALL and JMP through a register or
+  memory translated, which they are not yet: with them it is guessed to come from
+  48 s to a few seconds, still short of QEMU's 9.1 s only if what else it is not
+  translated for (a fifth of its instructions) is in its loop.
+- **What is changed from before**: a table of 16,384 places that generated code reads
+  (its address in a host register), filled by Rust whenever it finds a block for an
+  address, emptied of a block's place when the block is forgotten; RET looks in it;
+  CALL and JMP through an operand (FFh, fields 2 and 4) are translated and look in it.
+  With `--jit-check` the table is left empty, so that every block is still checked by
+  itself.
+- **Next move for each result**:
+  - `p_recursion` past QEMU and steady over three races → the count of what ends the
+    other primitives' blocks is next, and instructions are added by it
+  - `p_recursion` not past QEMU → a profile; the first suspect is two returns whose
+    addresses share a place in the table and put each other out, the second the
+    record of the flags written at every instruction that sets them
+  - `p_recursion` still unsteady from race to race (R010 saw 2.03 s and 3.66 s) →
+    that is found before any figure of it is used
+  - `p_funcptr` still far from QEMU → its count of what is not translated says what
+- **Cut-off**: `p_recursion` and `p_funcptr` at 200 rounds beside g64m's JIT, three
+  races of three runs each, with the counts; the other five of R010's table once, to
+  see that nothing is lost. macOS.
