@@ -1,7 +1,7 @@
 # 0010: The interpreter asks the list of regions; generated code does not
 
-**Status**: proposed (2026-11-24; changes point 2 of 0008 for the interpreter only, and
-waits for the owner's word)
+**Status**: accepted (2026-11-24, the owner; changes point 2 of 0008 for the interpreter
+only)
 
 ## Context
 
