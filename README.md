@@ -14,14 +14,16 @@ and all 23 of its primitives print what they should, on macOS and on arm64 Linux
 M1), 1.27 times g64m's interpreter and ahead of it on every primitive (R007); QEMU,
 which is a JIT, runs the same primitives at 1,267 million. r64m's own JIT
 ([0014](docs/adr/0014-the-jit.md)) translates blocks of integer instructions (moves,
-arithmetic and logic on 8 to 64 bits, shifts, rotations, bit scans, the stack, jumps),
+arithmetic and logic on 8 to 64 bits, with and without the carry, multiplication and
+division, shifts, rotations, bit scans, conditional moves and sets, the stack, jumps),
 joins them to one another, finds a return's block without leaving generated code, and
 checks each block against the interpreter when asked (`--jit-check`). It is asked for
-with `--jit` and is not yet what r64m does by itself. Nine of the 23 primitives run
-wholly in such blocks: all nine are past QEMU on this Mac (1.15 to 3.56 times), four
-of them at twice QEMU or past it, and on six r64m's JIT is level with g64m's or ahead
-(R015). The other fourteen are still mostly interpreted:
-SSE and the x87 are not translated, nor some integer instructions. There is no dynamic linking,
+with `--jit` and is not yet what r64m does by itself. Of the 23 primitives sixteen are
+past QEMU on this Mac (1.06 to 4.81 times), seven of them at twice QEMU or past it,
+and on ten r64m's JIT is level with g64m's or ahead (R017). One integer primitive is
+behind QEMU for a jump the host's flags do not answer, one for stores to data that
+shares a 16 KB host page with its code; the six floating-point ones are still mostly
+interpreted: SSE and the x87 are not translated. There is no dynamic linking,
 no system call beyond `write` and `exit`, and no machine yet.
 
 ## The goal
@@ -91,8 +93,9 @@ real CPU does.
    out; the translator for integer instructions with `--jit-check`; a fault in a
    block; a store to translated code, and to data beside it; blocks joined; returns
    and jumps through an operand found in a table. The record of the flags is written only where
-   something can read it (R013 to R015). Next: the instructions the other fourteen
-   primitives wait for; SSE.
+   something can read it (R013 to R015); the integer instructions the primitives use
+   (R016, R017). Next: a block that goes on past a conditional jump; SSE; stores
+   beside code on 16 KB pages.
 
 One case is owed: the x87's square root when what is left over equals the root (the
 rounding there is not touched by any of g64m's cases; found by breaking it on purpose).

@@ -1988,6 +1988,12 @@ mod tests {
         for a in [0u64, 0x1234_5678_9abc_8001, 0xffff_ffff_ffff_7f80, 0x80ff, 0x4040, 0x01fe] {
             under_every_condition(&list, &[], &|c| c.reg[RAX] = a);
         }
+        // That they are in blocks, and not the interpreter's doing what is compared:
+        // shr dl, 3; sar ax, 7; shl ah, 1, each with the SYSCALL after it not.
+        for code in [&[0xc0u8, 0xea, 0x03, 0x0f, 0x05][..], &[0x66, 0xc1, 0xf8, 0x07, 0x0f, 0x05], &[0xd0, 0xe4, 0x0f, 0x05]] {
+            let m = guest(code, &[]);
+            assert_eq!(translate(&m, CODE, false).map(|b| b.starts.len()), Some(1), "{code:02x?}");
+        }
         // MOVZX and MOVSX from AH, CH, DH, BH; BSWAP of 32 and of 64 bits.
         let set = |c: &mut Cpu| {
             c.reg[RAX] = 0x1122_3344_5566_8f88;

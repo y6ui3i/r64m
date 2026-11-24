@@ -115,7 +115,7 @@ fn read(bytes: &[u8], rip: u64) -> Option<Ins> {
     }
     let mut op = if b == 0x0f { 0x100 | next(1)? as u16 } else { b as u16 };
     // The opcodes that are their neighbour with 8-bit operands.
-    let byte = matches!(op, 0x00..=0x3f | 0x80 | 0x84 | 0x88 | 0x8a | 0xa8 | 0xc6 | 0xf6) && op & 1 == 0;
+    let byte = matches!(op, 0x00..=0x3f | 0x80 | 0x84 | 0x88 | 0x8a | 0xa8 | 0xc0 | 0xc6 | 0xd0 | 0xf6) && op & 1 == 0;
     if byte {
         op |= 1;
     }
@@ -1503,6 +1503,11 @@ mod tests {
         let i = ins(&[0x66, 0xc7, 0x06, 0x34, 0x12]);
         assert_eq!((i.op, i.size, i.len, i.imm), (0xc7, 16, 5, 0x1234));
         assert_eq!(ins(&[0x66, 0x83, 0xc0, 0xff]).imm, -1);
+        // Shifts of 8 and 16 bits by a constant and by one.
+        let i = ins(&[0xc0, 0xea, 0x03]);
+        assert_eq!((i.op, i.size, i.reg & 7, i.rm, i.imm), (0xc1, 8, 5, Rm::Reg(2), 3));
+        assert_eq!((ins(&[0xd0, 0xe4]).op, ins(&[0xd0, 0xe4]).size), (0xd1, 8));
+        assert_eq!(ins(&[0x66, 0x41, 0xc1, 0xf9, 0x07]).size, 16);
         // F7h: TEST has a constant as wide as the operand; NOT has none.
         let i = ins(&[0xf6, 0xc2, 0x80]);
         assert_eq!((i.op, i.size, i.len, i.imm), (0xf7, 8, 3, -0x80));
@@ -1534,6 +1539,8 @@ mod tests {
         no(&[0x66, 0x50]); // a 16-bit push
         no(&[0x66, 0xd3, 0xe0]); // a 16-bit shift by CL
         no(&[0xc0, 0xc0, 0x03]); // an 8-bit rotation
+        no(&[0xd2, 0xe0]); // an 8-bit shift by CL
+        no(&[0xc0, 0x26, 0x03]); // an 8-bit shift of memory
         no(&[0x66, 0x11, 0xd8]); // a 16-bit ADC
         no(&[0x10, 0xd8]); // an 8-bit one
         no(&[0x66, 0xf7, 0xe3]); // a 16-bit MUL

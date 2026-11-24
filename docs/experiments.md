@@ -1387,3 +1387,54 @@ The card, written before the run.
   - In blocks and far from QEMU → the count and the listing for that one
   - A program wrong → put right first
 - **Cut-off**: these six kinds. The shorter race for the integer primitives.
+
+**Result: the five are wholly in blocks and past QEMU, `p_bignum` and `p_muldiv` by
+more than was guessed. Sixteen of the 23 primitives are past QEMU on this Mac, seven of
+them at twice or past it.**
+
+On a MacBook Air (Apple M1), macOS 27. The shorter race, 200 rounds, r64m `--jit`
+beside g64m `--jit`; QEMU and Rosetta as timed earlier.
+
+| 200 rounds | before (R016) | now | g64m `--jit` | QEMU | Rosetta | QEMU's time / r64m's | g64m's time / r64m's |
+|---|---|---|---|---|---|---|---|
+| p_muldiv | interpreted in part | 0.915 s | 0.923 s | 4.397 s | 0.653 s | **4.81** | 1.01 |
+| p_bignum | interpreted in part | 1.142 s | 1.741 s | 2.590 s | 0.887 s | **2.27** | 1.52 |
+| p_bytes | 6.884 s | 0.816 s | 1.083 s | 1.373 s | 0.573 s | 1.68 | 1.33 |
+| p_pixel | 5.058 s | 0.489 s | 0.482 s | 0.523 s | 0.393 s | 1.07 | 0.99 |
+| p_bitfield | interpreted in part | 1.033 s | 1.075 s | 1.100 s | 0.890 s | 1.06 | 1.04 |
+| p_ternary | 0.714 s | 0.763 s | 0.531 s | 0.807 s | 0.473 s | 1.06 | 0.70 |
+| p_switch | 8.691 s | 8.683 s | 3.090 s | 6.167 s | 2.847 s | 0.71 | 0.36 |
+| p_sha | 96 M/s at one round | the same | | | | far behind | |
+
+Where all 23 stand against QEMU now (QEMU's time over r64m's, 200 rounds):
+`p_muldiv` 4.81, `p_recursion` 3.57, `p_funcptr` 3.11, `p_fill` 2.73, `p_index` 2.43,
+`p_loop` 2.28, `p_bignum` 2.27 (seven at twice or past it); `p_bytes` 1.68,
+`p_pointer` 1.66, `p_rotate` 1.35, `p_if` 1.22, `p_shift` 1.16, `p_pixel` 1.07,
+`p_bitfield` 1.06, `p_ternary` 1.06 (eight more past it); `p_switch` 0.71; `p_sha`
+far behind; and the six floating-point ones (`p_dbl_arith`, `p_dbl_cmp`,
+`p_dbl_conv`, `p_float`, `p_ldbl`, `p_simd`) mostly interpreted. 84.4% of the
+primitives' instructions are in blocks.
+
+- **The hypothesis held**, and `p_bignum` and `p_muldiv`, guessed only to come near
+  QEMU, are at 2.27 and 4.81 times it. On ten of the sixteen r64m's JIT is level with
+  g64m's or ahead of it.
+- **One of the six kinds was not in at first, and the tests did not say so**: the
+  shifts of 8 bits have opcodes of their own (C0h, D0h), which the reader did not
+  know, so they stayed the interpreter's. Every test of them passed, because the
+  interpreter does them right: a test that compares results cannot tell who computed
+  them. `p_bitfield` staying at 97.7% in blocks and ten seconds showed it; the count
+  (`--jit-why`) named the instruction. The tests of small shifts now also ask that
+  they are in a block.
+- A division at a block's start that left for the interpreter came back to its own
+  block and went round for ever: found by a test that did not end. A block now has a
+  way out that says "this instruction is the interpreter's this time".
+- **What is left among the integer primitives**: `p_switch` (a jump the host's flags
+  do not answer: `cmp; je; jbe`, where the first jump ends the block and the second
+  begins the next with no flags of the host's known); `p_sha` (its stores beside its
+  code, R016).
+- 62 programs in four JIT modes and 72 unit tests on macOS and in the Linux container.
+
+**Next.** Three things, each a decision before it is a change: a block that goes on
+past a conditional jump (what `p_switch` waits for, and ADR 0014's second "not yet");
+SSE in blocks (six primitives); stores to data beside code on a host with 16 KB pages
+(`p_sha`, and whatever real program keeps its hot data next to its code).
