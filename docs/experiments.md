@@ -123,3 +123,33 @@ page; macOS does not, by its pages' size.**
 
 **Next.** The decision, as `docs/adr/0008`, proposed and not accepted: the owner's to
 read.
+
+## R003: r64m on arm64 Linux as it is (2026-11-24)
+
+The card, written before the run.
+
+- **Hypothesis**: r64m, never built for anything but macOS, builds for arm64 Linux and
+  does there what it does on the Mac: the 17 unit tests pass (among them what the host
+  itself refuses, asked of a forked child), the 39 cases give the real CPU's traces and
+  the 23 primitives print what they should. One thing is expected to differ and is what
+  the run is for: the reservation is 2^47 bytes and the host's page is the guest's, so
+  the test of a shared host page has nothing to do there.
+- **What is changed from before**: the host. Until now everything ran on macOS 27 on the
+  M1 (16 KB pages, 2^46 bytes). Now the same source built for
+  `aarch64-unknown-linux-musl` (the target fetched by rustup, linked with the
+  toolchain's own `rust-lld`), run in the container of R001 (Alpine 3.24, kernel 7.2
+  under OrbStack, 4 KB pages).
+- **Next move for each result**:
+  - All the same → the JIT is begun on a memory known to behave on the host r64m is
+    made for
+  - A unit test of the memory fails → the host's side of `mem.rs` is wrong for Linux
+    (the order of `mmap` and `mprotect`, what a fixed mapping over a reservation does):
+    put right before anything is built on it
+  - A trace or a primitive differs → something in the interpreter leans on the host
+    (the library's functions in the x87, a float's conversion): found by the first line
+    that differs
+  - It does not build or link → the way of building for Linux is what has to be
+    decided (a container with Rust in it is the other way, and a larger download)
+- **Cut-off**: one build and one run of each of the three. The cases are the ones
+  already assembled on the Mac (the container has no nasm, and none is fetched for
+  this), so what is run on Linux is r64m, not the harness around it.
