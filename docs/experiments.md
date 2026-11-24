@@ -769,3 +769,36 @@ from earlier today (g64m's E186 table) set beside:
 **Next.** R010: a store to data that shares a host page with translated code is made
 without forgetting the code, when the guest's own page that is written holds none.
 Then this entry's race again at 200 rounds, which is the length that shows it.
+
+## R010: data beside code in one host page (2026-11-24)
+
+The card, written before the run.
+
+- **Hypothesis**: on macOS a store to data that lies in the same 16 KB host page as
+  translated code forgets that page's blocks, and after eight such stores the page is
+  given up (R009). The store is not to code: the guest's own 4 KB page that is written
+  holds no translated instruction. If such a store is made by the interpreter with the
+  host page opened for that one instruction and closed again, and nothing is
+  forgotten, the blocks stay; a store from generated code to that page still faults
+  and leaves its block each time (the host cannot tell the two guest pages apart), so
+  it costs a fault and an interpreted instruction, some microseconds, where it cost
+  the blocks. The five primitives that fell to 0.5% in blocks at 200 rounds are
+  guessed to keep what they have at one round (75 to 99.7%), and those that write
+  their data once a round to run near `p_loop`'s speed; one that writes data beside
+  its code inside its loop would be held back by the faults, and which ones do is not
+  known.
+- **What is changed from before**: in R009 any store to a marked host page forgot its
+  blocks. Now only a store that touches a guest page with translated instructions in
+  it does. The runner keeps, for each guest page, how many blocks have instructions
+  there.
+- **Next move for each result**:
+  - The five keep their blocks and run in seconds, not minutes → the race with QEMU
+    for all 23 is the next entry, with what is not translated counted
+  - They keep their blocks but one is slow by the faults (thousands of stores a
+    second through the handler) → an instruction that faults often is left to the
+    interpreter without the fault: its block is made again to end before it
+  - Blocks are still forgotten → what writes to the code's own guest page is looked at
+    (a program that keeps data in its text)
+- **Cut-off**: R009's race at 200 rounds again for the seven, and the counts
+  (`--jit-stats`) for all 23 at 200 rounds. macOS, which is where it happens; Linux is
+  run for the tests only.
