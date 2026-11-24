@@ -1253,3 +1253,44 @@ beside g64m `--jit`; QEMU and Rosetta as timed earlier.
 **Next.** What the fourteen primitives that are not in blocks wait for (0 to 59% in
 blocks, R012): the instructions that end their blocks, counted by program; SSE first
 among them by how many programs it holds back. The 1.7 cycles are left as found.
+
+## R016: what the interpreter still runs under the JIT (2026-11-25)
+
+The card, written before the run.
+
+- **What was counted first** (`--jit-why`, new: every instruction the interpreter runs
+  while the JIT is on, by its prefixes and opcode; all 23 primitives at one round).
+  The fourteen primitives that are not in blocks have 41 to 100% of their instructions
+  interpreted, and the commonest instructions the interpreter runs are ones the
+  translator already has: `cmp rax, imm8` (19.0 M), `jne` (15.9 M), `add r/m64, r64`
+  (14.7 M), `mov r/m32, r32` (14.5 M), `movzx` (10.3 M), `or` (10.2 M). They are
+  interpreted because of where blocks may begin: only where a jump arrives. When a
+  block ends before an instruction that is not translated, the interpreter runs that
+  one, and then every instruction after it up to the next jump, translated or not.
+  Behind those in the count come the ones that are truly missing: the arithmetic with
+  the A register and a constant (`48 3d`, CMP RAX with a constant: 8.5 M), SSE (some
+  55 M over six primitives), CMOV and SETcc (5.8 M), IMUL (5.7 M), the x87 (10 M, one
+  primitive), IDIV, BSWAP, the string instructions.
+- **Hypothesis**: if the instruction after one that the interpreter ran in a block's
+  stead is taken as a place where a block may begin, the integer primitives that are
+  now a quarter in blocks (`p_bignum`, `p_bytes`, `p_muldiv`, `p_pixel`, `p_ternary`,
+  `p_bitfield`) come to more than half without any new instruction, and gain by it.
+  With the A-register forms, CMOV, SETcc and IMUL added they are guessed to be over
+  90% in blocks, and past QEMU as the nine are. The floating-point primitives do not
+  move until SSE is translated, which is not in this entry.
+- **What is changed from before**: (1) where a block may begin; (2) ADD, OR, AND, SUB,
+  XOR, CMP and TEST of the A register with a constant (05h and its like, A8h, A9h);
+  (3) CMOVcc and SETcc, which read the flags: translated where the host's flags
+  answer, as a conditional jump is, and counted as reading them elsewhere; (4) IMUL
+  with two and three operands, its flags a record of its operands.
+- **Next move for each result**:
+  - The six integer primitives over 90% in blocks and past QEMU → SSE is the next
+    entry, and with it the six floating-point primitives
+  - In blocks and not past QEMU → the count again for the slowest, and the listing of
+    its loop, before more is added
+  - (1) alone makes a primitive slower (short blocks between interpreted
+    instructions, as R008 saw) → said, and (1) is kept only with what makes those
+    blocks longer
+  - A program wrong → put right first
+- **Cut-off**: these four. The count and the shorter race after (1) alone, and again
+  after all four. SSE, the x87, IDIV, BSWAP and the strings are counted and not done.

@@ -73,6 +73,8 @@ fn main() {
     let count = option("--count");
     let jit_check = option("--jit-check");
     let jit_stats = option("--jit-stats");
+    // What the interpreter still ran, by instruction: for deciding what to translate.
+    let jit_why = option("--jit-why");
     // For the tests: every block made the first time its address is arrived at.
     let jit_now = option("--jit-now");
     let jit = option("--jit") || jit_check;
@@ -111,7 +113,12 @@ fn main() {
     let mut blocks = if jit {
         // With the check every repetition is a step, as the check counts them.
         c.rep_whole = !jit_check;
-        Some(jit::run::Jit::new(jit_check, if jit_now { 1 } else { jit::run::HOT }).unwrap_or_else(|e| fail(format_args!("no memory for generated code: {e}"))))
+        let mut made = jit::run::Jit::new(jit_check, if jit_now { 1 } else { jit::run::HOT })
+            .unwrap_or_else(|e| fail(format_args!("no memory for generated code: {e}")));
+        if jit_why {
+            made.why = Some(Default::default());
+        }
+        Some(made)
     } else {
         None
     };
@@ -162,6 +169,14 @@ fn main() {
     lines.flush().ok();
     if count {
         eprintln!("r64m: {} instructions", c.steps);
+    }
+    if let Some(why) = blocks.as_ref().and_then(|b| b.why.as_ref()) {
+        let mut by_count: Vec<_> = why.iter().collect();
+        by_count.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+        for (key, n) in by_count.into_iter().take(40) {
+            let bytes: Vec<String> = key.iter().map(|b| format!("{b:02x}")).collect();
+            eprintln!("r64m: why: {n:>12} {}", bytes.join(" "));
+        }
     }
     if let (true, Some(blocks)) = (jit_stats, &blocks) {
         let s = &blocks.stats;

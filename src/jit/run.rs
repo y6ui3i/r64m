@@ -59,6 +59,10 @@ pub struct Jit {
     holds: HashMap<u64, u32>,
     /// Every block is compared with the interpreter.
     check: bool,
+    /// When asked for (`--jit-why`): how often the interpreter ran an instruction
+    /// while the JIT was on, by the instruction's first bytes (its prefixes and
+    /// opcode, and the ModRM byte's field where the opcode is a group).
+    pub why: Option<HashMap<Vec<u8>, u64>>,
     /// How often an address is arrived at before its block is made.
     hot: u8,
     /// The jump the last block was left by, if it can be rewritten to go to the block
@@ -118,6 +122,7 @@ impl Jit {
             writes: HashMap::new(),
             holds: HashMap::new(),
             check,
+            why: None,
             hot: hot.max(1),
             from: 0,
             table: vec![[0, 0]; 1 << TABLE_BITS].into_boxed_slice(),
@@ -170,6 +175,9 @@ impl Jit {
             self.from = 0;
             cpu::settle(c);
             let before = c.rip;
+            if let Some(why) = &mut self.why {
+                *why.entry(key_of(m, before)).or_insert(0) += 1;
+            }
             // An instruction that faults at its store may have changed the flags or a
             // register on the way to it (ADC to memory has its carry, XADD its
             // register): what they were is kept, for the two cases below in which the
@@ -380,6 +388,51 @@ impl Jit {
         self.clear_table();
         self.stats.emptied += 1;
     }
+}
+
+/// What an instruction is counted under for `--jit-why`: its prefixes and opcode
+/// (two bytes behind 0Fh, three behind 0F 38h and 0F 3Ah), and for the opcodes that
+/// are groups the ModRM byte's field, as a byte of its own.
+fn key_of(m: &Mem, rip: u64) -> Vec<u8> {
+    let (code, have) = m.code_at(rip);
+    let bytes = unsafe { std::slice::from_raw_parts(code, have) };
+    let mut key = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() && matches!(bytes[i], 0x26 | 0x2e | 0x36 | 0x3e | 0x64..=0x67 | 0xf0 | 0xf2 | 0xf3) {
+        key.push(bytes[i]);
+        i += 1;
+    }
+    // REX is left out but for its W, which is another instruction.
+    if i < bytes.len() && bytes[i] & 0xf0 == 0x40 {
+        if bytes[i] & 8 != 0 {
+            key.push(0x48);
+        }
+        i += 1;
+    }
+    let Some(&op) = bytes.get(i) else { return key };
+    key.push(op);
+    i += 1;
+    if op == 0x0f {
+        if let Some(&b) = bytes.get(i) {
+            key.push(b);
+            i += 1;
+            if matches!(b, 0x38 | 0x3a) {
+                key.extend(bytes.get(i));
+                i += 1;
+            }
+        }
+    }
+    let group = match key[key.len() - 1] {
+        0x80..=0x83 | 0xc0 | 0xc1 | 0xd0..=0xd3 | 0xf6 | 0xf7 | 0xfe | 0xff if key.len() < 2 || key[key.len() - 2] != 0x0f => true,
+        0xae | 0xba | 0xc7 | 0x71..=0x73 if key.len() >= 2 && key[key.len() - 2] == 0x0f => true,
+        _ => false,
+    };
+    if group {
+        if let Some(&modrm) = bytes.get(i) {
+            key.push(0xf8 | modrm >> 3 & 7);
+        }
+    }
+    key
 }
 
 /// What differs between the CPU as the interpreter left it (`want`) and as the block
