@@ -2,11 +2,15 @@
 name = "r64m"
 version = "0.1.0"
 edition = "2024"
-description = "An x86-64 emulator with a JIT for arm64 hosts: the Rust port of g64m"
+description = "An x86-64 emulator with a JIT for arm64 hosts: a rebuild of g64m in Rust"
 license = "MIT"
 repository = "https://github.com/y6ui3i/r64m"
 
 [dependencies]
+libc = "0.2.191"
+
+[dev-dependencies]
+libtest-mimic = "0.8.2"
 
 [profile.release]
 debug = true

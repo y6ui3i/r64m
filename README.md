@@ -1,10 +1,31 @@
 # r64m
 
-An x86-64 emulator with a JIT for arm64 hosts, in Rust: the port of
-[g64m](https://github.com/y6ui3i/g64m), which is written in Goose.
+An x86-64 emulator with a JIT for arm64 hosts, in Rust: a rebuild of
+[g64m](https://github.com/y6ui3i/g64m), which is written in Goose. Not a port of its
+code: what g64m found out is used, and the design begins again (`docs/adr/`).
 
-**Nothing is ported yet.** This repository was started on 2026-11-24 with the skeleton
-below; the first step is in "What comes first".
+**Nothing runs yet.** This repository was started on 2026-11-24. So far there is the
+guest's memory (`src/mem.rs`); the next step is in "What comes first".
+
+## The goal
+
+In an x86-64 container on an arm64 host, nginx takes a request over TLS and passes it to
+a Python process serving FastAPI, and `Hello, world` comes back
+([0011](docs/adr/0011-the-goal.md)).
+
+## What r64m is not
+
+- **Not a boundary of security.** A program's memory is the host's
+  ([0008](docs/adr/0008-a-programs-memory-is-the-hosts.md)): the guest and r64m are one
+  process with one set of rights, and an address that no x86 program can form validly
+  (bit 47 or above set) is not caught and may reach r64m's own memory. QEMU's user mode
+  and FEX-Emu are the same. What a container may not do is for the host's kernel to
+  enforce.
+- **Not exact on a host with 16 KB pages**, where generated code is concerned. The host
+  r64m is made for is arm64 Linux with 4 KB pages. macOS on Apple silicon is where it
+  is developed; there the host protects 16 KB at a time, so a closed page beside an
+  open one can be read by generated code, and a guard page does not guard.
+- **64-bit only**: no 16-bit or 32-bit code, no BIOS.
 
 ## Why this exists
 
@@ -13,7 +34,7 @@ written in a language made by AI and built by AI, with QEMU's own emulation (TCG
 yardstick. On 2026-11-24 it runs NetHack's build in a Linux guest at twice QEMU's speed
 on a MacBook Air (Apple M1), and boots that guest at twice QEMU's speed.
 
-r64m is to do the same things in Rust, and then both are to be tried on a Raspberry Pi
+r64m is to do the same things in Rust and then the goal above, and both are to be tried on a Raspberry Pi
 (arm64 Linux, where there is no Rosetta and QEMU's user mode is the only rival).
 
 **Why Rust**: the work is a JIT and the memory of a guest, where speed and low-level
@@ -39,12 +60,12 @@ real CPU does.
 
 ## What comes first
 
-1. g64m built and its tests passed on arm64 Linux (it has only ever run on macOS). What
-   that turns up is what r64m must be built for from the start: two hosts.
-2. The shape of the guest's memory. g64m holds it as an array of its own and tests every
-   address; a program without a kernel can have the host's protection do that instead
-   (g64m's E184). r64m begins with that decided.
-3. The interpreter for a program without a kernel, held to g64m's traces.
+1. Done (R001): g64m built and its tests passed on arm64 Linux as it is. Two hosts need
+   no second design.
+2. Done (R002, ADR 0008, `src/mem.rs`): a program's memory is a reservation of the
+   host's address space, protected by the host.
+3. A small statically linked program loaded and run by the interpreter on that memory,
+   printing what g64m prints for it.
 
 ## Rules of this repository
 
@@ -59,4 +80,5 @@ cargo build --release
 cargo test
 ```
 
-The toolchain's version is fixed in `rust-toolchain.toml`.
+The toolchain's version is fixed in `rust-toolchain.toml`, and the versions of the two
+crates from outside in `Cargo.lock` ([0009](docs/adr/0009-two-crates.md)).

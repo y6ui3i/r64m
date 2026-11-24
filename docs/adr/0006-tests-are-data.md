@@ -27,3 +27,4 @@ repository (`cargo xtask`), not shell and Python beside it.
 
 - Which harness library: to be chosen when the first case is written, with the reason
   in a decision of its own.
+  (Chosen 2026-11-24: 0009.)
