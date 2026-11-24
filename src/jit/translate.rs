@@ -21,7 +21,7 @@
 
 use super::a64::{self, Cond, Logic, Mem as Op, Shift, Size};
 use super::{BASE, CPU, LEFT_AT_END, OUT, RAN, REASON, TABLE, TABLE_BITS};
-use crate::cpu::{Cpu, REC_ADD, REC_ADD_BY_RESULT, REC_BSF, REC_BSR, REC_LOGIC, REC_SHIFT, REC_SUB, REC_SUB_BY_RESULT};
+use crate::cpu::{Cpu, REC_ADD, REC_ADD_BY_RESULT, REC_BSF, REC_BSR, REC_IMUL, REC_LOGIC, REC_SHIFT, REC_SUB, REC_SUB_BY_RESULT};
 use crate::mem::Mem;
 use std::mem::offset_of;
 
@@ -115,11 +115,12 @@ fn read(bytes: &[u8], rip: u64) -> Option<Ins> {
     }
     let mut op = if b == 0x0f { 0x100 | next(1)? as u16 } else { b as u16 };
     // The opcodes that are their neighbour with 8-bit operands.
-    let byte = matches!(op, 0x00..=0x3f | 0x80 | 0x84 | 0x88 | 0x8a | 0xc6 | 0xf6) && op & 1 == 0;
+    let byte = matches!(op, 0x00..=0x3f | 0x80 | 0x84 | 0x88 | 0x8a | 0xa8 | 0xc6 | 0xf6) && op & 1 == 0;
     if byte {
         op |= 1;
     }
-    let size = match (byte, rex & 8 != 0, p66) {
+    // SETcc writes a byte.
+    let size = match (byte || matches!(op, 0x190..=0x19f), rex & 8 != 0, p66) {
         (true, _, _) => 8,
         (_, true, _) => 64,
         (_, _, true) => 16,
@@ -138,8 +139,11 @@ fn read(bytes: &[u8], rip: u64) -> Option<Ins> {
         0x01 | 0x03 | 0x09 | 0x0b | 0x21 | 0x23 | 0x29 | 0x2b | 0x31 | 0x33 | 0x39 | 0x3b => (true, 0),
         0x63 | 0x85 | 0x89 | 0x8b | 0x8d | 0xd1 | 0xd3 | 0xf7 | 0xff => (true, 0),
         0x11e | 0x11f | 0x1b6 | 0x1b7 | 0x1bc | 0x1bd | 0x1be | 0x1bf => (true, 0),
-        0x81 | 0xc7 => (true, whole),
-        0x83 | 0xc1 => (true, 1),
+        0x140..=0x14f | 0x190..=0x19f | 0x1af => (true, 0),
+        0x81 | 0xc7 | 0x69 => (true, whole),
+        0x83 | 0xc1 | 0x6b => (true, 1),
+        // The arithmetic of the A register and a constant, and TEST of them.
+        0x05 | 0x0d | 0x25 | 0x2d | 0x35 | 0x3d | 0xa9 => (false, whole),
         0x50..=0x5f | 0x90 | 0x98 | 0x99 | 0xc3 => (false, 0),
         0x68 | 0xe8 | 0xe9 | 0x180..=0x18f => (false, 4),
         0x6a | 0x70..=0x7f | 0xeb => (false, 1),
@@ -204,10 +208,18 @@ fn read(bytes: &[u8], rip: u64) -> Option<Ins> {
     if matches!(op, 0xe8 | 0xe9 | 0xeb | 0x70..=0x7f | 0x180..=0x18f) {
         ins.imm = end.wrapping_add(ins.imm as u64) as i64;
     }
+    // The A register and a constant: read as the same instruction in its general form
+    // (81h with the kind in the ModRM byte's field; F7h with field 0 for TEST).
+    if matches!(op, 0x05 | 0x0d | 0x25 | 0x2d | 0x35 | 0x3d | 0xa9) {
+        ins.reg = if op == 0xa9 { 0 } else { (op >> 3) as u8 };
+        ins.op = if op == 0xa9 { 0xf7 } else { 0x81 };
+        ins.rm = Rm::Reg(0);
+    }
+    let op = ins.op;
     let field = ins.reg & 7;
     let register = matches!(ins.rm, Rm::Reg(_));
     // An operand of 8 or 16 bits is translated for the arithmetic and the moves only.
-    let small_ok = matches!(op, 0x01..=0x3b | 0x81 | 0x83 | 0x85 | 0x89 | 0x8b | 0xc7 | 0xf7 | 0x11e | 0x11f);
+    let small_ok = matches!(op, 0x01..=0x3b | 0x81 | 0x83 | 0x85 | 0x89 | 0x8b | 0xc7 | 0xf7 | 0x11e | 0x11f | 0x190..=0x19f);
     // F3h is REP RET before a return, part of ENDBR64 before the hint 0F 1Eh, and
     // nothing before BSF and BSR on a CPU without TZCNT and LZCNT.
     let f3_ok = matches!(op, 0xc3 | 0x11e | 0x1bc | 0x1bd);
@@ -252,12 +264,14 @@ enum Flags {
 fn flags_of(ins: &Ins) -> Flags {
     let field = ins.reg & 7;
     match ins.op {
-        0x01..=0x3b | 0x81 | 0x83 | 0x85 | 0x1bc | 0x1bd => Flags::All,
+        0x01..=0x3b | 0x81 | 0x83 | 0x85 | 0x1bc | 0x1bd | 0x69 | 0x6b | 0x1af => Flags::All,
         0xf7 if field != 2 => Flags::All,
         // A shift by a constant that is not zero; by CL it may be by nothing.
         0xc1 if field >= 4 && ins.imm as u32 & (ins.size - 1) != 0 => Flags::All,
         0xd1 if field >= 4 => Flags::All,
         0x70..=0x7f | 0x180..=0x18f | 0xc3 | 0xe8 | 0xe9 | 0xeb | 0xff => Flags::Read,
+        // CMOVcc and SETcc read them and go on.
+        0x140..=0x14f | 0x190..=0x19f => Flags::Read,
         _ => Flags::Kept,
     }
 }
@@ -381,6 +395,15 @@ impl Scan<'_> {
                     at = next;
                 }
                 Flags::Read => match ins.op {
+                    // CMOVcc and SETcc: in the block and answered by the host's flags
+                    // they read no record, and the flags are as they were after them.
+                    0x140..=0x14f | 0x190..=0x19f => {
+                        if !(inside && host.and_then(|h| condition(ins.op as u8 & 15, h)).is_some()) {
+                            return false;
+                        }
+                        self.asked = true;
+                        at = next;
+                    }
                     0x70..=0x7f | 0x180..=0x18f => {
                         // In the block and answered by the host's flags, it reads no
                         // record. Past it the host's flags are someone else's.
@@ -946,6 +969,52 @@ pub fn translate(m: &Mem, rip: u64, exact: bool) -> Option<Built> {
                     // What a jump after it asks is not in the host's flags.
                     e.flags = None;
                 }
+            }
+            0x140..=0x14f | 0x190..=0x19f => {
+                // CMOVcc and SETcc, where the host's flags answer the condition.
+                match e.flags.and_then(|f| condition(ins.op as u8 & 15, f)) {
+                    None => not_here = true,
+                    Some(jump) if ins.op < 0x190 => {
+                        // The operand is read whatever the condition (and may fault);
+                        // a 32-bit register loses its upper half either way.
+                        let src = e.operand(&ins, ins.rm);
+                        match jump {
+                            Jump::If(cond) => e.put(a64::csel(wide, reg, src, reg, cond)),
+                            Jump::Always => e.put(a64::mov(wide, reg, src)),
+                            Jump::Never if !wide => e.put(a64::mov(false, reg, reg)),
+                            Jump::Never => {}
+                        }
+                    }
+                    Some(jump) => {
+                        match jump {
+                            Jump::If(cond) => e.put(a64::cset(false, T4, cond)),
+                            Jump::Always => e.put(a64::movz(false, T4, 1, 0)),
+                            Jump::Never => e.put(a64::movz(false, T4, 0, 0)),
+                        }
+                        match ins.rm {
+                            Rm::Reg(d) => e.set_small(&ins, d, T4),
+                            Rm::Mem { base, index, disp } => {
+                                let a = e.address(base, index, disp);
+                                e.put(a64::mem_reg(Size::B, Op::Store, T4, BASE, a));
+                            }
+                        }
+                    }
+                }
+            }
+            0x1af | 0x69 | 0x6b => {
+                // IMUL of two operands, or of an operand and a constant, into a
+                // register: the lower half of the product. Its flags are a record of
+                // the two.
+                let b = e.operand(&ins, ins.rm);
+                let a = if ins.op == 0x1af {
+                    reg
+                } else {
+                    e.constant(T3, ins.imm as u64);
+                    T3
+                };
+                e.record(REC_IMUL, bits, a, Some(b));
+                e.put(a64::mul(wide, reg, a, b));
+                e.flags = None;
             }
             0x1bc | 0x1bd => {
                 // BSF and BSR: of a zero the register is left as it was; the flags are

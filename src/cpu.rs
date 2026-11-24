@@ -308,6 +308,8 @@ pub const REC_SUB_BY_RESULT: u64 = 5;
 /// A shift by a count that is not zero: this and the shift's kind (4 SHL, 5 SHR, 7
 /// SAR); the operands are what was shifted and by how much.
 pub const REC_SHIFT: u64 = 0x10;
+/// IMUL of two operands of which the lower half of the product is kept: the two.
+pub const REC_IMUL: u64 = 6;
 /// BSF and BSR: the operand that was scanned.
 pub const REC_BSF: u64 = 0x20;
 pub const REC_BSR: u64 = 0x21;
@@ -327,6 +329,14 @@ pub fn settle(c: &mut Cpu) {
         REC_SUB_BY_RESULT => alu_flags(5, a.wrapping_add(b), b, w, false).1,
         // A result and nothing: OR's flags are the result's.
         REC_LOGIC => alu_flags(1, a, 0, w, false).1,
+        REC_IMUL => {
+            // CF and OF say that the upper half holds something; SF and PF are the
+            // lower half's; ZF and AF are cleared.
+            let full = (sx(a, w) as i64 as i128) * (sx(b, w) as i64 as i128);
+            let r = full as u64 & mask(w);
+            let over = if sx(r, w) as i64 as i128 != full { CF | OF } else { 0 };
+            over | szp(r, w) & (SF | PF)
+        }
         REC_BSF | REC_BSR => {
             // Of a zero: ZF and PF. Else the parity of the bit's number.
             let v = a & mask(w);

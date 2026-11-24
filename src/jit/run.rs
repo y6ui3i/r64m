@@ -8,6 +8,7 @@ use crate::cpu::{self, Cpu, Step, Stop};
 use std::mem::offset_of;
 use crate::mem::{Access, Mem, PAGE};
 use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
 
 /// A block is made when its first address has been arrived at this often (g64m's
 /// number; to be measured here), unless another number is asked for.
@@ -17,6 +18,41 @@ pub const HOT: u8 = 16;
 const GIVEN_UP: u8 = 8;
 /// How much generated code there may be before all of it is forgotten.
 const CODE_BYTES: usize = 16 << 20;
+
+/// What is known of an address that has been arrived at.
+#[derive(Clone, Copy)]
+enum Place {
+    /// How often, with no block there yet.
+    Heat(u8),
+    /// The block that begins there, as its place in `blocks`.
+    Block(usize),
+    /// Arrived at often enough and no block made: its first instruction is not
+    /// translated. The interpreter runs it in a block's stead, and the instruction
+    /// after it is where the next block may begin (R016).
+    StoodIn,
+}
+
+/// A hash of an address that is one multiplication: the map of places is looked in
+/// for every arrival, and the standard hash is made to withstand what an address is
+/// not (R016).
+#[derive(Default)]
+struct OfAddress(u64);
+
+impl Hasher for OfAddress {
+    fn write(&mut self, bytes: &[u8]) {
+        for b in bytes {
+            self.0 = (self.0 ^ *b as u64).wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+
+    fn write_u64(&mut self, v: u64) {
+        self.0 = v.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    }
+
+    fn finish(&self) -> u64 {
+        self.0 ^ self.0 >> 29
+    }
+}
 
 struct Block {
     code: *const u8,
@@ -48,10 +84,8 @@ pub struct Stats {
 pub struct Jit {
     code: Code,
     blocks: Vec<Block>,
-    /// The block that begins at an address, as its place in `blocks`.
-    at: HashMap<u64, usize>,
-    /// How often an address has been arrived at with no block there.
-    heat: HashMap<u64, u8>,
+    /// What is known of each address arrived at.
+    places: HashMap<u64, Place, BuildHasherDefault<OfAddress>>,
     /// How often a host page's blocks were forgotten for a write.
     writes: HashMap<u64, u8>,
     /// For each of the guest's own 4 KB pages, how many blocks have an instruction
@@ -117,8 +151,7 @@ impl Jit {
         Ok(Jit {
             code: Code::new(CODE_BYTES)?,
             blocks: Vec::new(),
-            at: HashMap::new(),
-            heat: HashMap::new(),
+            places: HashMap::default(),
             writes: HashMap::new(),
             holds: HashMap::new(),
             check,
@@ -134,37 +167,53 @@ impl Jit {
     /// Runs the program from where the CPU is, by blocks where there are blocks and by
     /// the interpreter where there are none, until a system call or a stop.
     pub fn run(&mut self, c: &mut Cpu, m: &mut Mem) -> Event {
-        // A block begins only where a jump arrives; after one the address is looked up.
+        // A block begins where a jump arrives, and after an instruction that the
+        // interpreter runs because no block could begin with it: there the address is
+        // looked up.
         let mut arrived = true;
         self.from = 0;
         loop {
+            // Is the interpreter about to run an instruction that no block begins with?
+            let mut stands_in = false;
             if arrived {
-                if let Some(&id) = self.at.get(&c.rip) {
-                    // The block before left by a jump to this address: from now on it
-                    // comes here by itself. (Not when each block is to be checked.)
-                    if self.from != 0 && !self.check {
-                        self.join(self.from, id);
+                match self.places.get(&c.rip).copied() {
+                    Some(Place::Block(id)) => {
+                        // The block before left by a jump to this address: from now on
+                        // it comes here by itself. (Not when each block is to be
+                        // checked.)
+                        if self.from != 0 && !self.check {
+                            self.join(self.from, id);
+                        }
+                        // And generated code that comes to this address by a return
+                        // or through an operand finds it in the table from now on.
+                        if !self.check {
+                            self.table[Self::place(c.rip)] = [c.rip, self.blocks[id].code as u64];
+                        }
+                        match self.run_block(id, c, m) {
+                            Ok(whole) => arrived = whole,
+                            Err(differs) => return Event::Differs(differs),
+                        }
+                        // Left by a fault: the interpreter meets the instruction next,
+                        // whatever block may begin there.
+                        if arrived {
+                            self.from = c.left_from;
+                            continue;
+                        }
                     }
-                    // And generated code that comes to this address by a return or
-                    // through an operand finds it in the table from now on.
-                    if !self.check {
-                        self.table[Self::place(c.rip)] = [c.rip, self.blocks[id].code as u64];
-                    }
-                    match self.run_block(id, c, m) {
-                        Ok(whole) => arrived = whole,
-                        Err(differs) => return Event::Differs(differs),
-                    }
-                    // Left by a fault: the interpreter meets the instruction next,
-                    // whatever block may begin there.
-                    if arrived {
-                        self.from = c.left_from;
-                        continue;
-                    }
-                } else {
-                    let heat = self.heat.entry(c.rip).or_insert(0);
-                    *heat = heat.saturating_add(1);
-                    if *heat == self.hot && self.make(c.rip, m) {
-                        continue;
+                    Some(Place::StoodIn) => stands_in = true,
+                    known => {
+                        let heat = match known {
+                            Some(Place::Heat(n)) => n + 1,
+                            _ => 1,
+                        };
+                        if heat < self.hot {
+                            self.places.insert(c.rip, Place::Heat(heat));
+                        } else if self.make(c.rip, m) {
+                            continue;
+                        } else {
+                            self.places.insert(c.rip, Place::StoodIn);
+                            stands_in = true;
+                        }
                     }
                 }
             }
@@ -184,7 +233,7 @@ impl Jit {
             // instruction is run again.
             let (regs, flags) = (c.reg, c.rflags);
             match cpu::step(c, m) {
-                Ok(Step::Next) => arrived = c.rip < before || c.rip > before.wrapping_add(15),
+                Ok(Step::Next) => arrived = stands_in || c.rip < before || c.rip > before.wrapping_add(15),
                 Ok(Step::Syscall) => return Event::Syscall,
                 // A store to a host page that holds translated code. If it is to the
                 // code (the guest's own page written has a block's instruction in it):
@@ -211,7 +260,7 @@ impl Jit {
                         }
                     }
                     match stepped {
-                        Ok(Step::Next) => arrived = c.rip < before || c.rip > before.wrapping_add(15),
+                        Ok(Step::Next) => arrived = stands_in || c.rip < before || c.rip > before.wrapping_add(15),
                         Ok(Step::Syscall) => return Event::Syscall,
                         Err(stop) => return Event::Stop(stop),
                     }
@@ -317,7 +366,7 @@ impl Jit {
         if m.mark_code(pages.0, pages.1, true).is_err() {
             return false;
         }
-        self.at.insert(rip, self.blocks.len());
+        self.places.insert(rip, Place::Block(self.blocks.len()));
         for page in (from & !(PAGE - 1)..to).step_by(PAGE as usize) {
             *self.holds.entry(page).or_insert(0) += 1;
         }
@@ -335,22 +384,25 @@ impl Jit {
         // A block that reaches into the page from a neighbour keeps the neighbour
         // marked: only this page is let go, and only blocks that touch it are dropped.
         let mut dropped = Vec::new();
-        let heat = &mut self.heat;
         let (table, miss) = (&mut self.table, self.miss);
-        self.at.retain(|rip, id| {
-            let (from, to) = blocks[*id].pages;
-            let kept = to <= start || from >= end;
-            if !kept {
-                dropped.push(*id);
-                // To be arrived at as often again before it is made again.
-                heat.remove(rip);
-                // And not to be found by generated code.
-                let place = &mut table[Self::place(*rip)];
-                if place[0] == *rip {
-                    *place = [u64::MAX, miss];
+        self.places.retain(|rip, place| match *place {
+            Place::Block(id) => {
+                let (from, to) = blocks[id].pages;
+                let kept = to <= start || from >= end;
+                if !kept {
+                    dropped.push(id);
+                    // (Gone from the map: to be arrived at as often again before it is
+                    // made again.) And not to be found by generated code.
+                    let place = &mut table[Self::place(*rip)];
+                    if place[0] == *rip {
+                        *place = [u64::MAX, miss];
+                    }
                 }
+                kept
             }
-            kept
+            // What was learnt of an address in the page was learnt of code that is
+            // being written over.
+            _ => *rip < start || *rip >= end,
         });
         for id in dropped {
             for site in std::mem::take(&mut self.blocks[id].incoming) {
@@ -380,8 +432,7 @@ impl Jit {
             let _ = m.mark_code(block.pages.0, block.pages.1, false);
         }
         self.blocks.clear();
-        self.at.clear();
-        self.heat.clear();
+        self.places.clear();
         self.holds.clear();
         self.from = 0;
         self.code.empty();
@@ -1583,5 +1634,153 @@ mod tests {
             });
             assert_eq!(c.reg[RDX], want, "{op:02x?} of {a:#x} and {b:#x}");
         }
+    }
+
+    #[test]
+    fn the_a_register_and_a_constant() {
+        // ADD, OR, AND, SUB, XOR, CMP and TEST of AL, AX, EAX and RAX with a
+        // constant, in the short forms that name no register.
+        let mut list: Vec<Vec<u8>> = Vec::new();
+        for op in [0x04u8, 0x0c, 0x24, 0x2c, 0x34, 0x3c, 0xa8] {
+            list.push(vec![op, 0x81]);
+            list.push(vec![op, 0x7f]);
+            list.push(vec![0x66, op | 1, 0x00, 0x80]);
+            list.push(vec![op | 1, 0x01, 0x00, 0x00, 0x80]);
+            list.push(vec![op | 1, 0xff, 0xff, 0xff, 0x7f]);
+            list.push(vec![0x48, op | 1, 0x00, 0x00, 0x00, 0x80]);
+            list.push(vec![0x48, op | 1, 0x05, 0x00, 0x00, 0x00]);
+        }
+        let list: Vec<&[u8]> = list.iter().map(|v| v.as_slice()).collect();
+        for a in [0u64, 5, 0x7f, 0x80, 0x7fff_ffff, 0x8000_0000, 0xffff_ffff, 0x7fff_ffff_ffff_ffff, 1 << 63, u64::MAX, 0x1234_5678_8000_7f81] {
+            under_every_condition(&list, &[], &|c| c.reg[RAX] = a);
+        }
+    }
+
+    #[test]
+    fn conditions_read_by_setcc_and_cmovcc() {
+        // After CMP, ADD and TEST of EAX and EBX (and of RAX and RBX): SETcc of DL, of
+        // DH and of a byte of memory, CMOVcc of ECX and RCX from ESI, RSI and memory,
+        // for every condition; then the flags are read again by a jump (so that the
+        // record, too, is right after them).
+        let mut list: Vec<Vec<u8>> = Vec::new();
+        for first in [&[0x39u8, 0xd8][..], &[0x01, 0xd8], &[0x85, 0xd8], &[0x48, 0x39, 0xd8], &[0x48, 0x29, 0xd8], &[0x21, 0xd8]] {
+            for cc in 0..16u8 {
+                for then in [
+                    vec![0x0f, 0x90 | cc, 0xc2],             // setcc dl
+                    vec![0x0f, 0x90 | cc, 0xc6],             // setcc dh
+                    vec![0x0f, 0x90 | cc, 0x46, 0x03],       // setcc byte [rsi + 3]
+                    vec![0x0f, 0x40 | cc, 0xcf],             // cmovcc ecx, edi
+                    vec![0x48, 0x0f, 0x40 | cc, 0xcf],       // cmovcc rcx, rdi
+                    vec![0x0f, 0x40 | cc, 0x0e],             // cmovcc ecx, [rsi]
+                    vec![0x48, 0x0f, 0x40 | cc, 0x4e, 0x08], // cmovcc rcx, [rsi + 8]
+                ] {
+                    let mut v = first.to_vec();
+                    v.extend(then);
+                    // What was set or moved is brought where the comparison sees it:
+                    // mov [rsi + 16], rcx; mov [rsi + 24], rdx.
+                    v.extend([0x48, 0x89, 0x4e, 0x10, 0x48, 0x89, 0x56, 0x18]);
+                    list.push(v);
+                }
+            }
+        }
+        let list: Vec<&[u8]> = list.iter().map(|v| v.as_slice()).collect();
+        let data: Vec<u8> = (1..=32).collect();
+        for (a, b) in [(0u64, 0u64), (1, 2), (2, 1), (0x8000_0000, 1), (0xffff_ffff, 1), (0x7fff_ffff, 0xffff_ffff), (1 << 63, 1), (u64::MAX, u64::MAX)] {
+            under_every_condition(&list, &data, &|c| {
+                c.reg[RAX] = a;
+                c.reg[RBX] = b;
+                c.reg[crate::cpu::RCX] = 0x1111_2222_3333_4444;
+                c.reg[RDX] = 0x5555_6666_7777_8888;
+                c.reg[7] = 0x9999_aaaa_bbbb_cccc;
+                c.reg[RSI] = DATA;
+            });
+        }
+        // That they are in the block where the host's flags answer, and are not where
+        // they do not (parity; any condition after a shift).
+        let block_of = |code: &[u8]| {
+            let m = guest(code, &[]);
+            translate(&m, CODE, false).map(|b| b.starts.len())
+        };
+        assert_eq!(block_of(&[0x39, 0xd8, 0x0f, 0x94, 0xc2, 0x0f, 0x44, 0xcf, 0x0f, 0x05]), Some(3));
+        assert_eq!(block_of(&[0x39, 0xd8, 0x0f, 0x9a, 0xc2, 0x0f, 0x05]), Some(1));
+        assert_eq!(block_of(&[0xc1, 0xe0, 0x03, 0x0f, 0x94, 0xc2, 0x0f, 0x05]), Some(1));
+        assert_eq!(block_of(&[0x0f, 0x94, 0xc2, 0x0f, 0x05]), None);
+        // Read by the interpreter, they read the record: so an instruction before
+        // them must have written it, though one after them writes the flags again.
+        //   add eax, ebx; setp dl (parity: the host has none); add esi, edi; syscall
+        //   add eax, ebx; setc dl, as the first instruction of the next block
+        let set = |c: &mut Cpu| {
+            c.reg[RAX] = 0xffff_ffff;
+            c.reg[RBX] = 4;
+        };
+        let (c, _) = checked(&[0x01, 0xd8, 0x0f, 0x9a, 0xc2, 0x01, 0xfe, 0x0f, 0x05], &[], &set);
+        assert_eq!(c.reg[RDX] & 0xff, 1);
+        let mut late = [0x89, 0xf7].repeat(63);
+        late.extend([0x01, 0xd8, 0x0f, 0x92, 0xc2, 0x01, 0xfe, 0x0f, 0x05]);
+        let (c, _) = checked(&late, &[], &set);
+        assert_eq!(c.reg[RDX] & 0xff, 1);
+    }
+
+    #[test]
+    fn imul_and_its_flags() {
+        // IMUL of two registers, of a register and memory, and by constants of 8 and
+        // 32 bits, at 32 and 64 bits; under every condition.
+        let list: &[&[u8]] = &[
+            &[0x0f, 0xaf, 0xc3],                         // imul eax, ebx
+            &[0x48, 0x0f, 0xaf, 0xc3],                   // imul rax, rbx
+            &[0x0f, 0xaf, 0x06],                         // imul eax, [rsi]
+            &[0x48, 0x0f, 0xaf, 0x06],                   // imul rax, [rsi]
+            &[0x0f, 0xaf, 0xc0],                         // imul eax, eax
+            &[0x6b, 0xc3, 0xfd],                         // imul eax, ebx, -3
+            &[0x48, 0x6b, 0xc3, 0x7f],                   // imul rax, rbx, 127
+            &[0x69, 0xc3, 0x00, 0x00, 0x01, 0x00],       // imul eax, ebx, 10000h
+            &[0x48, 0x69, 0xc3, 0xff, 0xff, 0xff, 0x7f], // imul rax, rbx, 7fffffffh
+            &[0x6b, 0x06, 0x07],                         // imul eax, [rsi], 7
+            &[0x48, 0x69, 0x1e, 0x00, 0x00, 0x00, 0x80], // imul rbx, [rsi], -80000000h
+            &[0x6b, 0xc0, 0x00],                         // imul eax, eax, 0
+            // After a compare: a jump after the IMUL must not be answered by the
+            // compare's flags in the host.
+            &[0x39, 0xd8, 0x0f, 0xaf, 0xc3],
+        ];
+        for (a, b) in [(0u64, 0u64), (3, 5), (0xffff_ffff, 2), (0x1_0000, 0x1_0000), (0x8000_0000, 0xffff_ffff), (u64::MAX, u64::MAX), (1 << 62, 2), (1 << 63, u64::MAX), (0x7fff_ffff, 0x7fff_ffff), (0xb504_f333, 0xb504_f334)] {
+            under_every_condition(list, &b.to_le_bytes(), &|c| {
+                c.reg[RAX] = a;
+                c.reg[RBX] = b;
+                c.reg[RSI] = DATA;
+            });
+        }
+    }
+
+    #[test]
+    fn a_block_begins_after_what_the_interpreter_ran_in_its_stead() {
+        // again: add edx, 1; cpuid-free stand-in: add dx, 0x10 (16 bits with a
+        // constant of 16 is translated now; use what is not: sahf, 9E); add edx, 2;
+        // sub ebx, 1; jne again; syscall. SAHF is the interpreter's; what follows it
+        // was the interpreter's too, up to the jump, until a block could begin there.
+        //  0 again: add edx, 1      83 c2 01
+        //  3        sahf            9e
+        //  4        add edx, 2      83 c2 02
+        //  7        sub ebx, 1      83 eb 01
+        // 10        jne again       75 f4
+        // 12        syscall
+        let code = [0x83, 0xc2, 0x01, 0x9e, 0x83, 0xc2, 0x02, 0x83, 0xeb, 0x01, 0x75, 0xf4, 0x0f, 0x05];
+        let rounds = 1000u64;
+        let mut m = guest(&code, &[]);
+        let mut jit = Jit::new(false, 4).unwrap();
+        let c = both(&mut jit, &mut m, CODE, &|c| c.reg[RBX] = rounds);
+        assert_eq!(c.reg[RDX], 3 * rounds);
+        assert_eq!(c.steps, 5 * rounds + 1);
+        // All but SAHF itself ran in blocks, once the places had been arrived at four
+        // times each (and four more for the place after SAHF, counted from when SAHF
+        // was found to have no block).
+        assert!(jit.stats.in_blocks >= 4 * (rounds - 12), "{} in blocks", jit.stats.in_blocks);
+        assert!(jit.stats.in_blocks <= 4 * rounds);
+        assert_eq!(jit.stats.blocks, 2);
+        // And no block is made of what is arrived at fewer times than asked: the same
+        // program for three rounds, with four arrivals asked.
+        let mut m = guest(&code, &[]);
+        let mut jit = Jit::new(false, 4).unwrap();
+        both(&mut jit, &mut m, CODE, &|c| c.reg[RBX] = 3);
+        assert_eq!((jit.stats.blocks, jit.stats.in_blocks), (0, 0));
     }
 }
