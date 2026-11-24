@@ -64,6 +64,10 @@ impl SeenXmm {
 
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let count = args.first().is_some_and(|a| a == "--count");
+    if count {
+        args.remove(0);
+    }
     let trace_xmm = args.first().is_some_and(|a| a == "--trace-xmm");
     let trace = trace_xmm || args.first().is_some_and(|a| a == "--trace");
     if trace {
@@ -79,7 +83,7 @@ fn main() {
             mem.size().trailing_zeros(),
             mem.host_page() / 1024
         );
-        println!("usage: r64m [--trace | --trace-xmm] program [arguments]");
+        println!("usage: r64m [--count] [--trace | --trace-xmm] program [arguments]");
         return;
     };
 
@@ -125,6 +129,9 @@ fn main() {
         }
     };
     lines.flush().ok();
+    if count {
+        eprintln!("r64m: {} instructions", c.steps);
+    }
     std::process::exit(code);
 }
 

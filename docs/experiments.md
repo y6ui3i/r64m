@@ -184,3 +184,33 @@ The card, written before the run.
   builds and cases were copied to a scratch folder for the run.
 
 **Next.** The first translated block, on Linux and macOS both from its first day.
+
+## R004: how fast the simple interpreter is, before a JIT (2026-11-24)
+
+The card, written before the run.
+
+- **Hypothesis**: r64m's interpreter is the simple form (ADR 0007): every instruction
+  decoded each time, every flag worked out at once, a search of the list of regions for
+  every access to memory (ADR 0010). g64m's interpreter remembers what it decoded and
+  runs the common instructions through a short front (its E110, E118). So r64m's is
+  guessed to be two to five times slower than g64m's interpreter on the primitives, and
+  some hundred times slower than g64m's JIT.
+- **What is changed from before**: nothing in r64m; this is the first time it is timed.
+  One thing is added to say what was run: `r64m --count` prints how many instructions
+  the program took, which must be g64m's count for the same program.
+- **Next move for each result**:
+  - Within about three times g64m's interpreter → the interpreter stays as it is, and
+    the JIT is designed with it as the slow path for what is not translated
+  - Much slower than that (ten times or more) → where the time goes is looked at before
+    the JIT (a profile of one primitive): a slow path that slow would show in every
+    program's start, and the cheap things (a memory of the last region, of the last
+    decoded instruction) are tried first
+  - Faster than g64m's interpreter → said as found; nothing changes but what is
+    expected of the JIT's gain
+  - In every case the numbers are the base the JIT's gain is counted from
+- **Cut-off**: the 23 primitives as kept built in g64m (`tests/prim64/*.elf`, one round
+  each, 4 to 90 million instructions), each timed five times under r64m and under
+  g64m's interpreter, the two running at the same time, the least taken, less the time
+  of a program that does nothing. g64m's JIT, QEMU and Rosetta are not run again: their
+  times for the same primitives at 200 rounds were taken earlier today (g64m's E186
+  table) and are set beside as instructions per second. On the Mac only.
