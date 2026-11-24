@@ -1200,3 +1200,56 @@ The card, written before the run.
   - A program wrong → put right first
 - **Cut-off**: these three; the shorter race for the nine; one listing of the loop
   after.
+
+**Result: `p_loop` 0.436 s to 0.379 s, twice QEMU by the race, and not under 0.3 s as
+guessed. The loop is six host instructions and one jump taken, as meant; it takes 1.7
+cycles a round, which is not explained.**
+
+On a MacBook Air (Apple M1), macOS 27. The shorter race, 200 rounds, r64m `--jit`
+beside g64m `--jit`; QEMU and Rosetta as timed earlier.
+
+| 200 rounds | before (R014) | now | g64m `--jit` | QEMU | Rosetta | QEMU's time / r64m's | g64m's time / r64m's |
+|---|---|---|---|---|---|---|---|
+| p_recursion | 0.439 s | 0.440 s | 0.540 s | 1.567 s | 0.810 s | 3.56 | 1.23 |
+| p_funcptr | 2.934 s | 2.932 s | 3.360 s | 9.123 s | 2.867 s | 3.11 | 1.15 |
+| p_index | 0.769 s | 0.712 s | 1.042 s | 1.723 s | 0.420 s | 2.42 | 1.46 |
+| p_loop | 0.436 s | 0.379 s | 0.216 s | 0.773 s | 0.240 s | **2.04** | 0.57 |
+| p_pointer | 1.138 s | 1.143 s | 1.405 s | 1.900 s | 0.723 s | 1.66 | 1.23 |
+| p_rotate | 3.138 s | 3.297 s | 3.347 s | 4.403 s | 3.060 s | 1.34 | 1.02 |
+| p_if | 1.584 s | 1.527 s | 1.411 s | 1.873 s | 0.997 s | 1.23 | 0.92 |
+| p_shift | 0.922 s | 0.774 s | 0.714 s | 0.893 s | 0.680 s | 1.15 | 0.92 |
+| p_fill | 2.536 s | 2.506 s | 1.466 s | 2.883 s | 0.497 s | 1.15 | 0.58 |
+
+- **Four of the nine are at twice QEMU or past it** (`p_recursion`, `p_funcptr`,
+  `p_index`, `p_loop`); all nine are past QEMU; six are level with g64m's JIT or ahead
+  of it.
+- **The loop as it now is** (the same listing as R014's):
+
+  ```
+  mov  x1, x6
+  eor  x1, x1, x0
+  adds x2, x2, x1
+  subs x0, x0, #1
+  add  x27, x27, #5
+  b.ne start
+  ```
+
+- **The guess of under 0.3 s was wrong**, and the card says to count before guessing
+  again. Counted with the host's counters (`/usr/bin/time -l`, the whole process):
+
+  | `p_loop`, 200 rounds | host instructions retired | cycles | for a round of the loop |
+  |---|---|---|---|
+  | r64m `--jit` | 3,640 M | 1,025 M | 6.1 instructions, 1.7 cycles |
+  | g64m `--jit` | 5,302 M | 973 M | 8.8 instructions, 1.6 cycles (its start included) |
+
+  r64m retires a third fewer instructions than g64m and takes as many cycles. Six
+  instructions whose longest chain is one deep take 1.7 cycles a round where one
+  would be expected. Why is not known: no guess is made here. (g64m's cycles include
+  its start, some 0.08 s in the kernel that the race takes off as "a program that
+  does nothing": with that off, g64m's loop is the faster by about a quarter, which
+  is what the race's 0.216 s against 0.379 s overstates and the cycles understate.)
+- 62 programs in four JIT modes and 65 unit tests on macOS and in the Linux container.
+
+**Next.** What the fourteen primitives that are not in blocks wait for (0 to 59% in
+blocks, R012): the instructions that end their blocks, counted by program; SSE first
+among them by how many programs it holds back. The 1.7 cycles are left as found.

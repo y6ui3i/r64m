@@ -18,9 +18,9 @@ arithmetic and logic on 8 to 64 bits, shifts, rotations, bit scans, the stack, j
 joins them to one another, finds a return's block without leaving generated code, and
 checks each block against the interpreter when asked (`--jit-check`). It is asked for
 with `--jit` and is not yet what r64m does by itself. Nine of the 23 primitives run
-wholly in such blocks: eight of them are past QEMU on this Mac (1.15 to 3.56 times;
-none but two at twice), one is at half of it (`p_shift`), and on three r64m's JIT is
-level with g64m's or ahead (R012). The other fourteen are still mostly interpreted:
+wholly in such blocks: all nine are past QEMU on this Mac (1.15 to 3.56 times), four
+of them at twice QEMU or past it, and on six r64m's JIT is level with g64m's or ahead
+(R015). The other fourteen are still mostly interpreted:
 SSE and the x87 are not translated, nor some integer instructions. There is no dynamic linking,
 no system call beyond `write` and `exit`, and no machine yet.
 
@@ -90,9 +90,9 @@ real CPU does.
 5. The JIT, in ADR 0014's order. Done: the encoder; runnable memory and the way in and
    out; the translator for integer instructions with `--jit-check`; a fault in a
    block; a store to translated code, and to data beside it; blocks joined; returns
-   and jumps through an operand found in a table. Next: the record of the flags not
-   written where nothing reads it; the instructions the other primitives wait for;
-   SSE.
+   and jumps through an operand found in a table. The record of the flags is written only where
+   something can read it (R013 to R015). Next: the instructions the other fourteen
+   primitives wait for; SSE.
 
 One case is owed: the x87's square root when what is left over equals the root (the
 rounding there is not touched by any of g64m's cases; found by breaking it on purpose).
