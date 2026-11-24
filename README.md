@@ -12,8 +12,12 @@ x87 (`src/cpu.rs`, `src/cpu/sse.rs`, `src/cpu/x87.rs`) and three system calls
 and all 23 of its primitives print what they should, on macOS and on arm64 Linux
 (R003). The interpreter runs 72 million instructions a second on a MacBook Air (Apple
 M1), 1.27 times g64m's interpreter and ahead of it on every primitive (R007); QEMU,
-which is a JIT, runs the same primitives at 1,267 million. There is no JIT, no dynamic linking, no system call beyond `write` and `exit`,
-and no machine yet.
+which is a JIT, runs the same primitives at 1,267 million. Of r64m's own JIT
+([0014](docs/adr/0014-the-jit.md)) there is the ground and no translator yet: the arm64
+encoder, memory that can be written and run, the way into generated code and out, and a
+fault in it turned into a way out, all tried with blocks made by hand on both hosts
+(`src/jit.rs`, `src/jit/a64.rs`). No program is run by it. There is no dynamic linking,
+no system call beyond `write` and `exit`, and no machine yet.
 
 ## The goal
 
@@ -76,7 +80,11 @@ real CPU does.
    host's address space, protected by the host.
 3. Done: a static program loaded and run by the interpreter on that memory, its trace
    the real CPU's, for the integer instructions, SSE and the x87.
-4. The first translated block, with the handler of faults it needs (ADR 0008).
+4. Done (R004 to R007): the interpreter timed, and made faster than g64m's on every
+   primitive without giving up the simple form.
+5. The JIT, in ADR 0014's order. Done: the encoder; runnable memory and the way in and
+   out, with a block made by hand. Next: the translator for instructions on registers,
+   each block checked against the interpreter (`--jit-check`).
 
 One case is owed: the x87's square root when what is left over equals the root (the
 rounding there is not touched by any of g64m's cases; found by breaking it on purpose).
