@@ -214,3 +214,82 @@ The card, written before the run.
   of a program that does nothing. g64m's JIT, QEMU and Rosetta are not run again: their
   times for the same primitives at 200 rounds were taken earlier today (g64m's E186
   table) and are set beside as instructions per second. On the Mac only.
+
+**Result: 1.67 times slower than g64m's interpreter, which is inside the guess and
+inside "leave it as it is". And one thing not looked for: on macOS r64m takes 0.17
+seconds to start and end, all of it the reservation.**
+
+On a MacBook Air (Apple M1), macOS 27. Each primitive one round, five runs of r64m and of
+g64m's interpreter at the same time, the least of each, less a program that does
+nothing (r64m 0.163 s, g64m 0.075 s). The count of instructions is the same from both
+for every program.
+
+| | guest instructions | r64m | | g64m, interpreter | | r64m / g64m |
+|---|---|---|---|---|---|---|
+| p_bignum | 44.7 M | 1.311 s | 34.1 M/s | 0.797 s | 56.1 M/s | 1.65 |
+| p_bitfield | 67.6 M | 2.000 s | 33.8 M/s | 1.146 s | 59.0 M/s | 1.74 |
+| p_bytes | 34.6 M | 0.876 s | 39.5 M/s | 0.532 s | 65.0 M/s | 1.65 |
+| p_dbl_arith | 21.6 M | 0.708 s | 30.5 M/s | 0.440 s | 49.0 M/s | 1.61 |
+| p_dbl_cmp | 37.5 M | 1.020 s | 36.8 M/s | 0.748 s | 50.1 M/s | 1.36 |
+| p_dbl_conv | 33.8 M | 1.052 s | 32.2 M/s | 0.663 s | 51.0 M/s | 1.59 |
+| p_fill | 7.8 M | 0.240 s | 32.5 M/s | 0.016 s | 489.9 M/s | 15.08 |
+| p_float | 23.1 M | 0.733 s | 31.5 M/s | 0.450 s | 51.3 M/s | 1.63 |
+| p_funcptr | 20.9 M | 0.576 s | 36.4 M/s | 0.315 s | 66.5 M/s | 1.83 |
+| p_if | 23.0 M | 0.586 s | 39.3 M/s | 0.371 s | 62.1 M/s | 1.58 |
+| p_index | 29.9 M | 0.916 s | 32.7 M/s | 0.495 s | 60.4 M/s | 1.85 |
+| p_ldbl | 13.9 M | 0.590 s | 23.5 M/s | 0.295 s | 47.1 M/s | 2.00 |
+| p_loop | 15.0 M | 0.398 s | 37.8 M/s | 0.230 s | 65.3 M/s | 1.73 |
+| p_muldiv | 30.8 M | 0.845 s | 36.4 M/s | 0.470 s | 65.4 M/s | 1.80 |
+| p_pixel | 26.5 M | 0.779 s | 34.0 M/s | 0.482 s | 54.9 M/s | 1.62 |
+| p_pointer | 33.0 M | 0.889 s | 37.1 M/s | 0.525 s | 62.8 M/s | 1.69 |
+| p_recursion | 12.2 M | 0.326 s | 37.3 M/s | 0.191 s | 63.6 M/s | 1.71 |
+| p_rotate | 89.5 M | 2.326 s | 38.5 M/s | 1.437 s | 62.3 M/s | 1.62 |
+| p_sha | 16.8 M | 0.514 s | 32.7 M/s | 0.287 s | 58.6 M/s | 1.79 |
+| p_shift | 73.8 M | 2.167 s | 34.0 M/s | 1.283 s | 57.5 M/s | 1.69 |
+| p_simd | 16.6 M | 0.608 s | 27.3 M/s | 0.492 s | 33.7 M/s | 1.24 |
+| p_switch | 25.8 M | 0.692 s | 37.3 M/s | 0.438 s | 58.8 M/s | 1.58 |
+| p_ternary | 39.4 M | 1.077 s | 36.6 M/s | 0.620 s | 63.5 M/s | 1.74 |
+| **all** | 737.8 M | 21.229 s | **34.8 M/s** | 12.725 s | **58.0 M/s** | **1.67** |
+
+Beside them, the same 23 primitives at 200 rounds as timed earlier today (g64m's E186
+table, 147,461 M instructions in all), as instructions a second:
+
+| | all 23 | against r64m's interpreter |
+|---|---|---|
+| r64m, interpreter | 34.8 M/s | 1 |
+| g64m, interpreter | 58.0 M/s | 1.7 |
+| QEMU (TCG, user mode) | 1,267 M/s | 36 |
+| Rosetta | 1,808 M/s | 52 |
+| g64m with its JIT | 2,562 M/s | 74 |
+
+- **The hypothesis** held at its low end: 1.67 where two to five was guessed, and 74
+  times to g64m's JIT where "some hundred" was. The simple form costs less than
+  thought.
+- **One primitive is apart: `p_fill`, 15 times.** It is `rep stos`, which g64m does as
+  many repetitions in one call as it may (its E113) and r64m one to a step. Not a
+  matter of the interpreter's form, and to be had back the same way when it is wanted.
+- **So the interpreter stays as it is** (the card's first case), and the JIT is
+  designed with it as the slow path. 34.8 M/s is the base the JIT's gain is counted
+  from; twice QEMU is 73 times that.
+
+What was not looked for:
+
+- **On macOS the reservation is not free.** `r64m` with nothing to run takes 0.17 s,
+  none of it its own: all in the kernel. A probe of `mmap` and `munmap` with no access,
+  by size: 2^40 bytes 1.1 ms and 1.3 ms, 2^44 17 ms and 26 ms, 2^46 65 ms and 104 ms.
+  The time goes with the size. On Linux the same `r64m` starts and ends in under 10 ms
+  with 2^47 bytes. It is why the 17 unit tests take 4.5 s on the Mac and 0.01 s on
+  Linux: each makes a reservation.
+- It touches ADR 0008's first point ("as large as the host gives") for macOS only,
+  where r64m is developed and not what it is made for: a program run there pays 0.17 s
+  once, and a program that makes many processes would pay it for each. Not changed
+  here: the owner's to say whether macOS reserves less (2^40 bytes is a thousand
+  gigabytes and costs 2 ms).
+- One number seen and not explained: `p_loop` took 0.59 s in the Linux container where
+  it takes 0.40 s on the Mac itself, the same source and the same CPU. One run, not a
+  measurement.
+
+The timing was a script of its own in a scratch folder, not kept (ADR 0012: what is
+kept is Rust; a `cargo xtask` for the races is owed when they are run again).
+
+**Next.** The JIT's design, as a decision (ADR 0013).
