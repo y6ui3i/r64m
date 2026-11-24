@@ -1599,3 +1599,35 @@ Two things the probe showed besides, and both are used in ADR 0015:
 What is not shown: single precision (the same instructions with another size; the
 tests of the translation will hold it to the interpreter), and the rounding other than
 to nearest, which the interpreter does not do for arithmetic either.
+
+## R020: the scalar SSE instructions in blocks (2026-11-25)
+
+ADR 0015 was accepted as proposed. This is its first part (point 8): the guest's XMM
+registers in the host's v0 to v15, and the scalar instructions of points 2 to 6.
+
+The card, written before the run.
+
+- **Hypothesis**: the four floating-point primitives that are SSE (p_float,
+  p_dbl_arith, p_dbl_cmp, p_dbl_conv) run at the interpreter's speed because a block
+  ends at their first SSE instruction. With the scalar instructions translated they
+  run mostly in blocks (over 90% of their instructions) and pass QEMU. The integer
+  primitives pay for sixteen more loads going in and sixteen more stores coming out,
+  and are guessed not to show it (entries are rare where blocks are joined).
+- **What is changed from before** (R018): `enter` loads and stores v0 to v15 and keeps
+  the host's d8 to d15; the translator reads the SSE opcodes of ADR 0015's points 2 to
+  6; a record of the flags for UCOMIS and COMIS; `--jit-check` compares the XMM
+  registers and MXCSR. Nothing of the integer translation is changed.
+- **Next move for each result**:
+  - The four are mostly in blocks and past QEMU → the packed integers (p_simd), a card
+    of its own, by a count of what is executed
+  - One of them is still mostly the interpreter's → `--jit-why` says which
+    instructions; those are added here if they are scalar SSE that was missed, and
+    named as the next card's if they are something else (x87, packed)
+  - In blocks but not past QEMU → the code of its inner loop is read
+    (`R64M_JIT_DUMP`) before anything is changed
+  - An integer primitive is slower by more than the races differ among themselves
+    (3%) → the XMM registers are loaded only for blocks that use them, the ADR's own
+    "Not yet"
+- **Cut-off**: one shorter race (one round first; the 200-round build only where one
+  round is under 0.1 s; no run over 15 s), after all 62 programs give the
+  interpreter's results in the four modes on both hosts.
