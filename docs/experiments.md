@@ -1803,3 +1803,22 @@ The card, written before the run.
     understood first
 - **Cut-off**: one build, one race of p_sha and of the primitives that store beside
   code (`--jit-stats` says which), the 62 programs once.
+
+The result (MacBook Air, Apple M1; the build that is not kept, R021's, g64m with its
+JIT, three at once; QEMU's time is R008's).
+
+**As guessed.**
+
+| p_sha | stores made beside code | left by a fault | one round | 200 rounds | g64m's JIT | QEMU | QEMU / r64m |
+|---|---|---|---|---|---|---|---|
+| R021 | 30,721 a round | | 0.119 s | over 15 s | | | |
+| only writable code marked | 0 | 0 | 0.002 s | 0.278 s | 0.323 s | 0.437 s | 1.57 |
+
+All 62 programs give the interpreter's output, exit code and count in the four JIT
+modes with that build (macOS; the cases that write their own code have it on pages
+they may write, and are marked as before). Nineteen of the 23 primitives made one
+store beside code each (the first to their data) and p_sha 30,721; p_fill, raced
+beside, was 2.8% faster and p_loop the same.
+
+So with this rule 22 of the 23 primitives would be past QEMU on this Mac. The build is
+not kept; ADR 0016 proposes the rule.

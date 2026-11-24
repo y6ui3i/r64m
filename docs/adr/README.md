@@ -28,3 +28,4 @@ Each file has: **Status** (accepted, or replaced by which), **Context**, **Decis
 | [0013](0013-macos-reserves-less.md) | On macOS the reservation is 2^40 bytes |
 | [0014](0014-the-jit.md) | The JIT: blocks for arm64, the simple form first |
 | [0015](0015-sse-in-blocks.md) | SSE in blocks: the host's vector registers, the interpreter for what is not a number |
+| [0016](0016-only-writable-code-is-guarded.md) | Only code the guest may write is guarded against writes (proposed) |
