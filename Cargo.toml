@@ -1,0 +1,12 @@
+[package]
+name = "r64m"
+version = "0.1.0"
+edition = "2024"
+description = "An x86-64 emulator with a JIT for arm64 hosts: the Rust port of g64m"
+license = "MIT"
+repository = "https://github.com/y6ui3i/r64m"
+
+[dependencies]
+
+[profile.release]
+debug = true
