@@ -17,7 +17,7 @@
 //! | x24 | the address of the way out |
 //! | x25, x26 | scratch that the way in saves |
 //! | x27 | how many instructions the blocks run to their ends have run |
-//! | x28 | not used yet |
+//! | x28 | the address of the table of blocks (`TABLE_BITS`) |
 
 // Some of its forms wait for the instructions that will use them.
 #[allow(dead_code)]
@@ -37,6 +37,12 @@ pub const BASE: u8 = 20;
 pub const OUT: u8 = 24;
 /// The host register that counts the instructions of the blocks run to their ends.
 pub const RAN: u8 = 27;
+/// The host register that holds the address of the table generated code looks a
+/// block up in when where it goes is not a constant (a return, a jump through an
+/// operand): two to the `TABLE_BITS` places chosen by an address's low bits, each an
+/// address in the guest and where the code of its block is.
+pub const TABLE: u8 = 28;
+pub const TABLE_BITS: u32 = 14;
 /// Where generated code puts why it leaves.
 pub const REASON: u8 = 16;
 
@@ -50,10 +56,11 @@ pub const LEFT_BY_FAULT: u64 = 1;
 /// registers stored again and the reason it put in x16.
 ///
 /// # Safety
-/// `code` must be code written for this convention, and `base` the base of the guest's
-/// memory it was written for.
+/// `code` must be code written for this convention, `base` the base of the guest's
+/// memory it was written for, and `table` a table of two to the `TABLE_BITS` places
+/// whose every place holds an address and code that may be jumped to.
 #[unsafe(naked)]
-pub unsafe extern "C" fn enter(cpu: *mut Cpu, code: *const u8, base: *mut u8) -> u64 {
+pub unsafe extern "C" fn enter(cpu: *mut Cpu, code: *const u8, base: *mut u8, table: *const [u64; 2]) -> u64 {
     core::arch::naked_asm!(
         "sub sp, sp, #96",
         "stp x19, x20, [sp]",
@@ -64,6 +71,7 @@ pub unsafe extern "C" fn enter(cpu: *mut Cpu, code: *const u8, base: *mut u8) ->
         "stp x29, x30, [sp, #80]",
         "mov x19, x0",
         "mov x20, x2",
+        "mov x28, x3",
         "mov x17, x1",
         "adr x24, 2f",
         "ldp x21, x22, [x19, #{rec}]",
@@ -330,7 +338,7 @@ mod tests {
 
     fn run(code: &mut Code, words: &[u32], c: &mut Cpu, m: &Mem) -> u64 {
         let at = code.append(words).expect("room for the block");
-        unsafe { enter(c, at, m.base()) }
+        unsafe { enter(c, at, m.base(), std::ptr::null()) }
     }
 
     #[test]
@@ -366,7 +374,7 @@ mod tests {
         assert_eq!(c.flag_rec, [22, 33, 11]);
         // And again from where it was left: nothing of the host's was lost between.
         let at = code.append(&block).unwrap();
-        assert_eq!(unsafe { enter(&mut c, at, m.base()) }, LEFT_AT_END);
+        assert_eq!(unsafe { enter(&mut c, at, m.base(), std::ptr::null()) }, LEFT_AT_END);
         assert_eq!(c.reg[15], before[15] + 32);
         assert_eq!(c.flag_rec, [33, 11, 22]);
     }
@@ -410,7 +418,7 @@ mod tests {
             ];
             block.extend(leave(LEFT_AT_END));
             let at = code.append(&block).unwrap();
-            assert_eq!(unsafe { enter(&mut c, at, m.base()) }, LEFT_BY_FAULT, "store {store} at {addr:#x}");
+            assert_eq!(unsafe { enter(&mut c, at, m.base(), std::ptr::null()) }, LEFT_BY_FAULT, "store {store} at {addr:#x}");
             // Where: the second instruction of the block.
             assert_eq!(c.fault_pc, at as u64 + 4);
             // What ran before it is done, what comes after it is not, and nothing was

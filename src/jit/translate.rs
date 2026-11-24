@@ -18,7 +18,7 @@
 //!   between (R009).
 
 use super::a64::{self, Cond, Logic, Mem as Op, Size};
-use super::{BASE, CPU, LEFT_AT_END, OUT, RAN, REASON};
+use super::{BASE, CPU, LEFT_AT_END, OUT, RAN, REASON, TABLE, TABLE_BITS};
 use crate::cpu::{Cpu, REC_ADD, REC_LOGIC, REC_SUB};
 use crate::mem::Mem;
 use std::mem::offset_of;
@@ -94,7 +94,7 @@ fn read(bytes: &[u8], rip: u64) -> Option<Ins> {
     // What follows the opcode: a ModRM byte, and a constant of how many bytes.
     let (modrm, imm) = match op {
         0x01 | 0x03 | 0x09 | 0x0b | 0x21 | 0x23 | 0x29 | 0x2b | 0x31 | 0x33 | 0x39 | 0x3b => (true, 0),
-        0x63 | 0x85 | 0x89 | 0x8b | 0x8d | 0x11f | 0x1b6 | 0x1b7 | 0x1be | 0x1bf => (true, 0),
+        0x63 | 0x85 | 0x89 | 0x8b | 0x8d | 0xff | 0x11f | 0x1b6 | 0x1b7 | 0x1be | 0x1bf => (true, 0),
         0x81 | 0xc7 => (true, 4),
         0x83 => (true, 1),
         0x50..=0x5f | 0x90 | 0xc3 => (false, 0),
@@ -163,6 +163,8 @@ fn read(bytes: &[u8], rip: u64) -> Option<Ins> {
         0xc7 | 0x11f => ins.reg & 7 != 0 && op == 0xc7,
         // ADC and SBB read the carry.
         0x81 | 0x83 => matches!(ins.reg & 7, 2 | 3),
+        // Of FFh only CALL and JMP through the operand.
+        0xff => !matches!(ins.reg & 7, 2 | 4),
         // LEA of a register is not an instruction.
         0x8d => matches!(ins.rm, Rm::Reg(_)),
         // Without REX the byte registers 4 to 7 are AH, CH, DH and BH.
@@ -334,9 +336,19 @@ impl Emit {
     }
 
     /// A way out with RIP in `T0`, which is not known until it is run: nothing to
-    /// join.
+    /// join. The address is looked up in the table of blocks (R011): its low bits
+    /// choose a place, and if the place holds this address the code beside it is gone
+    /// to. Else it is the way out to Rust, which fills the place when it has found the
+    /// block.
     fn leave_at_t0(&mut self, n: usize) {
         self.put(a64::arith_imm(true, false, false, RAN, RAN, n as u32, false));
+        self.put(a64::ubfx(T1, T0, 0, TABLE_BITS));
+        self.put(a64::arith(true, false, false, T1, TABLE, T1, 4));
+        self.put(a64::mem_imm(Size::X, Op::Load, T2, T1, 0));
+        self.put(a64::mem_imm(Size::X, Op::Load, T3, T1, 8));
+        self.put(a64::arith(true, true, true, a64::ZR, T2, T0, 0));
+        self.put(a64::b_cond(Cond::Ne, 2));
+        self.put(a64::br(T3));
         self.put(a64::mem_imm(Size::X, Op::Store, a64::ZR, CPU, offset_of!(Cpu, left_from) as u32));
         self.out();
     }
@@ -467,6 +479,24 @@ pub fn translate(m: &Mem, rip: u64) -> Option<Built> {
                 e.leave(ins.imm as u64, starts.len());
                 ended = true;
             }
+            0xff => {
+                // Where to: read before anything is pushed (the operand may be found
+                // through RSP), and kept in T2 while T0 and T1 push.
+                match ins.rm {
+                    Rm::Reg(s) => e.put(a64::mov(true, T2, s)),
+                    Rm::Mem { base, index, disp } => {
+                        let a = e.address(base, index, disp);
+                        e.put(a64::mem_reg(Size::X, Op::Load, T2, BASE, a));
+                    }
+                }
+                if reg & 7 == 2 {
+                    e.constant(T0, next);
+                    e.push(T0);
+                }
+                e.put(a64::mov(true, T0, T2));
+                e.leave_at_t0(starts.len());
+                ended = true;
+            }
             0xc3 => {
                 e.put(a64::mem_reg(Size::X, Op::Load, T0, BASE, RSP));
                 e.put(a64::arith_imm(true, false, false, RSP, RSP, 8, false));
@@ -575,6 +605,11 @@ mod tests {
         assert_eq!(ins(&[0x74, 0x10]).imm, at as i64 + 0x12);
         assert_eq!(ins(&[0x0f, 0x85, 0, 0x01, 0, 0]).imm, at as i64 + 6 + 0x100);
         assert_eq!(ins(&[0xe8, 0xfb, 0xff, 0xff, 0xff]).imm, at as i64);
+        // CALL and JMP through a register and through memory.
+        let i = ins(&[0xff, 0xd0]);
+        assert_eq!((i.op, i.reg & 7, i.rm), (0xff, 2, Rm::Reg(0)));
+        let i = ins(&[0x41, 0xff, 0x24, 0xc3]);
+        assert_eq!((i.reg & 7, i.rm), (4, mem_op(Some(11), Some((0, 3)), 0)));
         // The registers in an opcode's low bits.
         assert_eq!(ins(&[0x41, 0x57]).reg, 15);
         assert_eq!(ins(&[0x5d]).reg, 5);
@@ -595,7 +630,8 @@ mod tests {
         no(&[0xc7, 0xf8, 0, 0, 0, 0]); // C7h's other field
         no(&[0x41, 0x90]); // XCHG R8, RAX
         no(&[0x0f, 0x05]); // SYSCALL
-        no(&[0xff, 0xe0]); // a jump through a register
+        no(&[0xff, 0xc0]); // INC by FFh
+        no(&[0xff, 0x30]); // PUSH of memory
         // Cut short anywhere, it is not read.
         let whole = [0x48u8, 0x81, 0x84, 0xcb, 0x10, 0x20, 0x30, 0x40, 1, 2, 3, 4];
         assert!(read(&whole, 0).is_some());

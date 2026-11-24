@@ -3,8 +3,9 @@
 //! interpreter (ADR 0014, points 2, 7, 8 and 11).
 
 use super::translate::{translate, Built};
-use super::{a64, enter, Code, LEFT_AT_END};
+use super::{a64, enter, Code, CPU, LEFT_AT_END, OUT, REASON, TABLE_BITS};
 use crate::cpu::{self, Cpu, Step, Stop};
+use std::mem::offset_of;
 use crate::mem::{Access, Mem, PAGE};
 use std::collections::HashMap;
 
@@ -63,6 +64,13 @@ pub struct Jit {
     /// The jump the last block was left by, if it can be rewritten to go to the block
     /// at the address it left for; zero if there is none to rewrite.
     from: u64,
+    /// What generated code looks in when where it goes is not a constant: for a place
+    /// chosen by an address's low bits, the address and where its block's code is. A
+    /// place with no block holds an address no place is chosen by and `miss`.
+    table: Box<[[u64; 2]]>,
+    /// Code that leaves for Rust with RIP as generated code had it in x16: what an
+    /// empty place of the table sends to, so that no place can send astray.
+    miss: u64,
     pub stats: Stats,
 }
 
@@ -76,6 +84,32 @@ pub enum Event {
 
 impl Jit {
     pub fn new(check: bool, hot: u8) -> std::io::Result<Jit> {
+        let mut jit = Jit::bare(check, hot)?;
+        jit.clear_table();
+        Ok(jit)
+    }
+
+    /// The code an empty place of the table sends to, written at the start of the
+    /// piece (again each time it is emptied), and every place made empty.
+    fn clear_table(&mut self) {
+        let miss = [
+            a64::mem_imm(a64::Size::X, a64::Mem::Store, a64::ZR, CPU, offset_of!(Cpu, left_from) as u32),
+            a64::mem_imm(a64::Size::X, a64::Mem::Store, REASON, CPU, offset_of!(Cpu, rip) as u32),
+            a64::movz(true, REASON, LEFT_AT_END as u16, 0),
+            a64::br(OUT),
+        ];
+        self.miss = self.code.append(&miss).expect("room in a piece just emptied") as u64;
+        // An address with every bit set chooses the last place; whatever is asked of
+        // an empty place, its code is the way out.
+        self.table.fill([u64::MAX, self.miss]);
+    }
+
+    /// The place in the table that an address chooses.
+    fn place(rip: u64) -> usize {
+        (rip & ((1 << TABLE_BITS) - 1)) as usize
+    }
+
+    fn bare(check: bool, hot: u8) -> std::io::Result<Jit> {
         Ok(Jit {
             code: Code::new(CODE_BYTES)?,
             blocks: Vec::new(),
@@ -86,6 +120,8 @@ impl Jit {
             check,
             hot: hot.max(1),
             from: 0,
+            table: vec![[0, 0]; 1 << TABLE_BITS].into_boxed_slice(),
+            miss: 0,
             stats: Stats::default(),
         })
     }
@@ -103,6 +139,11 @@ impl Jit {
                     // comes here by itself. (Not when each block is to be checked.)
                     if self.from != 0 && !self.check {
                         self.join(self.from, id);
+                    }
+                    // And generated code that comes to this address by a return or
+                    // through an operand finds it in the table from now on.
+                    if !self.check {
+                        self.table[Self::place(c.rip)] = [c.rip, self.blocks[id].code as u64];
                     }
                     match self.run_block(id, c, m) {
                         Ok(whole) => arrived = whole,
@@ -185,7 +226,7 @@ impl Jit {
     /// and then RIP is on the instruction that did.
     fn run_block(&mut self, id: usize, c: &mut Cpu, m: &mut Mem) -> Result<bool, String> {
         let expected = if self.check { self.interpreted(id, c, m) } else { None };
-        let reason = unsafe { enter(c, self.blocks[id].code, m.base()) };
+        let reason = unsafe { enter(c, self.blocks[id].code, m.base(), self.table.as_ptr()) };
         // What the blocks that were run to their ends ran.
         c.steps += c.ran;
         self.stats.in_blocks += c.ran;
@@ -278,6 +319,7 @@ impl Jit {
         // marked: only this page is let go, and only blocks that touch it are dropped.
         let mut dropped = Vec::new();
         let heat = &mut self.heat;
+        let (table, miss) = (&mut self.table, self.miss);
         self.at.retain(|rip, id| {
             let (from, to) = blocks[*id].pages;
             let kept = to <= start || from >= end;
@@ -285,6 +327,11 @@ impl Jit {
                 dropped.push(*id);
                 // To be arrived at as often again before it is made again.
                 heat.remove(rip);
+                // And not to be found by generated code.
+                let place = &mut table[Self::place(*rip)];
+                if place[0] == *rip {
+                    *place = [u64::MAX, miss];
+                }
             }
             kept
         });
@@ -321,6 +368,7 @@ impl Jit {
         self.holds.clear();
         self.from = 0;
         self.code.empty();
+        self.clear_table();
         self.stats.emptied += 1;
     }
 }
@@ -717,6 +765,103 @@ mod tests {
         assert_eq!(c.reg[RDX], 150);
         assert_eq!(c.reg[crate::cpu::RSP], DATA + 4096);
         assert_eq!(c.steps, 30 * 5 + 1);
+        // After the first, a return finds its block in the table: generated code is
+        // not left thirty times.
+        assert!(jit.stats.entered < 10, "entered {} times", jit.stats.entered);
+    }
+
+    #[test]
+    fn calls_and_jumps_through_a_register_and_through_memory() {
+        //  0 again: call rax         (f)
+        //  2        call [rsi]       (g)
+        //  4        sub ebx, 1
+        //  7        je done
+        //  9        jmp [rsi + 8]    (again)
+        // 12 done:  syscall
+        // 14 f:     add edx, 5; ret
+        // 18 g:     add edx, 7; ret
+        let code = [0xff, 0xd0, 0xff, 0x16, 0x83, 0xeb, 0x01, 0x74, 0x03, 0xff, 0x66, 0x08, 0x0f, 0x05, 0x83, 0xc2, 0x05, 0xc3, 0x83, 0xc2, 0x07, 0xc3];
+        let mut data = (CODE + 18).to_le_bytes().to_vec();
+        data.extend(CODE.to_le_bytes());
+        let set = |c: &mut Cpu| {
+            c.reg[RAX] = CODE + 14;
+            c.reg[RBX] = 40;
+            c.reg[RSI] = DATA;
+        };
+        let (c, _) = checked(&code, &data, &set);
+        assert_eq!(c.reg[RDX], 40 * 12);
+        assert_eq!(c.reg[crate::cpu::RSP], DATA + 4096);
+        // And joined, counted: not once a round out to Rust.
+        let mut m = guest(&code, &data);
+        let mut jit = Jit::new(false, 1).unwrap();
+        both(&mut jit, &mut m, CODE, &set);
+        assert!(jit.stats.entered < 20, "entered {} times", jit.stats.entered);
+        // call [rsp + 8]: where to is read before the return address is pushed.
+        //  0 call [rsp + 8]; 4 syscall; 6 f: add edx, 5; ret
+        let code = [0xff, 0x54, 0x24, 0x08, 0x0f, 0x05, 0x83, 0xc2, 0x05, 0xc3];
+        let mut data = vec![0u8; 0x810];
+        data[0x808..].copy_from_slice(&(CODE + 6).to_le_bytes());
+        let (c, m) = checked(&code, &data, &|c| c.reg[crate::cpu::RSP] = DATA + 0x800);
+        assert_eq!((c.reg[RDX], c.reg[crate::cpu::RSP]), (5, DATA + 0x800));
+        assert_eq!(m.read_u64(DATA + 0x7f8), Ok(CODE + 4));
+    }
+
+    #[test]
+    fn two_returns_that_share_a_place_in_the_table_both_arrive() {
+        // Two calls of one function from addresses 4000h apart: their return
+        // addresses choose the same place, and put each other out of it every time.
+        //  near:  call f; jmp far            f at near + 100h: add edx, 3; ret
+        //  far:   call f; sub ebx, 1; jne near; syscall
+        const FAR: u64 = CODE + (1 << TABLE_BITS);
+        let mut code = vec![0u8; (1 << TABLE_BITS) + 32];
+        let rel = |from_end: u64, to: u64| ((to as i64 - from_end as i64) as i32).to_le_bytes();
+        code[0] = 0xe8;
+        code[1..5].copy_from_slice(&rel(CODE + 5, CODE + 0x100));
+        code[5] = 0xe9;
+        code[6..10].copy_from_slice(&rel(CODE + 10, FAR));
+        code[0x100..0x104].copy_from_slice(&[0x83, 0xc2, 0x03, 0xc3]);
+        let far = (FAR - CODE) as usize;
+        code[far] = 0xe8;
+        code[far + 1..far + 5].copy_from_slice(&rel(FAR + 5, CODE + 0x100));
+        code[far + 5..far + 8].copy_from_slice(&[0x83, 0xeb, 0x01]);
+        code[far + 8] = 0x0f;
+        code[far + 9] = 0x85;
+        code[far + 10..far + 14].copy_from_slice(&rel(FAR + 14, CODE));
+        code[far + 14..far + 16].copy_from_slice(&[0x0f, 0x05]);
+        assert_eq!(Jit::place(CODE + 5), Jit::place(FAR + 5));
+        let (c, _) = checked(&code, &[], &|c| c.reg[RBX] = 25);
+        assert_eq!(c.reg[RDX], 25 * 6);
+    }
+
+    #[test]
+    fn a_block_that_is_forgotten_is_not_found_in_the_table() {
+        // On one page:   again: call r8         (the other page's function)
+        //                       mov dword [far + 1], 9
+        //                       add edx, eax; sub ebx, 1; jne again; syscall
+        // On another:    far:   mov eax, 7; ret
+        // The call is through a register: its block is found in the table, and must
+        // not be found there once the page it was translated from is written. (The
+        // function is not at its page's start: it must not choose the place in the
+        // table that `again` chooses, which would put it out by chance.)
+        const FAR: u64 = CODE + 0x1_0040;
+        let mut near = vec![0x41, 0xff, 0xd0, 0xc7, 0x05, 0, 0, 0, 0, 9, 0, 0, 0, 0x01, 0xc2, 0x83, 0xeb, 0x01, 0x75, 0xec, 0x0f, 0x05];
+        near[5..9].copy_from_slice(&((FAR + 1 - (CODE + 13)) as i32).to_le_bytes());
+        let far = [0xb8, 7, 0, 0, 0, 0xc3];
+        assert_ne!(Jit::place(FAR), Jit::place(CODE));
+        for check in [true, false] {
+            let mut m = Mem::reserve().unwrap();
+            m.map(CODE, 4096, R | W | X).unwrap();
+            m.write_bytes(CODE, &near).unwrap();
+            m.map(FAR & !0xfff, 4096, R | W | X).unwrap();
+            m.write_bytes(FAR, &far).unwrap();
+            m.map(DATA, 4096, R | W).unwrap();
+            let mut jit = Jit::new(check, 1).unwrap();
+            let c = both(&mut jit, &mut m, CODE, &|c| {
+                c.reg[RBX] = 4;
+                c.reg[8] = FAR;
+            });
+            assert_eq!(c.reg[RDX], 7 + 3 * 9);
+        }
     }
 
     #[test]

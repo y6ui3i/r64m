@@ -147,6 +147,11 @@ pub fn asr(wide: bool, rd: u8, rn: u8, by: u32) -> u32 {
     bitfield(wide, true, rd, rn, by, if wide { 63 } else { 31 })
 }
 
+/// `width` bits of a 64-bit register from bit `lsb` up, the rest zero.
+pub fn ubfx(rd: u8, rn: u8, lsb: u32, width: u32) -> u32 {
+    bitfield(true, false, rd, rn, lsb, lsb + width - 1)
+}
+
 /// The low `bits` (8, 16 or 32) of a register with their sign, to all of a register.
 pub fn sxt(wide: bool, rd: u8, rn: u8, bits: u32) -> u32 {
     bitfield(wide, true, rd, rn, 0, bits - 1)
@@ -320,6 +325,13 @@ mod tests {
             (cbz(true, false, 3, 4), 0xb4000083, "cbz x3, .+0x10"),
             (cbz(false, true, 3, -4), 0x35ffff83, "cbnz w3, .-0x10"),
             (br(16), 0xd61f0200, "br x16"),
+            (ubfx(17, 16, 0, 14), 0xd3403611, "ubfx x17, x16, #0, #14"),
+            (ubfx(1, 2, 3, 5), 0xd3431c41, "ubfx x1, x2, #3, #5"),
+            (arith(true, false, false, 17, 28, 17, 4), 0x8b111391, "add x17, x28, x17, lsl #4"),
+            (mem_imm(Size::X, Mem::Load, 25, 17, 0), 0xf9400239, "ldr x25, [x17]"),
+            (mem_imm(Size::X, Mem::Load, 26, 17, 8), 0xf940063a, "ldr x26, [x17, #8]"),
+            (arith(true, true, true, ZR, 25, 16, 0), 0xeb10033f, "cmp x25, x16"),
+            (mov(true, 28, 3), 0xaa0303fc, "mov x28, x3"),
             (adr(17, 0), 0x10000011, "l: adr x17, l"),
             (adr(17, -4), 0x10fffff1, "adr x17, .-4"),
             (adr(1, 0x1004), 0x10008021, "adr x1, .+0x1004"),
@@ -337,7 +349,7 @@ mod tests {
         for (ours, theirs, name) in cases {
             assert_eq!(ours, theirs, "{name}: {ours:08x}, the assembler {theirs:08x}");
         }
-        assert_eq!(cases.len(), 94);
+        assert_eq!(cases.len(), 101);
     }
 
     #[test]
