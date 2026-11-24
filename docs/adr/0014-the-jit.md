@@ -1,6 +1,6 @@
 # 0014: The JIT: blocks for arm64, the simple form first
 
-**Status**: proposed (2026-11-24; the three points at the end are the owner's)
+**Status**: accepted (2026-11-24, the owner: the three points as proposed)
 
 ## Context
 

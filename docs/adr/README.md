@@ -26,4 +26,4 @@ Each file has: **Status** (accepted, or replaced by which), **Context**, **Decis
 | [0011](0011-the-goal.md) | The goal for 64 bits: HTTPS through nginx to FastAPI, in an x86-64 container |
 | [0012](0012-rust-only-g64m-for-reference.md) | Rust only; g64m is read, not built upon |
 | [0013](0013-macos-reserves-less.md) | On macOS the reservation is 2^40 bytes |
-| [0014](0014-the-jit.md) | The JIT: blocks for arm64, the simple form first (proposed) |
+| [0014](0014-the-jit.md) | The JIT: blocks for arm64, the simple form first |
