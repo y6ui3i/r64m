@@ -410,3 +410,36 @@ The middle one (the third), by program:
 **Next.** The JIT's design (ADR 0014) is still the owner's to answer. Beside it, as
 things that would each be a change of their own: `rep stos` and `rep movs` in one
 step, and the x87's f64 kept.
+
+## R006: the two primitives still behind g64m's interpreter (2026-11-24)
+
+The owner's aim: `p_fill` and `p_ldbl` past g64m's interpreter too (R005 left them at
+0.16 and 0.75 of its speed).
+
+The card, written before the run.
+
+- **Hypothesis**:
+  - `p_fill`: nearly all of its 7.8 M instructions are repetitions of `rep stos`, each
+    a whole step here (fetched and decoded again). Done as g64m does (its E113), all
+    the repetitions of a `rep stos` or `rep movs` in one step when no trace is being
+    written, it is a fill or a copy of memory and takes about no time.
+  - `p_ldbl`: guessed, not known: the register forms of the x87 work out ST(0) and
+    ST(1) as f64 before they look at which instruction it is (g64m did the same until
+    its E162), and the division is a 128-bit division by the compiler's library
+    routine where g64m does two of 64 bits. A profile says which before anything is
+    changed.
+- **What is changed from before**: R005 changed what every instruction pays. This
+  changes two instructions' own work, and for the first time lets a step be more than
+  one instruction: the count (`--count`) must still be g64m's for every primitive, a
+  repetition counting as one, and with a trace every repetition is still a step and a
+  line.
+- **Next move for each result**:
+  - Both past g64m → all 23 are, and the interpreter is left; the JIT's design is next
+  - `p_fill` not past it with the whole run in one step → what is left is looked at
+    (the check of the range, the copy itself) and said
+  - `p_ldbl`'s profile shows something else → that, and said; if it is the x87's
+    arithmetic in integers itself (which is what makes it right), it stays behind and
+    that is the answer
+- **Cut-off**: the string change, and for the x87 what the profile shows first and
+  second, no more. Raced as in R005: against g64m's interpreter, two at once, five
+  runs of each program, three races, the middle one.
