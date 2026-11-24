@@ -153,3 +153,34 @@ The card, written before the run.
 - **Cut-off**: one build and one run of each of the three. The cases are the ones
   already assembled on the Mac (the container has no nasm, and none is fetched for
   this), so what is run on Linux is r64m, not the harness around it.
+
+**Result: all the same. r64m does on arm64 Linux what it does on the Mac.**
+
+| | macOS 27 on the M1 | arm64 Linux in the container (Alpine 3.24, kernel 7.2, OrbStack) |
+|---|---|---|
+| What `r64m` says it reserved | 2^46 bytes, host pages of 16 KB | 2^47 bytes, host pages of 4 KB |
+| Unit tests (memory, loader) | 17 pass | 17 pass |
+| Cases whose trace is the real CPU's | 39 of 39 | 39 of 39 (123,226 lines) |
+| Primitives that print what they should | 23 of 23 | 23 of 23 |
+
+- **The hypothesis** held, the expected difference included: 2^47 bytes, and the host's
+  page is the guest's.
+- **The host's side of `mem.rs` is right on Linux** as written for macOS: a fixed
+  mapping over part of the reservation, `mprotect` to the page, and what the host
+  itself refuses (asked of a forked child) are the same.
+- **Nothing in the interpreter leans on the host**: the x87's use of the library's
+  functions and the floats' conversions give the same 123,226 lines under musl as under
+  macOS's library.
+- **Building**: `rustup target add aarch64-unknown-linux-musl` (146 MB as installed)
+  and `CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld cargo build --release
+  --target aarch64-unknown-linux-musl` on the Mac give a static executable; no C
+  compiler and no container with Rust in it is needed.
+- **What was not run on Linux**: the harness `tests/trace.rs` itself. The container has
+  no nasm, so the cases were the ones the harness had assembled on the Mac, and the
+  comparison there was a loop of `cmp`. The unit tests were the test executable built
+  for Linux, run as it is.
+- **The container sees only some of the Mac's folders** (OrbStack): not the checkout
+  under `Documents`, and a scratch folder only when mounted at another path (`/w`). The
+  builds and cases were copied to a scratch folder for the run.
+
+**Next.** The first translated block, on Linux and macOS both from its first day.

@@ -11,7 +11,7 @@ x87 (`src/cpu.rs`, `src/cpu/sse.rs`, `src/cpu/x87.rs`) and three system calls
 (`src/sys.rs`). All 39 of g64m's cases with a trace from the real CPU give that trace,
 and all 23 of its primitives print what they should. There is no JIT, no dynamic
 linking, no system call beyond `write` and `exit`, and no machine yet; nothing has been
-timed, and nothing has been run on Linux.
+timed. The same holds on arm64 Linux, built from the Mac (R003).
 
 ## The goal
 
@@ -96,6 +96,14 @@ target/release/r64m --trace program    # print the registers after every instruc
 Everything here is Rust; nothing is added in another language (0012). The toolchain's
 version is fixed in `rust-toolchain.toml`, and the versions of the two crates from
 outside in `Cargo.lock` ([0009](docs/adr/0009-two-crates.md)).
+
+For arm64 Linux, from the Mac, a static executable (the target is fetched once with
+`rustup target add aarch64-unknown-linux-musl`):
+
+```sh
+CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld \
+    cargo build --release --target aarch64-unknown-linux-musl
+```
 
 `cargo test` holds r64m's traces to the real CPU's. The cases and the traces are g64m's
 and are read from its checkout, beside this one or where `R64M_G64M` says; `nasm` builds
