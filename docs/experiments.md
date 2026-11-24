@@ -1768,3 +1768,38 @@ modes, on macOS and in the Linux container; 89 unit tests on both, three of them
 every opcode from a register, from memory, with itself and with the upper eight
 registers on operands chosen for signs and carries; both shuffles by each of the 256
 constants; every shift by 16 counts from nothing to 255.
+
+## R022: p_sha with only writable code marked (2026-11-25)
+
+A look before a decision (ADR 0016), as R002 and R019 were.
+
+p_sha's four segments are at 400000h (read), 401000h (read and run: its code),
+402000h (read) and 403000h (read and write: its data). All four are in one 16 KB page
+of the host's. A block made from the code marks that host page as holding translated
+code, so that nothing may write it; every store to the data at 403000h then faults,
+leaves generated code, and is made by the interpreter with the page opened for one
+instruction (R010): 30,721 times a round. Every program linked with 4 KB pages has
+its code's end and its data's beginning this close.
+
+The card, written before the run.
+
+- **Hypothesis**: the mark is not needed for p_sha at all. The guest may not write the
+  page its code is on (it is mapped to be read and run), so no store of a correct
+  program changes that code, and a block made from it rests on nothing that can
+  change. If only code from pages the guest may write is marked, p_sha's stores go
+  straight to memory, and p_sha (0.129 s a round, where QEMU would take 0.002 s) is
+  past QEMU.
+- **What is changed from before** (R021): a build that is not kept, in which a block
+  marks its host pages only if one of the guest's pages it lies in may be written by
+  the guest.
+- **Next move for each result**:
+  - p_sha past QEMU, the 62 programs right → ADR 0016 proposes this, with what it
+    gives up (a store by generated code to a page the guest may not write, where that
+    page shares a host page with one it may: on x86 a fault, here a store that also
+    leaves a block stale)
+  - p_sha in blocks without faults but not past QEMU → what is left is read from the
+    block's code before the ADR is written; the ADR may still propose this
+  - A program is not right → what rests on the mark besides stores to code is
+    understood first
+- **Cut-off**: one build, one race of p_sha and of the primitives that store beside
+  code (`--jit-stats` says which), the 62 programs once.
