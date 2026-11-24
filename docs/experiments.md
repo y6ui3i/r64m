@@ -1525,3 +1525,38 @@ twice or past it; on fourteen of the sixteen r64m's JIT is level with g64m's or 
 **Next.** SSE in blocks: the six floating-point primitives, which are 60 to 90%
 interpreted. A decision first (which registers of the host hold the guest's, and how
 x86's rules for what is not a number are kept), then the entry.
+
+## R019: what the host's arithmetic does where x86's is particular (2026-11-25)
+
+A look at the host before a decision (ADR 0015, SSE in blocks), as R002 was before
+ADR 0008.
+
+The card, written before the run.
+
+- **Hypothesis**: x86's SSE and arm64's floating point are both IEEE 754 and give the
+  same bits for every result that is a number. They are guessed to differ in four
+  places, each of which the interpreter does x86's way by hand already
+  (`src/cpu/sse.rs`, held to the real CPU's traces):
+  1. a result that is not a number, of operands that were (infinity less infinity,
+     nothing by nothing, the root of a negative): x86 gives the one with the sign set
+     (FFF8000000000000h), arm64 is guessed to give it with the sign clear;
+  2. two operands that are not numbers: x86 gives the first, made quiet; arm64 is
+     guessed to prefer a signalling one wherever it stands;
+  3. the smaller and the larger of two: x86 gives the second operand when either is
+     not a number or the two are equal (zeros of both signs among them); arm64's own
+     FMIN and FMAX are guessed to do otherwise;
+  4. a float to an integer that does not fit, or is not a number: x86 gives the most
+     negative integer for all of them; arm64 is guessed to give the largest, the most
+     negative, or zero, as the case is.
+- **What is changed from before**: nothing; nothing of r64m is run. A probe of the
+  host's own instructions with chosen operands.
+- **Next move for each result**:
+  - As guessed → ADR 0015 is written for them: where a result can be particular the
+    block does not trust the host's instruction alone
+  - A fifth difference shows (a result that is a number and differs) → the decision is
+    not written until it is understood: it would mean no host instruction can stand
+    for x86's
+  - The host agrees with x86 somewhere it was guessed not to → that case needs nothing
+    special, and the decision is the simpler by it
+- **Cut-off**: one probe, in Rust (a test that is not kept), on the Mac; the host's
+  instructions are the same on Linux.
