@@ -20,3 +20,4 @@ Each file has: **Status** (accepted, or replaced by which), **Context**, **Decis
 | [0005](0005-loaders-in-host-code.md) | A program and a kernel are loaded by host code |
 | [0006](0006-tests-are-data.md) | Tests of behaviour are data, run by a harness |
 | [0007](0007-simple-first.md) | The simple form first; what g64m added is added again only when counted |
+| [0008](0008-a-programs-memory-is-the-hosts.md) | A program's memory is the host's, with the host's protection (**proposed**) |

@@ -92,3 +92,34 @@ far, is a matter of what the two hosts allow, which is to be seen and not guesse
   - No going on from a fault → no host protection at all; the same
 - **Cut-off**: one probe, in C (no crate fetched for it), run on the Mac and in the
   container of R001; it is a look, not part of r64m.
+
+**Result: as guessed, with numbers. Linux lets the host's protection stand for a guest's
+page; macOS does not, by its pages' size.**
+
+| | macOS 27 on the M1 | arm64 Linux in the container (kernel 7.2, OrbStack) |
+|---|---|---|
+| Page | 16 KB | 4 KB |
+| A hint is honoured up to | under 2^46 (47 bits of address) | under 2^48 (48 bits) |
+| Largest reservation with no access | 2^46 bytes | 2^47 bytes |
+| Memory at 10000h, 400000h, 10000000h | not given (the first 4 GB are kept empty) | given there |
+| Memory at 100000000h | not given (the program itself is loaded there) | given there |
+| `mprotect` of 4 KB inside a piece | refused | accepted |
+| Memory both writable and runnable | refused (macOS wants `MAP_JIT`) | given |
+| A fault: the address told, the handler goes on elsewhere | yes | yes |
+| A fault taken and gone on from | 2.2 microseconds | 0.49 microseconds |
+
+- **The hypothesis** held on every count.
+- **2^47 bytes on Linux is all an x86 program can address**: an address of user space
+  there has 47 bits. Reserved whole, no address the guest can form inside its own half
+  is outside the reservation. The host has one bit more, which is where r64m itself can
+  live.
+- **macOS cannot protect 4 KB**: a guest's page that may not be written shares a host
+  page with three that may. What the host can say there is coarser than what the guest
+  asked for.
+- **A fault is cheap enough to be the rare way**: half a microsecond is some 1,500 host
+  instructions' time; g64m's way out of a block and back was 400 to 600. It is not cheap
+  enough to be met often.
+- The probe is not kept (C, in a scratch folder); what it printed is this table.
+
+**Next.** The decision, as `docs/adr/0008`, proposed and not accepted: the owner's to
+read.
