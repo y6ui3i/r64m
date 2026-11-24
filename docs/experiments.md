@@ -1560,3 +1560,42 @@ The card, written before the run.
     special, and the decision is the simpler by it
 - **Cut-off**: one probe, in Rust (a test that is not kept), on the Mac; the host's
   instructions are the same on Linux.
+
+The result (MacBook Air, Apple M1; the host's own instructions, by a probe in Rust
+that is not kept).
+
+**As guessed, on all four counts; no fifth difference.**
+
+| | x86 (the interpreter, held to the traces) | arm64 |
+|---|---|---|
+| 1. infinity less infinity, 0 times infinity, 0/0, infinity/infinity, the root of -1 | FFF8000000000000h | 7FF8000000000000h: the sign is clear |
+| 2. quiet 1 + quiet 2 | quiet 1 | quiet 1 |
+| 2. quiet 1 + signalling 2 | quiet 1 | signalling 2, made quiet: the signalling one is preferred |
+| 2. signalling 1 + quiet 2, signalling 1 + signalling 2 | 1, made quiet | 1, made quiet |
+| 2. a number and one that is not, either order | that one, made quiet | the same |
+| 3. FMIN, FMAX of +0 and -0 | the second operand | -0 for the smaller, +0 for the larger, whichever the order |
+| 3. FMIN, FMAX with one that is not a number | the second operand, as it is | the one that is not a number, made quiet |
+| 4. to 32 bits: 3e9, 1e19, infinity | 80000000h | 7FFFFFFFh |
+| 4. to 32 bits: not a number | 80000000h | 0 |
+| 4. to 64 bits: 1e19, infinity / not a number | 8000000000000000h | 7FFFFFFFFFFFFFFFh / 0 |
+
+Multiplying gave what adding gave in every row of 2. Results that are numbers had the
+bits IEEE says: 0.1 + 0.2, 1/3, the smallest denormal halved (0), an overflow
+(infinity), the root of 2.
+
+Two things the probe showed besides, and both are used in ADR 0015:
+
+- **The smaller and the larger by a comparison and a choice are x86's rule exactly.**
+  `fcmp a, b; fcsel r, a, b, mi` (and `gt` for the larger) gave the second operand for
+  zeros of either order, the second operand when the first was not a number, and the
+  second, not made quiet, when it was the one: all eight rows as `far64` has them.
+- **The host's flags after `fcmp`**: less 1000, equal 0110, greater 0010, unordered
+  0011 (N Z C V). x86's UCOMISD gives ZF PF CF = 000 greater, 001 less, 100 equal,
+  111 unordered. Above, above or equal, below, below or equal and parity each have one
+  arm64 condition that is true on exactly the same of the four (GT, GE, LT... see the
+  ADR); equal and not equal do not, since x86's ZF is set when unordered and the
+  host's Z is not.
+
+What is not shown: single precision (the same instructions with another size; the
+tests of the translation will hold it to the interpreter), and the rounding other than
+to nearest, which the interpreter does not do for arithmetic either.
