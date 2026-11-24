@@ -1468,3 +1468,60 @@ The card, written before the run.
   - A program wrong → put right first
 - **Cut-off**: this one change. The shorter race for the sixteen integer primitives
   that are in blocks, set beside R017's.
+
+**Result: `p_switch` is past QEMU by 2.11 times (8.68 s to 2.92 s) and `p_if` gained a
+fifth. One primitive is the worse by a twentieth, `p_loop`, and why is found only in
+part. Kept.**
+
+On a MacBook Air (Apple M1), macOS 27. The shorter race, 200 rounds, r64m `--jit`
+beside g64m `--jit`; QEMU and Rosetta as timed earlier.
+
+| 200 rounds | before (R017) | now | g64m `--jit` | QEMU | Rosetta | QEMU's time / r64m's | g64m's time / r64m's |
+|---|---|---|---|---|---|---|---|
+| p_muldiv | 0.915 s | 0.885 s | 0.953 s | 4.397 s | 0.653 s | 4.97 | 1.08 |
+| p_recursion | 0.439 s | 0.423 s | 0.573 s | 1.567 s | 0.810 s | 3.71 | 1.35 |
+| p_funcptr | 2.932 s | 2.854 s | 3.333 s | 9.123 s | 2.867 s | 3.20 | 1.17 |
+| p_fill | 1.056 s | 1.004 s | 1.466 s | 2.883 s | 0.497 s | 2.87 | 1.46 |
+| p_index | 0.710 s | 0.642 s | 1.103 s | 1.723 s | 0.420 s | 2.69 | 1.72 |
+| p_bignum | 1.142 s | 1.083 s | 1.733 s | 2.590 s | 0.887 s | 2.39 | 1.60 |
+| p_loop | 0.339 s | 0.363 s | 0.222 s | 0.773 s | 0.240 s | 2.13 | 0.61 |
+| p_switch | 8.683 s | 2.923 s | 3.068 s | 6.167 s | 2.847 s | **2.11** (0.71) | 1.05 |
+| p_pointer | 1.146 s | 1.110 s | 1.427 s | 1.900 s | 0.723 s | 1.71 | 1.29 |
+| p_bytes | 0.816 s | 0.820 s | 1.113 s | 1.373 s | 0.573 s | 1.67 | 1.36 |
+| p_if | 1.540 s | 1.205 s | 1.365 s | 1.873 s | 0.997 s | 1.55 (1.22) | 1.13 |
+| p_rotate | 3.251 s | 3.192 s | 3.348 s | 4.403 s | 3.060 s | 1.38 | 1.05 |
+| p_shift | 0.768 s | 0.728 s | 0.755 s | 0.893 s | 0.680 s | 1.23 | 1.04 |
+| p_pixel | 0.489 s | 0.475 s | 0.525 s | 0.523 s | 0.393 s | 1.10 | 1.11 |
+| p_ternary | 0.763 s | 0.732 s | 0.568 s | 0.807 s | 0.473 s | 1.10 | 0.78 |
+| p_bitfield | 1.033 s | 1.041 s | 1.063 s | 1.100 s | 0.890 s | 1.06 | 1.02 |
+
+All sixteen integer primitives that are in blocks are past QEMU, eight of them at
+twice or past it; on fourteen of the sixteen r64m's JIT is level with g64m's or ahead.
+
+- **The hypothesis held for `p_switch`**: wholly in blocks (95.8% before), three times
+  as fast, past QEMU and past g64m's JIT.
+- **"Nowhere a loss" did not hold: `p_loop` is 6% slower**, and steadily (the build
+  before against this one, the two at once, three races of five runs: 0.335, 0.337,
+  0.337 s against 0.356, 0.357, 0.357 s; `p_ternary` and `p_pixel` the same to the
+  millisecond in the same races). By the card that is to be explained before the
+  change is kept. What was found:
+  - the loop's own block is the same six host instructions as before, and is the
+    first block made in both builds, so it lies at the same place in the piece;
+  - the host's counters say the same instructions retired (3,635 M) and 6.5% more
+    cycles (1,022 M to 1,088 M): 66 million cycles more over 600,000 rounds of the
+    outer loop, some 110 cycles a round;
+  - what changed is the two blocks of the outer loop, which are longer now and reach
+    the inner loop by a way taken that lies after their end;
+  - placing every block's start on a boundary of 4 to 128 bytes changes nothing
+    (0.346 to 0.353 s at each).
+  So the cycles are lost where the inner loop is entered and left, not in it, and not
+  by where blocks begin. What costs 110 cycles there is not known (the host's
+  prediction of the inner loop's jump after a different way in is the suspect, and
+  not shown). The change is kept: it is right, it is what `p_switch` and `p_if` gain
+  by, and the loss is 6% of one primitive that stays at twice QEMU. That the card's
+  "why" is answered only in part is said here and not hidden.
+- 62 programs in four JIT modes and 75 unit tests on macOS and in the Linux container.
+
+**Next.** SSE in blocks: the six floating-point primitives, which are 60 to 90%
+interpreted. A decision first (which registers of the host hold the guest's, and how
+x86's rules for what is not a number are kept), then the entry.

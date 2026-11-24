@@ -19,11 +19,11 @@ division, shifts, rotations, bit scans, conditional moves and sets, the stack, j
 joins them to one another, finds a return's block without leaving generated code, and
 checks each block against the interpreter when asked (`--jit-check`). It is asked for
 with `--jit` and is not yet what r64m does by itself. Of the 23 primitives sixteen are
-past QEMU on this Mac (1.06 to 4.81 times), seven of them at twice QEMU or past it,
-and on ten r64m's JIT is level with g64m's or ahead (R017). One integer primitive is
-behind QEMU for a jump the host's flags do not answer, one for stores to data that
-shares a 16 KB host page with its code; the six floating-point ones are still mostly
-interpreted: SSE and the x87 are not translated. There is no dynamic linking,
+past QEMU on this Mac (1.06 to 4.97 times), eight of them at twice QEMU or past it,
+and on fourteen r64m's JIT is level with g64m's or ahead (R018). One integer primitive
+is behind QEMU for its stores to data that shares a 16 KB host page with its code; the
+six floating-point ones are still mostly interpreted: SSE and the x87 are not
+translated. There is no dynamic linking,
 no system call beyond `write` and `exit`, and no machine yet.
 
 ## The goal
@@ -94,7 +94,7 @@ real CPU does.
    block; a store to translated code, and to data beside it; blocks joined; returns
    and jumps through an operand found in a table. The record of the flags is written only where
    something can read it (R013 to R015); the integer instructions the primitives use
-   (R016, R017). Next: a block that goes on past a conditional jump; SSE; stores
+   (R016, R017); a block goes on past a conditional jump (R018). Next: SSE; stores
    beside code on 16 KB pages.
 
 One case is owed: the x87's square root when what is left over equals the root (the
