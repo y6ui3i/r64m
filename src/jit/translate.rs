@@ -344,6 +344,9 @@ struct Scan<'a> {
     budget: usize,
     /// The lowest and one past the highest address read.
     span: (u64, u64),
+    /// A conditional jump of the block was passed that the host's flags answer: the
+    /// flags are dead as a record, but the host's are asked for.
+    asked: bool,
 }
 
 impl Scan<'_> {
@@ -385,6 +388,7 @@ impl Scan<'_> {
                         if !answered || depth == 0 {
                             return false;
                         }
+                        self.asked = true;
                         return self.dead(next, None, 0, depth - 1) && self.dead(ins.imm as u64, None, 0, depth - 1);
                     }
                     // A jump or a call to a constant: on from there, in another block.
@@ -459,16 +463,21 @@ struct Emit<'a> {
     seen: Option<(u64, u64)>,
     /// The record that the jump now to be translated writes on the ways that need it.
     later: Option<Later>,
+    /// The instruction being translated must leave the host's flags as x86's would
+    /// be: its record is written (something may read the flags), or a jump of the
+    /// block will ask the host's.
+    host: bool,
 }
 
 impl Emit<'_> {
     /// Are the flags dead from `at` on (`Scan::dead`)? What is read to say so becomes
     /// part of what the block rests on, and must lie within a few pages of it.
     fn dead(&mut self, at: u64, host: Option<HostFlags>, room: usize) -> bool {
-        let mut scan = Scan { m: self.m, budget: 48, span: (at, at) };
+        let mut scan = Scan { m: self.m, budget: 48, span: (at, at), asked: false };
         if !scan.dead(at, host, room, 2) {
             return false;
         }
+        self.host = scan.asked;
         let (lo, hi) = scan.span;
         if lo < self.rip.saturating_sub(0x2000) || hi > self.rip.saturating_add(0x4000) {
             return false;
@@ -553,15 +562,19 @@ impl Emit<'_> {
         self.put(a64::movz(true, REC_KIND, (l.kind << 8 | l.bits as u64) as u16, 0));
     }
 
-    /// A way out of a conditional jump to `rip`: the record that was left for the
-    /// jump is written on this way unless the flags are dead from there.
-    fn leave_way(&mut self, rip: u64, n: usize, later: Option<Later>) {
-        if let Some(l) = later {
-            if !self.dead(rip, None, 0) {
-                self.write_later(l);
-            }
+    /// Must the record that was left for a conditional jump be written on its way to
+    /// `rip`? Not if the flags are dead from there.
+    fn way_needs(&mut self, rip: u64, later: Option<Later>) -> Option<Later> {
+        later.filter(|_| !self.dead(rip, None, 0))
+    }
+
+    /// A way out of a conditional jump to `rip`, the block's instructions counted
+    /// already: with the record that was left for the jump, if this way needs it.
+    fn leave_way(&mut self, rip: u64, later: Option<Later>) {
+        if let Some(l) = self.way_needs(rip, later) {
+            self.write_later(l);
         }
-        self.leave(rip, n);
+        self.leave_counted(rip);
     }
 
     /// Is this a byte register that is the second byte of a register (AH, CH, DH,
@@ -688,7 +701,11 @@ impl Emit<'_> {
             8 => self.put(a64::logic(wide, Logic::Ands, if self.skip { a64::ZR } else { REC_A }, a, src)),
             _ => {
                 self.put(a64::logic(wide, if kind == 1 { Logic::Orr } else { Logic::Eor }, to, a, src));
-                self.put(a64::logic(wide, Logic::Ands, a64::ZR, to, to));
+                // The host has no OR or XOR that sets its flags: a test of the result,
+                // where the flags are asked for.
+                if self.host {
+                    self.put(a64::logic(wide, Logic::Ands, a64::ZR, to, to));
+                }
             }
         }
         if let Some(at) = at {
@@ -717,6 +734,11 @@ impl Emit<'_> {
     /// there is one, and from then on this is one jump.
     fn leave(&mut self, rip: u64, n: usize) {
         self.put(a64::arith_imm(true, false, false, RAN, RAN, n as u32, false));
+        self.leave_counted(rip);
+    }
+
+    /// The same, the block's instructions having been counted already.
+    fn leave_counted(&mut self, rip: u64) {
         self.put(a64::b(1));
         self.put(a64::adr(T1, -4));
         self.put(a64::mem_imm(Size::X, Op::Store, T1, CPU, offset_of!(Cpu, left_from) as u32));
@@ -762,7 +784,7 @@ fn size(bits: u32) -> Size {
 /// one that is translated. With `exact` every record of the flags is written, whether
 /// or not anything can read them.
 pub fn translate(m: &Mem, rip: u64, exact: bool) -> Option<Built> {
-    let mut e = Emit { w: Vec::new(), flags: None, m, rip, exact, skip: false, seen: None, later: None };
+    let mut e = Emit { w: Vec::new(), flags: None, m, rip, exact, skip: false, seen: None, later: None, host: true };
     let mut starts = Vec::new();
     let mut at = rip;
     loop {
@@ -792,7 +814,11 @@ pub fn translate(m: &Mem, rip: u64, exact: bool) -> Option<Built> {
         // record is not needed either.)
         let room = MOST - starts.len();
         let sets = matches!(flags_of(&ins), Flags::All) || ins.op == 0xd3 && field >= 4;
+        e.host = true;
         e.skip = !e.exact && sets && e.dead(next, host_flags_of(&ins), room);
+        if !e.skip {
+            e.host = true;
+        }
         // Not dead, but read at once by a jump that the host's flags answer, with all
         // that a record needs still in the registers: the jump writes it, where needed.
         let later = e.later.take();
@@ -805,6 +831,7 @@ pub fn translate(m: &Mem, rip: u64, exact: bool) -> Option<Built> {
                 });
                 if answered {
                     e.skip = true;
+                    e.host = true;
                     e.later = Some(l);
                 }
             }
@@ -822,11 +849,21 @@ pub fn translate(m: &Mem, rip: u64, exact: bool) -> Option<Built> {
                 let src = if small { e.small(&ins, reg, T0) } else { reg };
                 e.alu(8, &ins, ins.rm, src);
             }
-            0x81 | 0x83 => {
-                // The constant in T3: an address may need T1 and T5, a value T2.
-                e.constant(T3, ins.imm as u64);
-                e.alu(field, &ins, ins.rm, T3);
-            }
+            0x81 | 0x83 => match ins.rm {
+                // ADD, SUB and CMP of a register and a constant the host's instruction
+                // can carry, where no record is written here (which would want the
+                // constant in a register).
+                Rm::Reg(d) if !small && e.skip && matches!(field, 0 | 5 | 7) && (0..4096).contains(&ins.imm) => {
+                    let to = if field == 7 { a64::ZR } else { d };
+                    e.put(a64::arith_imm(wide, field != 0, true, to, d, ins.imm as u32, false));
+                    e.flags = Some(if field == 0 { HostFlags::Add } else { HostFlags::Sub });
+                }
+                _ => {
+                    // The constant in T3: an address may need T1 and T5, a value T2.
+                    e.constant(T3, ins.imm as u64);
+                    e.alu(field, &ins, ins.rm, T3);
+                }
+            },
             0xf7 if field == 0 => {
                 e.constant(T3, ins.imm as u64);
                 e.alu(8, &ins, ins.rm, T3);
@@ -1049,6 +1086,10 @@ pub fn translate(m: &Mem, rip: u64, exact: bool) -> Option<Built> {
             }
             0x70..=0x7f | 0x180..=0x18f => {
                 let n = starts.len();
+                let target = ins.imm as u64;
+                // The block's instructions are counted once, before the jump, for both
+                // its ways (an addition that leaves the host's flags alone).
+                let count = a64::arith_imm(true, false, false, RAN, RAN, n as u32, false);
                 match e.flags.and_then(|f| condition(ins.op as u8 & 15, f)) {
                     // The host's flags do not say. (Never where a record was left for
                     // this jump: it was left because they do.)
@@ -1056,16 +1097,32 @@ pub fn translate(m: &Mem, rip: u64, exact: bool) -> Option<Built> {
                         assert!(later.is_none(), "a record left for a jump that reads it, at {at:#x}");
                         not_here = true;
                     }
-                    Some(Jump::Always) => e.leave_way(ins.imm as u64, n, later),
-                    Some(Jump::Never) => e.leave_way(next, n, later),
+                    Some(Jump::Always) => {
+                        e.put(count);
+                        e.leave_way(target, later);
+                    }
+                    Some(Jump::Never) => {
+                        e.put(count);
+                        e.leave_way(next, later);
+                    }
+                    // Back to this block's own start, with no record to write on the
+                    // way: the jump goes there itself, and a loop of one block is one
+                    // jump taken a round (R015). Not where each pass through a block
+                    // is to be checked.
+                    Some(Jump::If(cond)) if target == rip && !e.exact && e.way_needs(target, later).is_none() => {
+                        e.put(count);
+                        e.put(a64::b_cond(cond, -(e.w.len() as i32)));
+                        e.leave_way(next, later);
+                    }
                     Some(Jump::If(cond)) => {
                         // Over the way out for "not taken" to the one for "taken": the
                         // jump is written when it is known how far that is.
+                        e.put(count);
                         let jump_at = e.w.len();
                         e.put(a64::nop());
-                        e.leave_way(next, n, later);
+                        e.leave_way(next, later);
                         e.w[jump_at] = a64::b_cond(cond, (e.w.len() - jump_at) as i32);
-                        e.leave_way(ins.imm as u64, n, later);
+                        e.leave_way(target, later);
                     }
                 }
                 ended = true;

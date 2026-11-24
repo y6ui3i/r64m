@@ -420,6 +420,7 @@ fn differs(want: &Cpu, got: &Cpu, written: &[(u64, Vec<u8>)], m: &Mem) -> Option
 mod tests {
     use super::*;
     use crate::cpu::{RAX, RBX, RDX, RSI};
+    use crate::jit::a64;
     use crate::jit::translate::translate;
     use crate::mem::{R, W, X};
 
@@ -1470,8 +1471,64 @@ mod tests {
         //  0 again: add edx, 3; 3 cmp edx, ebx; 5 jne again; 7 syscall
         let m = guest(&[0x83, 0xc2, 0x03, 0x39, 0xda, 0x75, 0xf9, 0x0f, 0x05], &[]);
         let words = |exact| translate(&m, CODE, exact).unwrap().words.len();
-        // The add's record is left out in both (dead at the compare); the compare's is
-        // written once either way: before the jump, or on the way on.
-        assert_eq!(words(true) - words(false), 3);
+        // The add's record is left out (dead at the compare), and the compare's is
+        // written on the way on only. And since R015 the jump goes to the block's
+        // start itself (one way out the fewer: nine instructions), and the constant 3
+        // is carried by the ADD (one more): eleven fewer than with every record
+        // written and every way a way out.
+        assert_eq!(words(true) - words(false), 11);
+        // The loop is: add, cmp, the count, the jump back.
+        let built = translate(&m, CODE, false).unwrap();
+        assert_eq!(built.words[3], a64::b_cond(a64::Cond::Ne, -3));
+    }
+
+    #[test]
+    fn a_loop_of_one_block_goes_round_in_generated_code() {
+        // again: add edx, 3; xor esi, edx; sub ebx, 1; jne again; syscall. The jump
+        // back goes to the block's start itself: one entry, and the count is every
+        // round's.
+        let code = [0x83, 0xc2, 0x03, 0x31, 0xd6, 0x83, 0xeb, 0x01, 0x75, 0xf6, 0x0f, 0x05];
+        let rounds = 50_000u64;
+        for check in [true, false] {
+            let mut m = guest(&code, &[]);
+            let mut jit = Jit::new(check, 1).unwrap();
+            let c = both(&mut jit, &mut m, CODE, &|c| c.reg[RBX] = rounds);
+            assert_eq!(c.reg[RDX], 3 * rounds);
+            assert_eq!(c.steps, 4 * rounds + 1);
+            assert_eq!(jit.stats.in_blocks, 4 * rounds);
+            if !check {
+                assert_eq!(jit.stats.entered, 1);
+            }
+        }
+        // (The way back cannot need a record: everything from the block's start to
+        // the instruction that set the flags is the block's own, which has no reader
+        // of them before its last jump.)
+    }
+
+    #[test]
+    fn the_hosts_flags_are_made_where_a_jump_asks_them_though_no_record_is() {
+        // xor eax, ebx (and or, and sub with a constant); jz two; both ways then write
+        // the flags afresh, so no record is written at all: but the jump asks the
+        // host's flags, which the host's XOR and OR do not set by themselves.
+        //      (op); jz two; add esi, edi; mov edx, 1; jmp end
+        // two: add esi, edi; mov edx, 2;  end: syscall
+        let tail = [0x74, 0x09, 0x01, 0xfe, 0xba, 1, 0, 0, 0, 0xeb, 0x07, 0x01, 0xfe, 0xba, 2, 0, 0, 0, 0x0f, 0x05];
+        for (op, a, b, want) in [
+            (&[0x31, 0xd8][..], 5u64, 5u64, 2u64),
+            (&[0x31, 0xd8][..], 5, 4, 1),
+            (&[0x09, 0xd8][..], 0, 0, 2),
+            (&[0x09, 0xd8][..], 0, 8, 1),
+            (&[0x48, 0x31, 0xd8][..], 1 << 40, 1 << 40, 2),
+            (&[0x83, 0xe8, 0x05][..], 5, 0, 2),
+            (&[0x83, 0xf8, 0x05][..], 6, 0, 1),
+        ] {
+            let mut code = op.to_vec();
+            code.extend(tail);
+            let (c, _) = checked(&code, &[], &|c| {
+                c.reg[RAX] = a;
+                c.reg[RBX] = b;
+            });
+            assert_eq!(c.reg[RDX], want, "{op:02x?} of {a:#x} and {b:#x}");
+        }
     }
 }
