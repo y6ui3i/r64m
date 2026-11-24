@@ -411,6 +411,7 @@ fn differs(want: &Cpu, got: &Cpu, written: &[(u64, Vec<u8>)], m: &Mem) -> Option
 mod tests {
     use super::*;
     use crate::cpu::{RAX, RBX, RDX, RSI};
+    use crate::jit::translate::translate;
     use crate::mem::{R, W, X};
 
     const CODE: u64 = 0x40_0000;
@@ -996,6 +997,255 @@ mod tests {
                 assert!(jit.stats.blocks >= 1, "program {i}: no block");
                 assert!(jit.stats.beside + jit.stats.forgotten >= 1 || m.host_page() == 4096 && data_at != CODE + 0x800, "program {i}: the store did not fault");
             }
+        }
+    }
+
+    /// The end of a small program that shows its flags: a jump on condition `cc` that
+    /// picks RDX, and SYSCALL.
+    fn pick(cc: u8) -> [u8; 16] {
+        [0x70 | cc, 7, 0xba, 1, 0, 0, 0, 0xeb, 5, 0xba, 2, 0, 0, 0, 0x0f, 0x05]
+    }
+
+    /// Runs each instruction of `list` under every condition from the registers that
+    /// `set` gives, by blocks each checked and by blocks joined, held to the
+    /// interpreter (registers, flags, memory, count). `data` begins the page at RSI.
+    fn under_every_condition(list: &[&[u8]], data: &[u8], set: &dyn Fn(&mut Cpu)) {
+        // All of them one after another in one memory, each at its own address.
+        let mut code = Vec::new();
+        let mut programs = Vec::new();
+        for ins in list {
+            for cc in 0..16 {
+                programs.push(CODE + code.len() as u64);
+                code.extend(*ins);
+                code.extend(pick(cc));
+            }
+        }
+        for check in [true, false] {
+            let mut m = guest(&code, data);
+            let mut jit = Jit::new(check, 1).unwrap();
+            for &rip in &programs {
+                // The data is written by some: put back for each.
+                m.write_bytes(DATA, data).unwrap();
+                both(&mut jit, &mut m, rip, set);
+            }
+            assert!(jit.stats.entered as usize >= programs.len());
+        }
+    }
+
+    #[test]
+    fn operands_of_8_and_16_bits() {
+        // op r/m, r and op r, r/m on AL and BL, on AH and BL, on AX and BX, and on
+        // memory; with constants; each under every condition, on pairs that make each
+        // flag come out both ways at 8 and at 16 bits.
+        let mut list: Vec<Vec<u8>> = Vec::new();
+        for op in [0x00u8, 0x08, 0x20, 0x28, 0x30, 0x38, 0x84] {
+            list.push(vec![op, 0xd8]); // al, bl
+            list.push(vec![op, 0xdc]); // ah, bl
+            list.push(vec![op, 0xfc]); // ah, bh
+            list.push(vec![op, 0x1e]); // [rsi], bl
+            list.push(vec![op, 0x7e, 0x01]); // [rsi + 1], bh
+            list.push(vec![0x40, op, 0xf8]); // al, dil (REX: no AH)
+            list.push(vec![0x66, op | 1, 0xd8]); // ax, bx
+            list.push(vec![0x66, op | 1, 0x1e]); // [rsi], bx
+            if op != 0x84 {
+                list.push(vec![op | 2, 0xc3]); // al, bl the other way
+                list.push(vec![op | 2, 0x26]); // ah, [rsi]
+                list.push(vec![0x66, op | 3, 0x06]); // ax, [rsi]
+            }
+        }
+        for field in [0u8, 1, 4, 5, 6, 7] {
+            list.push(vec![0x80, 0xc0 | field << 3, 0x81]); // al, 81h
+            list.push(vec![0x80, 0xc4 | field << 3, 0x7f]); // ah, 7fh
+            list.push(vec![0x80, 0x06 | field << 3, 0xff]); // byte [rsi], ffh
+            list.push(vec![0x66, 0x81, 0xc0 | field << 3, 0x00, 0x80]); // ax, 8000h
+            list.push(vec![0x66, 0x83, 0xc0 | field << 3, 0xff]); // ax, -1
+            list.push(vec![0x66, 0x81, 0x06 | field << 3, 0xff, 0x7f]); // word [rsi], 7fffh
+        }
+        list.push(vec![0xf6, 0xc3, 0x80]); // test bl, 80h
+        list.push(vec![0xf6, 0xc7, 0x01]); // test bh, 1
+        list.push(vec![0x66, 0xf7, 0xc3, 0x00, 0x80]); // test bx, 8000h
+        list.push(vec![0xf6, 0x06, 0x80]); // test byte [rsi], 80h
+        let list: Vec<&[u8]> = list.iter().map(|v| v.as_slice()).collect();
+        for (a, b) in [(0x1122_3344_5566_0000u64, 0u64), (0x7f7f, 0x0101), (0x8080, 0x8080), (0xffff, 0x0001), (0x00ff, 0xff01), (0x1234, 0x1234), (0xaaaa_aaaa_aaaa_8001, 0x5555_5555_5555_7fff)] {
+            under_every_condition(&list, &[0x80, 0x7f, 0xff, 0x01], &|c| {
+                c.reg[RAX] = a;
+                c.reg[RBX] = b;
+                // DIL is not BH, which has its number without REX.
+                c.reg[7] = !b ^ 0x35;
+                c.reg[RSI] = DATA;
+            });
+        }
+    }
+
+    #[test]
+    fn moves_of_8_and_16_bits_leave_the_rest() {
+        let set = |c: &mut Cpu| {
+            c.reg[RAX] = 0x1111_2222_3333_4455;
+            c.reg[RBX] = 0xaaaa_bbbb_cccc_ddee;
+            c.reg[RSI] = DATA;
+        };
+        let data = [0x01u8, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+        let run = |code: &[u8]| {
+            let mut whole = code.to_vec();
+            whole.extend([0x0f, 0x05]);
+            let (c, m) = checked(&whole, &data, &set);
+            (c.reg[RAX], m.read_u64(DATA).unwrap())
+        };
+        let (a, d) = (0x1111_2222_3333_4455u64, 0x0807_0605_0403_0201u64);
+        // To a register: only its low byte, its second byte, or its low 16 bits.
+        assert_eq!(run(&[0x88, 0xd8]), (a & !0xff | 0xee, d)); // mov al, bl
+        assert_eq!(run(&[0x88, 0xfc]), (a & !0xff00 | 0xdd00, d)); // mov ah, bh
+        assert_eq!(run(&[0x88, 0xdc]), (a & !0xff00 | 0xee00, d)); // mov ah, bl
+        assert_eq!(run(&[0x88, 0xf8]), (a & !0xff | 0xdd, d)); // mov al, bh
+        assert_eq!(run(&[0x66, 0x89, 0xd8]), (a & !0xffff | 0xddee, d)); // mov ax, bx
+        assert_eq!(run(&[0x8a, 0x46, 0x02]), (a & !0xff | 0x03, d)); // mov al, [rsi + 2]
+        assert_eq!(run(&[0x8a, 0x66, 0x02]), (a & !0xff00 | 0x0300, d)); // mov ah, [rsi + 2]
+        assert_eq!(run(&[0x66, 0x8b, 0x46, 0x02]), (a & !0xffff | 0x0403, d)); // mov ax, [rsi + 2]
+        assert_eq!(run(&[0xc6, 0xc0, 0x99]), (a & !0xff | 0x99, d)); // mov al, 99h
+        assert_eq!(run(&[0xc6, 0xc4, 0x99]), (a & !0xff00 | 0x9900, d)); // mov ah, 99h
+        assert_eq!(run(&[0x66, 0xc7, 0xc0, 0x34, 0x12]), (a & !0xffff | 0x1234, d)); // mov ax, 1234h
+        // To memory: one byte or two, the neighbours left.
+        assert_eq!(run(&[0x88, 0x5e, 0x03]), (a, d & !0xff00_0000 | 0xee00_0000)); // mov [rsi + 3], bl
+        assert_eq!(run(&[0x88, 0x7e, 0x03]), (a, d & !0xff00_0000 | 0xdd00_0000)); // mov [rsi + 3], bh
+        assert_eq!(run(&[0x66, 0x89, 0x5e, 0x03]), (a, d & !0xff_ff00_0000 | 0xdd_ee00_0000)); // mov [rsi + 3], bx
+        assert_eq!(run(&[0xc6, 0x46, 0x03, 0x99]), (a, d & !0xff00_0000 | 0x9900_0000)); // mov byte [rsi + 3], 99h
+        assert_eq!(run(&[0x66, 0xc7, 0x46, 0x03, 0x34, 0x12]), (a, d & !0xff_ff00_0000 | 0x12_3400_0000));
+        // A displacement too large for one instruction, with AH: both need scratch.
+        // mov [rsi + 10000h], ah, with RSI that far under the data.
+        let (c, m) = checked(&[0x88, 0xa6, 0x00, 0x00, 0x01, 0x00, 0x0f, 0x05], &data, &|c| {
+            c.reg[RAX] = a;
+            c.reg[RSI] = DATA - 0x1_0000;
+        });
+        assert_eq!((c.reg[RAX], m.read_u64(DATA).unwrap()), (a, d & !0xff | 0x44));
+        // NOT of a byte, of its second byte, of 16 bits, of memory.
+        assert_eq!(run(&[0xf6, 0xd0]), (a ^ 0xff, d));
+        assert_eq!(run(&[0xf6, 0xd4]), (a ^ 0xff00, d));
+        assert_eq!(run(&[0x66, 0xf7, 0xd0]), (a ^ 0xffff, d));
+        assert_eq!(run(&[0xf6, 0x56, 0x01]), (a, d ^ 0xff00));
+        assert_eq!(run(&[0x66, 0xf7, 0x16]), (a, d ^ 0xffff));
+        assert_eq!(run(&[0xf7, 0x16]), (a, d ^ 0xffff_ffff));
+        assert_eq!(run(&[0x48, 0xf7, 0x16]), (a, !d));
+        assert_eq!(run(&[0xf7, 0xd0]), (!a & 0xffff_ffff, d));
+        assert_eq!(run(&[0x48, 0xf7, 0xd0]), (!a, d));
+        // CWDE, CDQE; CDQ and CQO (seen in RDX, moved to RAX).
+        assert_eq!(run(&[0x98]).0, 0x4455);
+        assert_eq!(run(&[0x48, 0x98]).0, 0x3333_4455);
+        assert_eq!(run(&[0xb8, 0x00, 0x80, 0x00, 0x00, 0x98]).0, 0xffff_8000);
+        assert_eq!(run(&[0xb8, 0x00, 0x00, 0x00, 0x80, 0x48, 0x98]).0, 0xffff_ffff_8000_0000);
+        assert_eq!(run(&[0xb8, 0x00, 0x00, 0x00, 0x80, 0x99, 0x89, 0xd0]).0, 0xffff_ffff);
+        assert_eq!(run(&[0x99, 0x48, 0x89, 0xd0]).0, 0);
+        assert_eq!(run(&[0x48, 0x89, 0xd8, 0x48, 0x99, 0x48, 0x89, 0xd0]).0, u64::MAX);
+    }
+
+    #[test]
+    fn shifts_and_their_flags() {
+        // SHL, SHR, SAR (and SAL, which is SHL) of EAX and of RAX by constants and by
+        // one, each under every condition.
+        let mut list: Vec<Vec<u8>> = Vec::new();
+        for field in [4u8, 5, 6, 7] {
+            for n in [0u8, 1, 2, 7, 31, 32, 33, 63, 64, 0xff] {
+                list.push(vec![0xc1, 0xc0 | field << 3, n]);
+                list.push(vec![0x48, 0xc1, 0xc0 | field << 3, n]);
+            }
+            list.push(vec![0xd1, 0xc0 | field << 3]);
+            list.push(vec![0x48, 0xd1, 0xc0 | field << 3]);
+            // By CL: of EAX, of RAX, and of RCX itself.
+            list.push(vec![0xd3, 0xc0 | field << 3]);
+            list.push(vec![0x48, 0xd3, 0xc0 | field << 3]);
+            list.push(vec![0x48, 0xd3, 0xc1 | field << 3]);
+            // And with a compare before, whose flags a shift by nothing leaves.
+            list.push(vec![0x39, 0xd8, 0xd3, 0xc0 | field << 3]);
+            list.push(vec![0x39, 0xd8, 0x48, 0xd3, 0xc0 | field << 3]);
+        }
+        let list: Vec<&[u8]> = list.iter().map(|v| v.as_slice()).collect();
+        for value in [0u64, 1, 0x8000_0000, 0x4000_0000, 0xffff_ffff, 1 << 63, 0x4000_0000_0000_0001, 0xc000_0000_c000_0001, u64::MAX] {
+            for count in [0u64, 1, 5, 31, 32, 33, 63, 64, 0x141] {
+                under_every_condition(&list, &[], &|c| {
+                    c.reg[RAX] = value;
+                    c.reg[RBX] = value ^ 1;
+                    c.reg[crate::cpu::RCX] = count;
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn rotations_where_their_flags_are_not_read_and_where_they_are() {
+        // ROL and ROR by constants, by one and by CL, of EAX and RAX: followed by an
+        // instruction that writes all the flags (translated: the block goes on through
+        // the rotation), and followed at once by a jump that reads them (not
+        // translated: the interpreter's). Either way the end is the interpreter's.
+        let mut list: Vec<Vec<u8>> = Vec::new();
+        for field in [0u8, 1] {
+            for n in [0u8, 1, 7, 13, 31, 32, 33, 63, 64] {
+                for tail in [&[0x39, 0xd8][..], &[][..], &[0x89, 0xc7, 0x85, 0xff][..]] {
+                    for rex in [&[][..], &[0x48][..]] {
+                        let mut v = rex.to_vec();
+                        v.extend([0xc1, 0xc0 | field << 3, n]);
+                        v.extend(tail);
+                        list.push(v);
+                    }
+                }
+            }
+            for tail in [&[0x39, 0xd8][..], &[][..]] {
+                for first in [&[0xd1][..], &[0x48, 0xd1][..], &[0xd3][..], &[0x48, 0xd3][..]] {
+                    let mut v = first.to_vec();
+                    v.push(0xc0 | field << 3);
+                    v.extend(tail);
+                    list.push(v);
+                }
+            }
+        }
+        let list: Vec<&[u8]> = list.iter().map(|v| v.as_slice()).collect();
+        for value in [1u64, 0x8000_0001, 0x1234_5678_9abc_def0, 1 << 63, u64::MAX - 1] {
+            for count in [0u64, 1, 13, 31, 32, 63, 64, 0x7f] {
+                under_every_condition(&list, &[], &|c| {
+                    c.reg[RAX] = value;
+                    c.reg[RBX] = 0x1234;
+                    c.reg[crate::cpu::RCX] = count;
+                });
+            }
+        }
+        // That a rotation whose flags die is in a block, and one whose flags are read
+        // is not: rol eax, 7; cmp eax, ebx; jne; ... against rol eax, 7; jc ...
+        let block_of = |code: &[u8]| {
+            let m = guest(code, &[]);
+            translate(&m, CODE).map(|b| b.starts.len())
+        };
+        assert_eq!(block_of(&[0xc1, 0xc0, 0x07, 0x39, 0xd8, 0x75, 0x00, 0x0f, 0x05]), Some(3));
+        assert_eq!(block_of(&[0x89, 0xd8, 0xc1, 0xc0, 0x07, 0x72, 0x00, 0x0f, 0x05]), Some(1));
+        assert_eq!(block_of(&[0xc1, 0xc0, 0x07, 0x72, 0x00, 0x0f, 0x05]), None);
+        // A shift by CL between may leave the flags: the rotation's are not dead.
+        assert_eq!(block_of(&[0x89, 0xd8, 0xc1, 0xc0, 0x07, 0xd3, 0xe0, 0x0f, 0x05]), Some(1));
+    }
+
+    #[test]
+    fn bit_scans_and_negation() {
+        // BSF, BSR, and both with F3h in front (the same, on a CPU without TZCNT and
+        // LZCNT), of EBX and RBX into EAX and RAX, of memory; of a zero the register is
+        // left. NEG of EAX and of RAX.
+        let list: &[&[u8]] = &[
+            &[0x0f, 0xbc, 0xc3],
+            &[0x0f, 0xbd, 0xc3],
+            &[0x48, 0x0f, 0xbc, 0xc3],
+            &[0x48, 0x0f, 0xbd, 0xc3],
+            &[0xf3, 0x0f, 0xbc, 0xc3],
+            &[0xf3, 0x48, 0x0f, 0xbd, 0xc3],
+            &[0x0f, 0xbc, 0x06],
+            &[0x48, 0x0f, 0xbd, 0x06],
+            &[0x48, 0x0f, 0xbc, 0xc0],
+            &[0x48, 0x0f, 0xbd, 0xdb],
+            &[0xf7, 0xd8],
+            &[0x48, 0xf7, 0xd8],
+            &[0xf7, 0xdb],
+        ];
+        for value in [0u64, 1, 0x80, 0x8000_0000, 0x1_0000_0000, 1 << 63, 0xffff_0000_0000_0000, 0x7fff_ffff, u64::MAX] {
+            under_every_condition(list, &value.to_le_bytes(), &|c| {
+                c.reg[RAX] = 0x1122_3344_5566_7788;
+                c.reg[RBX] = value;
+                c.reg[RSI] = DATA;
+            });
+            under_every_condition(&[&[0xf7, 0xd8], &[0x48, 0xf7, 0xd8]], &[], &|c| c.reg[RAX] = value);
         }
     }
 }

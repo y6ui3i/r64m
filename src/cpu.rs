@@ -197,12 +197,116 @@ fn alu_flags(op: u8, a: u64, b: u64, w: u32, carry: bool) -> (u64, u64) {
     (r, f | szp(r, w))
 }
 
+/// kind: 0 ROL 1 ROR 2 RCL 3 RCR 4 SHL 5 SHR 6 SAL 7 SAR. The count uses its low 6
+/// bits for a 64-bit operand and its low 5 for any other.
+///
+/// The manual defines OF for a count of one only. The CPU these flags are taken
+/// from sets it, at every count, to what a count of one would have given for the
+/// same operand; so OF here is worked out from the operand and not from the result.
+/// The one exception is ROL and ROR of a register by a constant larger than one
+/// (`quiet`), which leave OF as it was. AF is cleared by the shifts and left alone
+/// by the rotations.
+pub fn shift_op(kind: u8, v: u64, count: u64, w: u32, quiet: bool, f: &mut u64) -> u64 {
+let set = |f: &mut u64, flag: u64, on: bool| if on { *f |= flag } else { *f &= !flag };
+    let (m, s) = (mask(w), msb(w));
+    let bits = w as u64;
+    let v = v & m;
+    let mut n = count & if w == 64 { 0x3f } else { 0x1f };
+    if n == 0 {
+        return v;
+    }
+    let top = v & s != 0;
+    let second = v & s >> 1 != 0;
+    let mut r = v;
+    let mut cf = *f & CF != 0;
+    match kind {
+        0 => {
+            r = if w == 64 { v.rotate_left(n as u32) } else { (v << n % bits | v >> (bits - n % bits)) & m };
+            cf = r & 1 != 0;
+            if n == 1 || !quiet {
+                set(f, OF, top != second);
+            }
+        }
+        1 => {
+            r = if w == 64 { v.rotate_right(n as u32) } else { (v >> n % bits | v << (bits - n % bits)) & m };
+            cf = r & s != 0;
+            if n == 1 || !quiet {
+                set(f, OF, top != (v & 1 != 0));
+            }
+        }
+        2 | 3 => {
+            // Through the carry: one bit at a time, of a count taken modulo the
+            // width and one. A whole turn changes nothing, the flags included.
+            n %= bits + 1;
+            if n == 0 {
+                return v;
+            }
+            set(f, OF, top != if kind == 2 { second } else { cf });
+            for _ in 0..n {
+                if kind == 2 {
+                    let out = r & s != 0;
+                    r = (r << 1 | cf as u64) & m;
+                    cf = out;
+                } else {
+                    let out = r & 1 != 0;
+                    r = r >> 1 | if cf { s } else { 0 };
+                    cf = out;
+                }
+            }
+        }
+        5 => {
+            if n > bits {
+                cf = false;
+                r = 0;
+            } else {
+                cf = v >> (n - 1) & 1 != 0;
+                r = if n == bits { 0 } else { v >> n };
+            }
+            set(f, OF, top);
+        }
+        7 => {
+            if n >= bits {
+                cf = top;
+                r = if top { m } else { 0 };
+            } else {
+                cf = v >> (n - 1) & 1 != 0;
+                r = v >> n;
+                if top {
+                    r |= m << (bits - n) & m;
+                }
+            }
+            set(f, OF, false);
+        }
+        _ => {
+            if n > bits {
+                cf = false;
+                r = 0;
+            } else {
+                cf = v >> (bits - n) & 1 != 0;
+                r = if n == bits { 0 } else { v << n & m };
+            }
+            set(f, OF, top != second);
+        }
+    }
+    set(f, CF, cf);
+    if kind >= 4 {
+        *f = *f & !(ZF | SF | PF | AF) | szp(r, w);
+    }
+    r
+}
+
 /// The kinds of the JIT's record of the flags (`Cpu::flag_rec`): the first word is
 /// the kind times 256 and the operands' width in bits, or zero when RFLAGS is as it
 /// should be; the two others are the operands, or for `REC_LOGIC` the result.
 pub const REC_ADD: u64 = 1;
 pub const REC_SUB: u64 = 2;
 pub const REC_LOGIC: u64 = 3;
+/// A shift by a count that is not zero: this and the shift's kind (4 SHL, 5 SHR, 7
+/// SAR); the operands are what was shifted and by how much.
+pub const REC_SHIFT: u64 = 0x10;
+/// BSF and BSR: the operand that was scanned.
+pub const REC_BSF: u64 = 0x20;
+pub const REC_BSR: u64 = 0x21;
 
 /// Works the flags out from the JIT's record, if generated code left one, so that
 /// RFLAGS is as the interpreter would have left it.
@@ -212,11 +316,22 @@ pub fn settle(c: &mut Cpu) {
         return;
     }
     let w = (kind & 0xff) as u32;
-    let (_, f) = match kind >> 8 {
-        REC_ADD => alu_flags(0, a, b, w, false),
-        REC_SUB => alu_flags(5, a, b, w, false),
+    let f = match kind >> 8 {
+        REC_ADD => alu_flags(0, a, b, w, false).1,
+        REC_SUB => alu_flags(5, a, b, w, false).1,
         // A result and nothing: OR's flags are the result's.
-        _ => alu_flags(1, a, 0, w, false),
+        REC_LOGIC => alu_flags(1, a, 0, w, false).1,
+        REC_BSF | REC_BSR => {
+            // Of a zero: ZF and PF. Else the parity of the bit's number.
+            let v = a & mask(w);
+            let n = if kind >> 8 == REC_BSF { v.trailing_zeros() } else { 63u32.wrapping_sub(v.leading_zeros()) };
+            if v == 0 { ZF | PF } else { szp(n as u64, 8) & PF }
+        }
+        shift => {
+            let mut f = c.rflags;
+            shift_op((shift - REC_SHIFT) as u8, a, b, w, false, &mut f);
+            f & ARITH
+        }
     };
     c.rflags = c.rflags & !ARITH | f;
     c.flag_rec[0] = 0;
@@ -542,101 +657,9 @@ impl Run<'_> {
         r
     }
 
-    /// kind: 0 ROL 1 ROR 2 RCL 3 RCR 4 SHL 5 SHR 6 SAL 7 SAR. The count uses its low 6
-    /// bits for a 64-bit operand and its low 5 for any other.
-    ///
-    /// The manual defines OF for a count of one only. The CPU these flags are taken
-    /// from sets it, at every count, to what a count of one would have given for the
-    /// same operand; so OF here is worked out from the operand and not from the result.
-    /// The one exception is ROL and ROR of a register by a constant larger than one
-    /// (`quiet`), which leave OF as it was. AF is cleared by the shifts and left alone
-    /// by the rotations.
+    #[inline(always)]
     fn shift(&mut self, kind: u8, v: u64, count: u64, w: u32, quiet: bool) -> u64 {
-        let (m, s) = (mask(w), msb(w));
-        let bits = w as u64;
-        let v = v & m;
-        let mut n = count & if w == 64 { 0x3f } else { 0x1f };
-        if n == 0 {
-            return v;
-        }
-        let top = v & s != 0;
-        let second = v & s >> 1 != 0;
-        let mut r = v;
-        let mut cf = self.flag(CF);
-        match kind {
-            0 => {
-                r = if w == 64 { v.rotate_left(n as u32) } else { (v << n % bits | v >> (bits - n % bits)) & m };
-                cf = r & 1 != 0;
-                if n == 1 || !quiet {
-                    self.set_flag(OF, top != second);
-                }
-            }
-            1 => {
-                r = if w == 64 { v.rotate_right(n as u32) } else { (v >> n % bits | v << (bits - n % bits)) & m };
-                cf = r & s != 0;
-                if n == 1 || !quiet {
-                    self.set_flag(OF, top != (v & 1 != 0));
-                }
-            }
-            2 | 3 => {
-                // Through the carry: one bit at a time, of a count taken modulo the
-                // width and one. A whole turn changes nothing, the flags included.
-                n %= bits + 1;
-                if n == 0 {
-                    return v;
-                }
-                self.set_flag(OF, top != if kind == 2 { second } else { cf });
-                for _ in 0..n {
-                    if kind == 2 {
-                        let out = r & s != 0;
-                        r = (r << 1 | cf as u64) & m;
-                        cf = out;
-                    } else {
-                        let out = r & 1 != 0;
-                        r = r >> 1 | if cf { s } else { 0 };
-                        cf = out;
-                    }
-                }
-            }
-            5 => {
-                if n > bits {
-                    cf = false;
-                    r = 0;
-                } else {
-                    cf = v >> (n - 1) & 1 != 0;
-                    r = if n == bits { 0 } else { v >> n };
-                }
-                self.set_flag(OF, top);
-            }
-            7 => {
-                if n >= bits {
-                    cf = top;
-                    r = if top { m } else { 0 };
-                } else {
-                    cf = v >> (n - 1) & 1 != 0;
-                    r = v >> n;
-                    if top {
-                        r |= m << (bits - n) & m;
-                    }
-                }
-                self.set_flag(OF, false);
-            }
-            _ => {
-                if n > bits {
-                    cf = false;
-                    r = 0;
-                } else {
-                    cf = v >> (bits - n) & 1 != 0;
-                    r = if n == bits { 0 } else { v << n & m };
-                }
-                self.set_flag(OF, top != second);
-            }
-        }
-        self.set_flag(CF, cf);
-        if kind >= 4 {
-            self.c.rflags = self.c.rflags & !(ZF | SF | PF | AF) | szp(r, w);
-        }
-        r
+        shift_op(kind, v, count, w, quiet, &mut self.c.rflags)
     }
 
     /// SHLD (`left`) and SHRD: shifts `dst` by `count` bits, filling from `src`. OF as

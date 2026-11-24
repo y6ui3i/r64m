@@ -147,6 +147,39 @@ pub fn asr(wide: bool, rd: u8, rn: u8, by: u32) -> u32 {
     bitfield(wide, true, rd, rn, by, if wide { 63 } else { 31 })
 }
 
+/// A shift or a rotation to the right by a register's low bits (five of them for a
+/// 32-bit register, six for a 64-bit one): LSLV, LSRV, ASRV, RORV.
+#[derive(Clone, Copy)]
+pub enum Shift {
+    Lsl = 0,
+    Lsr = 1,
+    Asr = 2,
+    Ror = 3,
+}
+
+pub fn shift_reg(wide: bool, op: Shift, rd: u8, rn: u8, rm: u8) -> u32 {
+    sf(wide) | 0x1ac0_2000 | (op as u32) << 10 | r(rm) << 16 | r(rn) << 5 | r(rd)
+}
+
+/// A rotation to the right by a constant less than the register's width.
+pub fn ror(wide: bool, rd: u8, rn: u8, by: u32) -> u32 {
+    sf(wide) | 0x1380_0000 | (wide as u32) << 22 | r(rn) << 16 | by << 10 | r(rn) << 5 | r(rd)
+}
+
+/// How many zero bits a register has above its highest one; and its bits end for end.
+pub fn clz(wide: bool, rd: u8, rn: u8) -> u32 {
+    sf(wide) | 0x5ac0_1000 | r(rn) << 5 | r(rd)
+}
+
+pub fn rbit(wide: bool, rd: u8, rn: u8) -> u32 {
+    sf(wide) | 0x5ac0_0000 | r(rn) << 5 | r(rd)
+}
+
+/// The low `width` bits of `rn` put into `rd` at bit `lsb`, the rest of `rd` kept.
+pub fn bfi(rd: u8, rn: u8, lsb: u32, width: u32) -> u32 {
+    0xb340_0000 | (64 - lsb) % 64 << 16 | (width - 1) << 10 | r(rn) << 5 | r(rd)
+}
+
 /// `width` bits of a 64-bit register from bit `lsb` up, the rest zero.
 pub fn ubfx(rd: u8, rn: u8, lsb: u32, width: u32) -> u32 {
     bitfield(true, false, rd, rn, lsb, lsb + width - 1)
@@ -325,6 +358,30 @@ mod tests {
             (cbz(true, false, 3, 4), 0xb4000083, "cbz x3, .+0x10"),
             (cbz(false, true, 3, -4), 0x35ffff83, "cbnz w3, .-0x10"),
             (br(16), 0xd61f0200, "br x16"),
+            (shift_reg(true, Shift::Lsl, 1, 2, 3), 0x9ac32041, "lslv x1, x2, x3"),
+            (shift_reg(false, Shift::Lsl, 1, 2, 3), 0x1ac32041, "lslv w1, w2, w3"),
+            (shift_reg(true, Shift::Lsr, 1, 2, 3), 0x9ac32441, "lsrv x1, x2, x3"),
+            (shift_reg(false, Shift::Lsr, 1, 2, 3), 0x1ac32441, "lsrv w1, w2, w3"),
+            (shift_reg(true, Shift::Asr, 1, 2, 3), 0x9ac32841, "asrv x1, x2, x3"),
+            (shift_reg(false, Shift::Asr, 1, 2, 3), 0x1ac32841, "asrv w1, w2, w3"),
+            (shift_reg(true, Shift::Ror, 1, 2, 3), 0x9ac32c41, "rorv x1, x2, x3"),
+            (shift_reg(false, Shift::Ror, 1, 2, 3), 0x1ac32c41, "rorv w1, w2, w3"),
+            (ror(true, 1, 2, 13), 0x93c23441, "ror x1, x2, #13"),
+            (ror(false, 1, 2, 7), 0x13821c41, "ror w1, w2, #7"),
+            (clz(true, 1, 2), 0xdac01041, "clz x1, x2"),
+            (clz(false, 1, 2), 0x5ac01041, "clz w1, w2"),
+            (rbit(true, 1, 2), 0xdac00041, "rbit x1, x2"),
+            (rbit(false, 1, 2), 0x5ac00041, "rbit w1, w2"),
+            (bfi(1, 29, 0, 8), 0xb3401fa1, "bfi x1, x29, #0, #8"),
+            (bfi(1, 29, 8, 8), 0xb3781fa1, "bfi x1, x29, #8, #8"),
+            (bfi(1, 29, 0, 16), 0xb3403fa1, "bfi x1, x29, #0, #16"),
+            (arith(false, true, true, 1, ZR, 3, 0), 0x6b0303e1, "negs w1, w3"),
+            (arith(true, true, true, 1, ZR, 3, 0), 0xeb0303e1, "negs x1, x3"),
+            (arith(false, true, false, 17, ZR, 1, 0), 0x4b0103f1, "neg w17, w1"),
+            (lsl(false, 29, 1, 24), 0x53081c3d, "lsl w29, w1, #24"),
+            (lsr(false, 29, 29, 16), 0x53107fbd, "lsr w29, w29, #16"),
+            (arith(false, false, true, 29, 29, 30, 0), 0x2b1e03bd, "adds w29, w29, w30"),
+            (ubfx(16, 3, 8, 8), 0xd3483c70, "ubfx x16, x3, #8, #8"),
             (ubfx(17, 16, 0, 14), 0xd3403611, "ubfx x17, x16, #0, #14"),
             (ubfx(1, 2, 3, 5), 0xd3431c41, "ubfx x1, x2, #3, #5"),
             (arith(true, false, false, 17, 28, 17, 4), 0x8b111391, "add x17, x28, x17, lsl #4"),
@@ -349,7 +406,7 @@ mod tests {
         for (ours, theirs, name) in cases {
             assert_eq!(ours, theirs, "{name}: {ours:08x}, the assembler {theirs:08x}");
         }
-        assert_eq!(cases.len(), 101);
+        assert_eq!(cases.len(), 125);
     }
 
     #[test]
