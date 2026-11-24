@@ -802,3 +802,53 @@ The card, written before the run.
 - **Cut-off**: R009's race at 200 rounds again for the seven, and the counts
   (`--jit-stats`) for all 23 at 200 rounds. macOS, which is where it happens; Linux is
   run for the tests only.
+
+**Result: the blocks stay. Three of the five run in under two seconds where they took
+one to four minutes, and are level with QEMU or past it; the two others and
+`p_funcptr` keep their blocks too and are slow for other reasons, which are counted
+here and are the next entries'.**
+
+On a MacBook Air (Apple M1), macOS 27. 200 rounds, r64m `--jit` beside g64m `--jit`
+(two at once, three runs, the least, less a program that does nothing); QEMU's and
+Rosetta's times for the same builds are those taken earlier today (g64m's E186 table).
+
+| 200 rounds | guest instructions | r64m `--jit` | | g64m `--jit` | QEMU | Rosetta | QEMU's time / r64m's | in blocks | entries | stores beside code | forgotten |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| p_loop | 3,005 M | 0.545 s | 5,511 M/s | 0.212 s | 0.773 s | 0.240 s | **1.42** | 99.8% | 1.2 M | 0 | 0 |
+| p_pointer | 6,595 M | 1.860 s | 3,545 M/s | 1.413 s | 1.900 s | 0.723 s | **1.02** | 99.6% | 2.3 M | 200 | 0 |
+| p_if | 4,602 M | 1.723 s | 2,672 M/s | 1.416 s | 1.873 s | 0.997 s | **1.09** | 99.7% | 0.9 M | 200 | 0 |
+| p_recursion | 2,434 M | 3.656 s | 666 M/s | 0.565 s | 1.567 s | 0.810 s | 0.43 | 100.0% | 144 M | 0 | 0 |
+| p_rotate | 17,822 M | 65.6 s | 272 M/s | 3.399 s | 4.403 s | 3.060 s | 0.07 | 78.7% | 103 M | 200 | 0 |
+| p_index | 5,986 M | 28.0 s | 213 M/s | 1.078 s | 1.723 s | 0.420 s | 0.06 | 75.6% | 131 M | 200 | 0 |
+| p_funcptr | 4,191 M | 48.1 s | 87 M/s | 3.424 s | 9.123 s | 2.867 s | 0.19 | 79.3% | 984 M | 200 | 0 |
+
+- **The hypothesis held**: no page's blocks were forgotten; each of the five made its
+  200 stores beside the code (one a round, the line it prints) and kept what it has at
+  one round. `p_if` went from 62.9 s to 1.72 s, `p_pointer` from 98.8 s to 1.86 s.
+- **Three primitives are now at QEMU's speed or past it** on this Mac: `p_loop` 1.42
+  times, `p_if` 1.09, `p_pointer` 1.02. g64m's JIT is still ahead of r64m's on each
+  (2.6, 1.2 and 1.3 times), and Rosetta ahead of both.
+- **What holds the others back is not this entry's subject, and is now counted**:
+  - `p_funcptr` goes into generated code 984 million times for 4,191 million
+    instructions, `p_recursion` 144 million times for 2,434: a return and a call
+    through a register have no constant target, so each comes out to Rust to be looked
+    up in a hash table. That is the whole of `p_recursion`'s distance from QEMU (it is
+    all in blocks) and most of `p_funcptr`'s.
+  - `p_index` and `p_rotate` have a fifth to a quarter of their instructions not
+    translated, and go in and out over a hundred million times around them.
+- **`p_recursion` is not steady**: 2.03 s in R009's race and 3.66 s here, the same
+  build of the same program but for this entry's change, which is not on its path (it
+  writes nothing beside code). Not explained; to be timed again by itself before
+  anything is concluded from it.
+- **Two defects were found by this entry and put right in it**, each with a test that
+  fails without the fix: an instruction run again after its store faulted began with
+  the flags and registers it had itself changed (found by one case, `j_more`, giving a
+  wrong exit code on macOS only); and code whose blocks were forgotten was never
+  translated again. Neither was this entry's hypothesis; both were there since R008.
+- All 62 programs give the interpreter's output, exit code and count in four JIT
+  modes on macOS and in the Linux container; 50 unit tests.
+
+**Next.** Two things, each its own entry: a return and a jump through a register found
+without leaving generated code (what `p_recursion` and `p_funcptr` wait for); and the
+count of which instructions end the blocks of the other primitives, translated in the
+order of that count. The race with QEMU for all 23 follows them.
