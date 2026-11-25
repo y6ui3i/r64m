@@ -2733,3 +2733,34 @@ here because it is one call: **this VM's kernel takes it.** `prctl(PR_SET_MEM_MO
 TSO)` (the Asahi kernel's call, 4D4D444Ch) answers 0 in an arm64 container, and the
 model read back is 1. Whether memory is then ordered as x86 orders it, and what a
 thread's blocks should do with it, is R035.
+
+## R035: the processor's own x86 order (2026-11-25)
+
+Apple's processors can order memory as x86 does, for a thread that asks (it is how
+Rosetta is fast). R034 found that this VM's kernel takes the asking (`prctl`
+4D4D444Ch, the Asahi kernel's `PR_SET_MEM_MODEL`, with 1 for TSO). Taking it and
+doing it are two things.
+
+The card, written before the run.
+
+- **Hypothesis**: a test of two threads on plain loads and stores, in a program of
+  the host's own (not the guest's): one thread writes a counter to x and then to y,
+  for ever rising; the other reads y and then x. x86's order forbids the reader to
+  find x behind y. Without the mode the reader is guessed to find it so within some
+  thousands of millions of looks on this machine (if it never does, the test shows
+  nothing and is said to); with the mode asked for by both threads, never in the same
+  number of looks. Then a guest's threads can each ask for the mode when the memory
+  is first shared, keep their plain blocks, and pay nothing; where the kernel
+  refuses (another host), R034's ordered blocks are used as now.
+- **What is changed from before** (R034): first nothing, a probe that is not kept.
+  Then, if the probe says so: each thread asks for the mode (the first thread when
+  the second is made, every other as it starts); a thread that was granted it makes
+  plain blocks and its interpreter leaves the barrier out.
+- **Next move for each result**:
+  - Found without the mode, never with it → built as above; the Python cases with
+    threads timed again (they should cost what plain cost in R034)
+  - Never found either way → the mode is not shown to do anything here; r64m keeps
+    the ordered blocks, and the mode waits for a test that can see it
+  - Found with the mode too → the mode is not what it says in this VM: not used
+- **Cut-off**: the probe, each way for at most a minute; then the build and the
+  timings of R034's table.
