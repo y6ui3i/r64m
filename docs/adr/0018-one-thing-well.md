@@ -20,6 +20,11 @@ work that was no part of running instructions (R029).
 
 ## Decision
 
+**This is r64m's first principle** (the owner, 2026-11-25: 「2 倍は目的で、一つのことを
+うまくやるは第一原則」). Twice QEMU's speed is the aim, and stays the aim; where the two
+pull apart, the principle decides what is built and the aim says how well it must be
+done. Speed is sought by doing the one thing better, not by taking on another.
+
 1. **r64m's one thing is to behave as x86-64 on Arm**: to do to a program's state
    what an x86-64 CPU would do, right, by the real CPU (the traces, and what the
    real machine prints), and fast, by QEMU. The interpreter, the JIT, the arithmetic

@@ -31,7 +31,12 @@ linked program runs with its files and its child processes: busybox's shell and 
 programs in an x86-64 Alpine container (R026), and GCC there (R027). There are no threads, no signal is
 delivered to a handler, and there is no machine.
 
-## The goal
+## The principle, the aim, the goal
+
+**The first principle: r64m does one thing well.** On Arm, it behaves as x86-64
+([0018](docs/adr/0018-one-thing-well.md)). **The aim: twice QEMU's speed**, on the
+primitives and on real work in a container, with every result held to the real CPU
+first. **The goal** is where both are shown:
 
 In an x86-64 container on an arm64 host, nginx takes a request over TLS and passes it to
 a Python process serving FastAPI, and `Hello, world` comes back
