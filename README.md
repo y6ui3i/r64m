@@ -120,7 +120,8 @@ real CPU does.
    byte the real machine's), held to what the real machine prints
    (`tests/container.rs`). NetHack 3.6.7 is built there by `make` under r64m, every
    file as the real machine makes it, 2.2 times as fast as user-mode QEMU 9.2.2
-   (R030: 266 s for 590 s, three builds each; Rosetta 168 s). Next: threads, signals
+   (R030: 266 s for 590 s, three builds each; Rosetta 168 s), and 2.9 times since
+   R031 (203 s). `--profile` shows where r64m's own time goes. Next: threads, signals
    delivered and sockets, for the goal's programs.
 
 One case is owed: the x87's square root when what is left over equals the root (the

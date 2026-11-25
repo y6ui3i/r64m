@@ -2425,3 +2425,73 @@ The card, written before the run.
     often (the table's size, calls and returns joined), measured by entries
 - **Cut-off**: one profile; after each change one more and the time without the
   profile, three runs, least.
+
+The result (this Mac's Docker VM, on QEMU as in R030; `cc1 -O2` on `apply.i`; the
+time is CPU time by the sampler's own count, a thousand to the second, the least of
+three, the two builds in turn).
+
+**As guessed in kind, and by the card's second line: the interpreter was the larger
+share, with nothing hidden as `guest_changed` was. The time outside generated code
+went from 1.51 s to 0.85 s; the whole build from 266 s to 203 s.**
+
+The first profile (3.90 s of CPU):
+
+| | share |
+|---|---|
+| generated code | 61% |
+| the interpreter (`exec`, `step`, the flags worked out, the look in the list of regions) | about 17% |
+| the runner's loop and the way in and out | about 7% |
+| making blocks (reading, translating, writing, joining) | about 5% |
+| the guest's `mmap` and `munmap` on the host | about 3% |
+| the set of known pages (R029's) | 1% |
+
+What was changed, in the order it was found:
+
+1. **A bit test is always in its block.** It changes the carry and leaves the other
+   flags, which a record could not say; so it was translated only where the other
+   flags could be shown to be written over, and `cc1` tests bits where that cannot
+   be shown 4.9 million times (and the `jnc` after it as often). A record can now
+   say "and the carry was given since" (two bits above its kind; with no record
+   before, the kind is "the flags as RFLAGS has them"). Six host instructions more
+   where the flags are not dead, none where they are. Generated code was entered 6.6
+   million times for 14.0.
+2. **`movhps`, `movhpd` from memory and `movlhps`** (half a million).
+3. **A block is made after four arrivals, not sixteen.** What was left to the
+   interpreter was then mostly not instructions it alone knows but the sixteen runs
+   of each block before it was made. Measured, three runs each, CPU milliseconds:
+
+   | arrivals | `apply.i` (7.07 thousand million instructions) | hello's `cc1` (90 million) |
+   |---|---|---|
+   | 1 | 3016 | 141 |
+   | 2 | 3008 | 108 |
+   | 3 | 3010 | 103 |
+   | 4 | 3058 | 101 |
+   | 8 | 3261 | 102 |
+   | 16 | 3516 | 107 |
+
+   Making a block costs 2.6 microseconds, about what interpreting it twenty times
+   does; 16 was g64m's number, taken over unmeasured (ADR 0014 said so).
+4. The set of known pages is written only when a place is new, not at every arrival.
+
+| `cc1 -O2 apply.i`, CPU | all | in generated code | outside it |
+|---|---|---|---|
+| R030's build | 3.87 s | 2.36 s | 1.51 s |
+| now | 3.05 s | 2.20 s | 0.85 s |
+
+The whole build, `make all` of NetHack, twice: 211 s and 203 s, where R030 had 266 s
+to 272 s; QEMU's 590 s is 2.9 times the least. Every file as hal's but the three with
+the time. (Rosetta: 168 s, one run, R029.)
+
+What `--jit-why` names now is thin: the string instructions with a repeat count
+(1.5 million, each a leaving and a coming back), `dec` and `push` through an operand
+(FF /1, /6: a quarter of a million each), `jo`, `movlps`, `shufpd`, the LOCK-prefixed
+`or` and `cmpxchg`; the rest of the list is ordinary instructions run by the
+interpreter after one of these, until the next jump.
+
+Not done: the timings are of one file and one build; the primitives were not raced
+again after the change of arrivals (their loops run thousands of millions of times
+and are made in the first microseconds either way; the 62 programs give the same
+results).
+
+106 unit tests and the 62 programs in the four JIT modes on both hosts; the 42
+container cases in three ways.
