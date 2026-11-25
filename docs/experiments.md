@@ -3029,3 +3029,39 @@ The card, written before the run.
   - The program does not start → the loader or a call is looked at first
 - **Cut-off**: the one program, on hal and under r64m in the three ways, twenty runs
   with `--jit`.
+
+The result (hal for what is right; r64m in the arm64 Linux container of this Mac's
+Docker VM: the program is statically linked and needs no image).
+
+**As guessed: the same eleven lines as hal's the first time, in the three ways, and
+twenty runs of twenty with `--jit`. Nothing was changed in r64m.**
+
+`guest/src/bin/signals.rs`, built for `x86_64-unknown-linux-musl` (578 KB,
+position-independent, no interpreter):
+
+1. a timer every 5 ms while the program sums floats, whose handler does floating
+   point of its own: five ticks, and the sum the same to the last bit as without;
+2. a store through a bad pointer, stepped over by the handler adding the
+   instruction's length to RIP in its frame; the address it was told; a register it
+   changed in the frame;
+3. a division by nothing stepped over the same way;
+4. a `read` cut short, and one started again with a child writing later;
+5. a handler on another stack;
+6. one signal inside another's handler: 1 2 3;
+7. one held back, seen waiting, let go;
+8. a signal raised inside its own handler: after it (10 20 11), and at once where the
+   handler said so (10 11 20);
+9. a handler asked for once only: the second signal ends the child, by signal 10.
+
+Cases 1 (floating point across a handler), 8 and 9 are more than the C program of
+R037 had; `siglongjmp` out of a handler, which that had, is the C library's and is
+left to Python's and the shell's cases.
+
+`tests/guest.rs` runs it against `tests/guest/signals.txt` (hal's lines): 3 of 3 on
+Linux; shown as ignored on macOS and where the program is not built. Rust's library
+for the target was fetched as the owner agreed: 220 MB unpacked, where "some tens"
+had been said.
+
+It is the first position-independent program with no interpreter that r64m loads,
+and the first built by Rust; its start (the library's handler for a fault on the
+stack, on another stack; `poll` on its three descriptors) asked for nothing new.

@@ -26,6 +26,11 @@ to them are g64m's (`tests/asm64`, `tests/c64`, `tests/expected64`).
   itself without that checkout: the tests are then shown as ignored, not as passed.
 - The cases stay assembly for nasm, which is a tool r64m's tests run, as they run
   `gzip`: not code of r64m's.
+- (R038, the owner 2026-11-25.) A program written here for r64m to run, where a
+  test needs what a shell or Python cannot make, is Rust too: the crate `guest`,
+  built for x86-64 Linux, held to what the real machine prints for the same file.
+  What a compiler under test is given stays a few lines of C inside a shell
+  command: no `.c` file.
 - 0006's `tests/cases/` in this repository waits: a case that g64m does not have is
   the first that goes there.
 - New expected output can only come from the real CPU. g64m's oracle

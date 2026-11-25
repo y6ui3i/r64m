@@ -1,0 +1,17 @@
+# Programs for r64m to run: the guest's side of the tests (ADR 0012: Rust here too).
+# Built for x86-64 Linux only, by the tests' preparation, never as part of r64m:
+#
+#   CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld \
+#     cargo build --release --manifest-path guest/Cargo.toml --target x86_64-unknown-linux-musl
+[package]
+name = "r64m-guest"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+libc = "=0.2.191"
+
+[profile.release]
+# The cases count on particular instructions being where they are written.
+opt-level = 1

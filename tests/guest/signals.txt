@@ -1,0 +1,15 @@
+# What `guest/src/bin/signals.rs`, built for x86-64 Linux, printed on the real machine
+# (hal, run as it is: the program is statically linked; 2026-11-25), and the code it
+# ended with after "? ".
+1 timer: 5 ticks, floats the same
+2 fault: signal 11 at 0x20, a register from the frame 0x1234
+3 division: signal 8, at the instruction true
+4 read cut short: -1, EINTR true, the handler saw 14
+4 read started again: 1 'x', the handler saw 14
+5 on the other stack: 1
+6 one inside another: 1 2 3
+7 held: ran 0 while blocked, waiting 1, then 2
+8 itself inside itself, deferred: 10 20 11
+8 itself inside itself, at once: 10 11 20
+9 once only: the child ended by signal 10
+? 0

@@ -132,7 +132,8 @@ real CPU does.
    between threads as x86 orders it (R034), by the processor itself where it can (R035). Sockets and `epoll`:
    Python's HTTP server, `asyncio`, and redis-server answer as on the real machine
    (R036). Signals are delivered to the guest's handlers, its own faults among
-   them (R037); blocks that a cycle passes through look for one as they begin,
+   them (R037; the cases a shell cannot make are a Rust program built for x86-64 Linux,
+   `guest/`, R038); blocks that a cycle passes through look for one as they begin,
    which costs code that is all branches 3 to 7%. Next: that look made cheaper;
    then the goal's own programs.
 

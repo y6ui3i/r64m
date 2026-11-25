@@ -27,3 +27,7 @@ harness = false
 [[test]]
 name = "container"
 harness = false
+
+[[test]]
+name = "guest"
+harness = false
