@@ -1527,6 +1527,16 @@ pub fn translate_as(m: &Mem, rip: u64, exact: bool, ordered: bool) -> Option<Bui
     let mut taken: Vec<Taken> = Vec::new();
     let mut sse = false;
     let mut at = rip;
+    // A block begins by looking whether a signal waits for the thread (ADR 0019,
+    // point 2): if one does, it is left at once for the interpreter, before its
+    // first instruction. A loop that jumps to its own start looks each time round.
+    // Only a block that a cycle of blocks must pass through keeps the look (R037):
+    // one with a jump or a call to an address not after itself, a return, or a jump
+    // through an operand. Whatever goes round for ever goes through one of those.
+    let mut cycle = false;
+    e.bails.push((1, rip, 0));
+    e.put(a64::mem_imm(Size::W, Op::Load, T0, CPU, offset_of!(Cpu, kick) as u32));
+    e.put(a64::cbz(false, true, T0, 0));
     loop {
         let (code, have) = m.code_at(at);
         let bytes = unsafe { std::slice::from_raw_parts(code, have) };
@@ -1541,6 +1551,11 @@ pub fn translate_as(m: &Mem, rip: u64, exact: bool, ordered: bool) -> Option<Bui
         };
         let before = e.w.len();
         e.seg = if ins.op == 0x8d { 0 } else { ins.seg };
+        cycle |= match ins.op {
+            0xc3 | 0xff => true,
+            0xe8 | 0xe9 | 0xeb | 0x70..=0x7f | 0x180..=0x18f => ins.imm as u64 <= at,
+            _ => false,
+        };
         starts.push((e.w.len() as u32, at));
         let next = at.wrapping_add(ins.len as u64);
         let (bits, reg, field) = (ins.size, ins.reg, ins.reg & 7);
@@ -2074,16 +2089,29 @@ pub fn translate_as(m: &Mem, rip: u64, exact: bool, ordered: bool) -> Option<Bui
         }
         e.leave(way.target, way.n);
     }
-    // And the ways out to the interpreter.
-    for (jump, at, n) in std::mem::take(&mut e.bails) {
+    // And the ways out to the interpreter. The first is the look's, which a block
+    // that no cycle passes through has no use for: such a block is not made longer
+    // by it (blocks are small, and seven instructions more at each one's end showed
+    // as some hundredths of the time of code that is all blocks, R037).
+    let skip = if cycle { 0 } else { 1 };
+    for (jump, at, n) in std::mem::take(&mut e.bails).into_iter().skip(skip) {
         // The distance goes into bits 5 to 23 of the B.cond.
         e.w[jump] |= ((e.w.len() - jump) as u32 & 0x7_ffff) << 5;
         e.bail_out(at, n);
     }
+    // The look is taken out of a block no cycle passes through: the two instructions
+    // at its start, with everything after them two places earlier. (What jumps
+    // within the block jumps by a distance, which is the same.)
+    let mut words = e.w;
+    if !cycle {
+        words.drain(..2);
+        for start in &mut starts {
+            start.0 -= 2;
+        }
+    }
     // A block that uses the XMM registers loads them first. What was written for it
     // comes after: its jumps to itself are to where it was to begin, past the loading
     // (a loop of one block has loaded them).
-    let mut words = e.w;
     if sse {
         let mut first = load_xmm();
         for start in &mut starts {

@@ -5,7 +5,9 @@
 # wrote to its standard output; then "? " and the code it ended with.
 #
 # Files read, listed, written and removed; processes started, waited for and joined
-# by pipes; a script that names its interpreter: ADR 0017's second step.
+# by pipes; a script that names its interpreter: ADR 0017's second step. And the shell's
+# traps: a signal to itself, one that ends a loop, a child ended and waited for, a
+# child's end noticed, a signal ignored, a trap in a subshell (ADR 0019's third step).
 $$ cat /etc/alpine-release
 3.22.8
 ? 0
@@ -91,4 +93,25 @@ nested
 ? 0
 $$ readlink /proc/self/exe
 /bin/busybox
+? 0
+$$ trap 'echo got USR1' USR1; kill -USR1 $$; echo after
+got USR1
+after
+? 0
+$$ trap 'echo term; exit 3' TERM; (sleep 0.2; kill -TERM $$) & while :; do :; done
+term
+? 3
+$$ sleep 5 & kill $!; wait $!; echo $?
+143
+? 0
+$$ trap 'echo child gone' CHLD; sleep 0.1 & wait; echo done
+child gone
+done
+? 0
+$$ trap '' INT; kill -INT $$; echo ignored
+ignored
+? 0
+$$ (trap 'echo inner; exit 4' HUP; kill -HUP $(exec sh -c 'echo $PPID'); sleep 1; echo not reached); echo $?
+inner
+4
 ? 0

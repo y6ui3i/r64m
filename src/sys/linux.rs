@@ -542,7 +542,12 @@ pub fn call(c: &mut Cpu, m: &mut Mem, s: &mut Sys, n: u64, a: [u64; 6]) -> Optio
         332 => same(m, libc::SYS_statx, 0b1_0010),
         439 => same(m, libc::SYS_faccessat2, 0b10),
         16 => ioctl(m, a[0], a[1], a[2]),
-        271 => same(m, libc::SYS_ppoll, 0b1101),
+        271 => {
+            if a[3] != 0 {
+                s.waited_with = m.read_u64(a[3]).ok();
+            }
+            same(m, libc::SYS_ppoll, 0b1101)
+        }
 
         // ---- sockets, and waiting for several things at once
         23 => select(m, a),
@@ -564,8 +569,19 @@ pub fn call(c: &mut Cpu, m: &mut Mem, s: &mut Sys, n: u64, a: [u64; 6]) -> Optio
         213 => raw(libc::SYS_epoll_create1, [0; 6]),
         232 => epoll_wait(m, a[0], a[1], a[2], a[3], 0, 8),
         233 => epoll_ctl(m, a[0], a[1], a[2], a[3]),
-        270 => pselect(m, a),
-        281 => epoll_wait(m, a[0], a[1], a[2], a[3], a[4], a[5]),
+        270 => {
+            // (The set is behind the pointer the last argument points at.)
+            if a[5] != 0 {
+                s.waited_with = m.read_u64(a[5]).ok().filter(|&at| at != 0).and_then(|at| m.read_u64(at).ok());
+            }
+            pselect(m, a)
+        }
+        281 => {
+            if a[4] != 0 {
+                s.waited_with = m.read_u64(a[4]).ok();
+            }
+            epoll_wait(m, a[0], a[1], a[2], a[3], a[4], a[5])
+        }
         283 => same(m, libc::SYS_timerfd_create, 0),
         284 => raw(libc::SYS_eventfd2, [a[0], 0, 0, 0, 0, 0]),
         286 => same(m, libc::SYS_timerfd_settime, 0b1100),
@@ -573,6 +589,16 @@ pub fn call(c: &mut Cpu, m: &mut Mem, s: &mut Sys, n: u64, a: [u64; 6]) -> Optio
         288 => same(m, libc::SYS_accept4, 0b110),
         290 => same(m, libc::SYS_eventfd2, 0),
         291 => same(m, libc::SYS_epoll_create1, 0),
+
+        // pause, which arm64 does not have: a wait for nothing, until a signal.
+        34 => raw(libc::SYS_ppoll, [0; 6]),
+        // rt_sigsuspend: with this set blocked (but not the two r64m needs), until a
+        // signal; the kernel puts the set back.
+        130 => m.read_u64(a[0]).map_err(|_| EFAULT).and_then(|set| {
+            s.waited_with = Some(set);
+            let host = set & !(1 << 6 | 1 << 10 | 1 << 8 | 1 << 18);
+            raw(libc::SYS_rt_sigsuspend, [&host as *const u64 as u64, 8, 0, 0, 0, 0])
+        }),
 
         // ---- timers, and the few things a process sets about itself
         36 => same(m, libc::SYS_getitimer, 0b10),
@@ -655,6 +681,15 @@ pub fn call(c: &mut Cpu, m: &mut Mem, s: &mut Sys, n: u64, a: [u64; 6]) -> Optio
         59 => execve(m, s, a[0], a[1], a[2]),
         61 => same(m, libc::SYS_wait4, 0b1010),
         62 => same(m, libc::SYS_kill, 0),
+        200 => same(m, libc::SYS_tkill, 0),
+        // rt_sigpending: what the kernel holds back, and what r64m has noted and not
+        // yet delivered because the guest blocks it.
+        127 => same(m, libc::SYS_rt_sigpending, 1).and_then(|done| {
+            let noted = super::signal::noted() & s.blocked;
+            let held = m.read_u64(a[0]).map_err(|_| EFAULT)?;
+            m.write_u64(a[0], held | noted).map_err(|_| EFAULT)?;
+            Ok(done)
+        }),
         234 => same(m, libc::SYS_tgkill, 0),
         247 => same(m, libc::SYS_waitid, 0b1_0100),
         _ => return None,
@@ -677,19 +712,4 @@ pub fn inherited(s: &mut Sys) {
             }
         }
     }
-}
-
-/// A signal the program asks to be ignored, or to do what it does by itself again,
-/// is so for the host too (but for the two r64m needs): the kernel then keeps it so
-/// across `execve`. A handler is only kept (ADR 0017, "Not yet").
-pub fn disposition(signal: u64, handler: u64) {
-    if signal == libc::SIGSEGV as u64 || signal == libc::SIGBUS as u64 {
-        return;
-    }
-    let to = match handler {
-        0 => libc::SIG_DFL,
-        1 => libc::SIG_IGN,
-        _ => return,
-    };
-    unsafe { libc::signal(signal as i32, to) };
 }

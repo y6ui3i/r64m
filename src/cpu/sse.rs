@@ -434,44 +434,15 @@ impl Run<'_> {
     /// The last x87 instruction's address and operand are not kept, and are written as
     /// zero. The bytes after the XMM registers are left as they were.
     fn fxsave(&mut self) -> R<()> {
-        let (cw, sw, used, st) = self.c.x87.fx_get();
-        let mut b = [0u8; 416];
-        let mut put = |at: usize, bytes: usize, v: u64| b[at..at + bytes].copy_from_slice(&v.to_le_bytes()[..bytes]);
-        put(0, 2, cw as u64);
-        put(2, 2, sw as u64);
-        put(4, 2, used as u64);
-        put(24, 4, self.c.mxcsr as u64);
-        put(28, 4, 0xffff);
-        for (i, (m, se)) in st.into_iter().enumerate() {
-            put(32 + i * 16, 8, m);
-            put(40 + i * 16, 2, se as u64);
-        }
-        for (i, v) in self.c.xmm.into_iter().enumerate() {
-            put(160 + i * 8, 8, v);
-        }
-        Ok(self.m.write_bytes(self.ea, &b)?)
+        let image = fx_image(self.c);
+        Ok(self.m.write_bytes(self.ea, &image)?)
     }
 
     /// FXRSTOR. An MXCSR with a bit that does not exist is refused.
     fn fxrstor(&mut self) -> R<()> {
         let mut b = [0u8; 416];
         self.m.read_bytes(self.ea, &mut b)?;
-        let get = |at: usize, bytes: usize| {
-            let mut v = [0u8; 8];
-            v[..bytes].copy_from_slice(&b[at..at + bytes]);
-            u64::from_le_bytes(v)
-        };
-        let mxcsr = get(24, 4);
-        if mxcsr & 0xffff_0000 != 0 {
-            return Err(Stop::Protection);
-        }
-        self.c.mxcsr = mxcsr as u32;
-        let st = std::array::from_fn(|i| (get(32 + i * 16, 8), get(40 + i * 16, 2) as u16));
-        self.c.x87.fx_set(get(0, 2) as u16, get(2, 2) as u16, get(4, 2) as u8, st);
-        for i in 0..32 {
-            self.c.xmm[i] = get(160 + i * 8, 8);
-        }
-        Ok(())
+        if fx_take(self.c, &b) { Ok(()) } else { Err(Stop::Protection) }
     }
 
     /// 0F AE: FXSAVE, FXRSTOR, LDMXCSR and STMXCSR by the reg field with a memory
@@ -863,4 +834,45 @@ impl Run<'_> {
         self.wr(self.ea, 64, v[0])?;
         self.wr(self.ea.wrapping_add(8), 64, v[1])
     }
+}
+
+/// The first 416 bytes of what FXSAVE writes, from the CPU's state.
+pub(super) fn fx_image(c: &super::Cpu) -> [u8; 416] {
+    let (cw, sw, used, st) = c.x87.fx_get();
+    let mut b = [0u8; 416];
+    let mut put = |at: usize, bytes: usize, v: u64| b[at..at + bytes].copy_from_slice(&v.to_le_bytes()[..bytes]);
+    put(0, 2, cw as u64);
+    put(2, 2, sw as u64);
+    put(4, 2, used as u64);
+    put(24, 4, c.mxcsr as u64);
+    put(28, 4, 0xffff);
+    for (i, (m, se)) in st.into_iter().enumerate() {
+        put(32 + i * 16, 8, m);
+        put(40 + i * 16, 2, se as u64);
+    }
+    for (i, v) in c.xmm.into_iter().enumerate() {
+        put(160 + i * 8, 8, v);
+    }
+    b
+}
+
+/// The CPU's state from such bytes; false, and nothing taken, if MXCSR has a bit
+/// that does not exist.
+pub(super) fn fx_take(c: &mut super::Cpu, b: &[u8; 416]) -> bool {
+    let get = |at: usize, bytes: usize| {
+        let mut v = [0u8; 8];
+        v[..bytes].copy_from_slice(&b[at..at + bytes]);
+        u64::from_le_bytes(v)
+    };
+    let mxcsr = get(24, 4);
+    if mxcsr & 0xffff_0000 != 0 {
+        return false;
+    }
+    c.mxcsr = mxcsr as u32;
+    let st = std::array::from_fn(|i| (get(32 + i * 16, 8), get(40 + i * 16, 2) as u16));
+    c.x87.fx_set(get(0, 2) as u16, get(2, 2) as u16, get(4, 2) as u8, st);
+    for i in 0..32 {
+        c.xmm[i] = get(160 + i * 8, 8);
+    }
+    true
 }

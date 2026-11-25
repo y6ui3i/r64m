@@ -107,6 +107,11 @@ is x86-64's: each thread's registers, and the frame a handler is entered with.
 
 ## Not yet
 
+- (As built, R037.) The look costs short blocks 3 to 7%, and looking only where a
+  cycle passes did not lessen it; a cheaper look is owed. A signal that arrives
+  between the look at a call's start and the kernel taking the call waits out the
+  call: a few instructions wide, owed.
+
 - Shared translations between threads; a robust futex list (`set_robust_list` is
   refused, which the C libraries take); `rseq`; `clone3`.
 - A signal delivered inside a call that waits, where the guest asked for no restart,

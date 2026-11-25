@@ -31,13 +31,27 @@ struct Mode {
 
 static MODE: std::sync::OnceLock<Mode> = std::sync::OnceLock::new();
 
+/// How far the guest went in one step.
+enum Went {
+    Next,
+    /// To a SYSCALL, which is to be answered.
+    Syscall,
+    /// Nowhere: a signal waits to be delivered first.
+    Signal,
+}
+
 /// The guest goes on by one step: an instruction of the interpreter's, or as far as
 /// blocks take it.
-fn one(c: &mut cpu::Cpu, mem: &mut mem::Mem, blocks: &mut Option<jit::run::Jit>) -> Result<cpu::Step, cpu::Stop> {
+fn one(c: &mut cpu::Cpu, mem: &mut mem::Mem, blocks: &mut Option<jit::run::Jit>) -> Result<Went, cpu::Stop> {
     match blocks {
-        None => cpu::step(c, mem),
+        None if c.kick != 0 => Ok(Went::Signal),
+        None => cpu::step(c, mem).map(|step| match step {
+            cpu::Step::Next => Went::Next,
+            cpu::Step::Syscall => Went::Syscall,
+        }),
         Some(blocks) => match blocks.run(c, mem) {
-            jit::run::Event::Syscall => Ok(cpu::Step::Syscall),
+            jit::run::Event::Syscall => Ok(Went::Syscall),
+            jit::run::Event::Signal => Ok(Went::Signal),
             jit::run::Event::Stop(stop) => Err(stop),
             jit::run::Event::Differs(what) => {
                 eprintln!("r64m: --jit-check: {what}");
@@ -47,10 +61,14 @@ fn one(c: &mut cpu::Cpu, mem: &mut mem::Mem, blocks: &mut Option<jit::run::Jit>)
     }
 }
 
-/// The guest cannot go on. Nothing is delivered to it yet (ADR 0019, point 2): it
-/// ends, with what stopped it.
-fn stopped(stop: cpu::Stop, c: &cpu::Cpu) -> ! {
-    let what = match stop {
+/// The guest cannot go on as it is: a fault of its own. If it has a handler for the
+/// signal that is, the handler is entered and it goes on there; if not, it ends, with
+/// what stopped it said and as that signal ends a process (ADR 0019, point 2).
+fn stopped(stop: cpu::Stop, c: &mut cpu::Cpu, mem: &mut mem::Mem, system: &mut sys::Sys) {
+    if sys::fault(c, mem, system, &stop) {
+        return;
+    }
+    let what = match &stop {
         cpu::Stop::Fault(f) => format!("{:?} of {:#x} that is not allowed", f.access, f.addr),
         cpu::Stop::Divide => "a division that cannot be done".to_string(),
         cpu::Stop::Undefined => "not an instruction".to_string(),
@@ -58,7 +76,8 @@ fn stopped(stop: cpu::Stop, c: &cpu::Cpu) -> ! {
         cpu::Stop::NotWritten(bytes) => format!("an instruction not written yet: {bytes}"),
         cpu::Stop::Again => unreachable!("an instruction to be run again is run again where it stands"),
     };
-    fail(format_args!("at {:#x} after {} instructions: {what}", c.rip, c.steps));
+    eprintln!("r64m: at {:#x} after {} instructions: {what}", c.rip, c.steps);
+    sys::die_of(&stop)
 }
 
 /// A thread of the guest's other than its first (ADR 0019): the same loop, with the
@@ -68,11 +87,13 @@ fn thread(mut c: cpu::Cpu, mut mem: mem::Mem, mut system: sys::Sys) {
     let mut blocks = mode.jit.then(|| {
         jit::run::Jit::new(mode.check, mode.hot).unwrap_or_else(|e| fail(format_args!("no memory for a thread's generated code: {e}")))
     });
+    sys::attend(&mut c);
     loop {
         mem.sync();
         match one(&mut c, &mut mem, &mut blocks) {
-            Ok(cpu::Step::Next) => {}
-            Ok(cpu::Step::Syscall) => {
+            Ok(Went::Next) => {}
+            Ok(Went::Signal) => sys::deliver(&mut c, &mut mem, &mut system),
+            Ok(Went::Syscall) => {
                 match sys::call(&mut c, &mut mem, &mut system) {
                     Some(sys::Exit::Group(code)) => std::process::exit(code),
                     Some(sys::Exit::Thread(code)) => sys::end_thread(&mut mem, &system, code),
@@ -82,7 +103,7 @@ fn thread(mut c: cpu::Cpu, mut mem: mem::Mem, mut system: sys::Sys) {
                     blocks.guest_changed(start, end, &mut mem);
                 }
             }
-            Err(stop) => stopped(stop, &c),
+            Err(stop) => stopped(stop, &mut c, &mut mem, &mut system),
         }
     }
 }
@@ -268,11 +289,13 @@ fn main() {
     }
     MODE.set(Mode { jit, check: jit_check, hot: if jit_now { 1 } else { jit_hot.unwrap_or(jit::run::HOT) } }).ok();
     system.thread = Some(thread);
+    sys::attend(&mut c);
     let code = loop {
         mem.sync();
         match one(&mut c, &mut mem, &mut blocks) {
-            Ok(cpu::Step::Next) => {}
-            Ok(cpu::Step::Syscall) => {
+            Ok(Went::Next) => {}
+            Ok(Went::Signal) => sys::deliver(&mut c, &mut mem, &mut system),
+            Ok(Went::Syscall) => {
                 // The exit that ends a program is not a line of the trace: there is
                 // nothing after it to show.
                 match sys::call(&mut c, &mut mem, &mut system) {
@@ -291,7 +314,7 @@ fn main() {
             }
             Err(stop) => {
                 lines.flush().ok();
-                stopped(stop, &c);
+                stopped(stop, &mut c, &mut mem, &mut system);
             }
         }
         if trace {

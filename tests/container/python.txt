@@ -5,7 +5,10 @@
 # threads started and joined, a pool of threads, a lock taken 160,000 times by eight
 # threads; a child process; an exit code (ADR 0019's first step). Then sockets: a pair,
 # TCP between two threads, Python's HTTP server and a client, epoll through a selector,
-# asyncio's server and client, select on a pipe, a datagram (its second step).
+# asyncio's server and client, select on a pipe, a datagram (its second step). Then
+# signals: a timer's handler, an interrupt from a signal to itself, a timer while the
+# program counts, a child ended by a signal, a signal sent from another thread, a
+# child that faults (its third step).
 $$ python3 -c 'print("Hello, world")'
 Hello, world
 ? 0
@@ -57,4 +60,22 @@ True b'z'
 ? 0
 $$ python3 -c 'import socket; s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.bind(("127.0.0.1", 0)); c = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); c.sendto(b"datagram", s.getsockname()); d, addr = s.recvfrom(100); print(d, addr[0])'
 b'datagram' 127.0.0.1
+? 0
+$$ printf '%s\n' 'import signal, time' 'got = []' 'signal.signal(signal.SIGALRM, lambda s, f: got.append(s))' 'signal.setitimer(signal.ITIMER_REAL, 0.05)' 'while not got: time.sleep(0.01)' 'print("alarm", got)' | python3
+alarm [14]
+? 0
+$$ printf '%s\n' 'import os, signal' try: '    os.kill(os.getpid(), signal.SIGINT); [None for _ in range(10**7)]; print("not reached")' 'except KeyboardInterrupt:' '    print("interrupted")' | python3
+interrupted
+? 0
+$$ printf '%s\n' 'import signal; n = [0]; signal.signal(signal.SIGALRM, lambda s, f: n.__setitem__(0, n[0] + 1)); signal.setitimer(signal.ITIMER_REAL, 0.01, 0.01); x = 0' 'while n[0] < 5: x += 1' 'signal.setitimer(signal.ITIMER_REAL, 0); print(n[0] >= 5, x > 100)' | python3
+True True
+? 0
+$$ python3 -c 'import subprocess, signal; p = subprocess.Popen(["sleep", "30"]); p.send_signal(signal.SIGTERM); print(p.wait())'
+-15
+? 0
+$$ python3 -c 'import signal, os, threading, time; got = []; signal.signal(signal.SIGUSR1, lambda s, f: got.append(threading.current_thread().name)); t = threading.Thread(target=lambda: (time.sleep(0.05), os.kill(os.getpid(), signal.SIGUSR1))); t.start(); t.join(); time.sleep(0.05); print(got)'
+['MainThread']
+? 0
+$$ python3 -c 'import faulthandler, ctypes, subprocess, sys; r = subprocess.run([sys.executable, "-c", "import ctypes; ctypes.string_at(0)"]); print(r.returncode)'
+-11
 ? 0

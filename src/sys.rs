@@ -13,6 +13,8 @@
 
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "linux")]
+pub mod signal;
 
 use crate::cpu::{Cpu, RAX, RDI, RDX, RSI};
 use crate::elf::INTERP_AT;
@@ -27,6 +29,8 @@ use std::io::Write;
 #[cfg(not(target_os = "linux"))]
 const EBADF: u64 = 9;
 const ENOMEM: u64 = 12;
+#[cfg(target_os = "linux")]
+const EINTR: u64 = 4;
 const EFAULT: u64 = 14;
 const EINVAL: u64 = 22;
 #[cfg(target_os = "linux")]
@@ -84,6 +88,13 @@ pub struct Sys {
     /// The signals the thread has blocked, as it sees them. The host's own mask is
     /// this without the two a fault in generated code arrives by.
     blocked: u64,
+    /// The stack the thread gave for handlers that ask for another (`sigaltstack`):
+    /// where it begins and how large it is; no size if there is none.
+    alt_stack: (u64, u64),
+    /// The set of blocked signals the call just answered waited with, if it had one
+    /// of its own for its duration: what arrived is then delivered by it.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    waited_with: Option<u64>,
     /// For `execve`, which is r64m started again: where r64m itself is, and the
     /// options it was given. And the program's own path, which is what a program
     /// that asks who it is must be told.
@@ -110,6 +121,8 @@ impl Sys {
             proc: Arc::new(Mutex::new(proc)),
             clear_tid: 0,
             blocked: 0,
+            alt_stack: (0, 0),
+            waited_with: None,
             exe: String::new(),
             options: Vec::new(),
             program: String::new(),
@@ -130,6 +143,8 @@ impl Sys {
             proc: self.proc.clone(),
             clear_tid: 0,
             blocked: self.blocked,
+            alt_stack: (0, 0),
+            waited_with: None,
             exe: self.exe.clone(),
             options: self.options.clone(),
             program: self.program.clone(),
@@ -173,6 +188,51 @@ pub fn end_thread(m: &mut Mem, s: &Sys, code: i32) -> ! {
     }
 }
 
+/// This thread's signals are noted in `c` from now (see `signal::attend`).
+pub fn attend(c: &mut Cpu) {
+    #[cfg(target_os = "linux")]
+    signal::attend(c);
+    #[cfg(not(target_os = "linux"))]
+    let _ = c;
+}
+
+/// Enters the guest's handlers for the signals that wait. A frame that cannot be
+/// written ends the process as a fault on its stack does.
+pub fn deliver(c: &mut Cpu, m: &mut Mem, s: &mut Sys) {
+    #[cfg(target_os = "linux")]
+    if !signal::deliver(c, m, s) {
+        signal::die_of(libc::SIGSEGV);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (m, s);
+        c.kick = 0;
+    }
+}
+
+/// A fault of the guest's own: true if its handler for it was entered.
+pub fn fault(c: &mut Cpu, m: &mut Mem, s: &mut Sys, stop: &crate::cpu::Stop) -> bool {
+    #[cfg(target_os = "linux")]
+    return signal::fault(c, m, s, stop) == Some(true);
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (c, m, s, stop);
+        false
+    }
+}
+
+/// The process ends for a fault of the guest's that nothing handles: as the signal
+/// ends one where there are signals, and with r64m's own code where there are not.
+/// What r64m itself lacks (an instruction not written) is r64m's code everywhere.
+pub fn die_of(stop: &crate::cpu::Stop) -> ! {
+    #[cfg(target_os = "linux")]
+    if !matches!(stop, crate::cpu::Stop::NotWritten(_)) {
+        signal::die_of(signal::signal_of(stop));
+    }
+    let _ = stop;
+    std::process::exit(2)
+}
+
 /// What the kernel's own error for a refused mapping would be.
 fn map_errno(e: MapError) -> u64 {
     match e {
@@ -184,6 +244,15 @@ fn map_errno(e: MapError) -> u64 {
 /// Answers the call the registers describe. `Some` is the end of the thread or of
 /// the process.
 pub fn call(c: &mut Cpu, m: &mut Mem, s: &mut Sys) -> Option<Exit> {
+    // A signal that arrived since the last look is delivered before the call is
+    // made, not after it: the call may wait, and the signal was to cut that short.
+    // The guest comes back to its SYSCALL instruction when the handler is done.
+    // (Between this look and the kernel taking the call a signal can still slip in
+    // and wait out the call: a few instructions wide, and not closed yet.)
+    if c.kick != 0 {
+        c.rip = c.rip.wrapping_sub(2);
+        return None;
+    }
     let (a, b, d) = (c.reg[RDI], c.reg[RSI], c.reg[RDX]);
     let (e, f, g) = (c.reg[R10], c.reg[R8], c.reg[R9]);
     let number = c.reg[RAX];
@@ -194,7 +263,19 @@ pub fn call(c: &mut Cpu, m: &mut Mem, s: &mut Sys) -> Option<Exit> {
         11 => munmap(m, s, a, b),
         12 => Ok(brk(m, s, a)),
         13 => sigaction(m, s, a, b, d, e),
-        14 => sigprocmask(m, s, a, b, d, e),
+        14 => {
+            let done = sigprocmask(m, s, a, b, d, e);
+            #[cfg(target_os = "linux")]
+            signal::look_again(c, s);
+            done
+        }
+        // rt_sigreturn: the registers are the frame's, the A register among them.
+        #[cfg(target_os = "linux")]
+        15 => match signal::sigreturn(c, m, s) {
+            Ok(()) => return None,
+            Err(e) => Err(e),
+        },
+        131 => sigaltstack(m, s, a, b),
         20 => writev(m, s, a, b, d),
         25 => mremap(m, s, a, b, d, e),
         60 => return Some(Exit::Thread((a & 0xff) as i32)),
@@ -214,10 +295,24 @@ pub fn call(c: &mut Cpu, m: &mut Mem, s: &mut Sys) -> Option<Exit> {
             }
         },
     };
+    // A call that a signal cut short is started again after the signal's handler,
+    // if the handler asked for that and the call is one that can be: the guest comes
+    // back to the SYSCALL instruction with the call's number in the A register.
+    #[cfg(target_os = "linux")]
+    if result == Err(EINTR) && !matches!(number, 7 | 23 | 34 | 35 | 128 | 130 | 230 | 232 | 270 | 271 | 281) && signal::restarts(s) {
+        c.rip = c.rip.wrapping_sub(2);
+        return None;
+    }
     c.reg[RAX] = match result {
         Ok(v) => v,
         Err(errno) => errno.wrapping_neg(),
     };
+    #[cfg(target_os = "linux")]
+    if let Some(during) = s.waited_with.take() {
+        if !signal::deliver_after_wait(c, m, s, during) {
+            signal::die_of(libc::SIGSEGV);
+        }
+    }
     None
 }
 
@@ -486,12 +581,30 @@ fn sigaction(m: &mut Mem, s: &mut Sys, signal: u64, new: u64, old: u64, size: u6
         }
         s.proc().actions[signal as usize] = asked;
         #[cfg(target_os = "linux")]
-        linux::disposition(signal, asked[0]);
+        signal::disposition(signal, asked[0]);
     }
     if old != 0 {
         for (i, word) in was.iter().enumerate() {
             m.write_u64(old + 8 * i as u64, *word).map_err(|_| EFAULT)?;
         }
+    }
+    Ok(0)
+}
+
+/// `sigaltstack`: the stack for handlers that ask for another, kept and given back.
+/// The structure: where it begins, its state (2: there is none), its size.
+fn sigaltstack(m: &mut Mem, s: &mut Sys, new: u64, old: u64) -> Result<u64, u64> {
+    let (was_sp, was_size) = s.alt_stack;
+    if new != 0 {
+        let sp = m.read_u64(new).map_err(|_| EFAULT)?;
+        let state = m.read_u32(new + 8).map_err(|_| EFAULT)?;
+        let size = m.read_u64(new + 16).map_err(|_| EFAULT)?;
+        s.alt_stack = if state & 2 != 0 { (0, 0) } else { (sp, size) };
+    }
+    if old != 0 {
+        m.write_u64(old, was_sp).map_err(|_| EFAULT)?;
+        m.write_u32(old + 8, if was_size == 0 { 2 } else { 0 }).map_err(|_| EFAULT)?;
+        m.write_u64(old + 16, was_size).map_err(|_| EFAULT)?;
     }
     Ok(0)
 }

@@ -34,8 +34,7 @@ Debian with its threads (R033). Between threads memory is ordered as x86 orders 
 keep that order itself and the kernel lets a thread ask (an Apple processor under
 this Mac's Docker VM: R035) every thread asks and nothing more is paid; elsewhere a
 process's blocks are made with ordered loads and stores from its second thread on,
-which costs such a program half again and more. No signal is delivered to a
-handler yet, and there is no machine.
+which costs such a program half again and more. There is no machine.
 
 ## The principle, the aim, the goal
 
@@ -132,7 +131,10 @@ real CPU does.
    ([0019](docs/adr/0019-threads-and-signals.md)). Memory is ordered
    between threads as x86 orders it (R034), by the processor itself where it can (R035). Sockets and `epoll`:
    Python's HTTP server, `asyncio`, and redis-server answer as on the real machine
-   (R036). Next: signals delivered; then the goal's own programs.
+   (R036). Signals are delivered to the guest's handlers, its own faults among
+   them (R037); blocks that a cycle passes through look for one as they begin,
+   which costs code that is all branches 3 to 7%. Next: that look made cheaper;
+   then the goal's own programs.
 
 One case is owed: the x87's square root when what is left over equals the root (the
 rounding there is not touched by any of g64m's cases; found by breaking it on purpose).

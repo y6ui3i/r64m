@@ -141,6 +141,8 @@ pub struct Jit {
 /// Why `run` came back.
 pub enum Event {
     Syscall,
+    /// A signal waits for the thread: nothing more is run until it is delivered.
+    Signal,
     Stop(Stop),
     /// A block and the interpreter did not agree (`--jit-check`): what differed.
     Differs(String),
@@ -209,6 +211,11 @@ impl Jit {
             // regions, and to code that is guarded (ADR 0019). A thread that stored
             // into such code could drop only its own blocks; every other thread drops
             // its guarded ones here, when it next comes by.
+            if c.kick != 0 {
+                // With the flags worked out: the handler's frame holds them.
+                cpu::settle(c);
+                return Event::Signal;
+            }
             m.sync();
             if !self.ordered && m.must_order() {
                 // A second thread, on a host that does not order memory as x86 does
@@ -704,6 +711,7 @@ mod tests {
         match jit.run(&mut c, m) {
             Event::Syscall => {}
             Event::Stop(stop) => panic!("at {rip:#x}: stopped: {stop:?}"),
+            Event::Signal => panic!("at {rip:#x}: a signal, which no test sends"),
             Event::Differs(what) => panic!("at {rip:#x}: {what}"),
         }
         if let Some(what) = differs(&alone, &c, &wrote, m) {
@@ -1747,9 +1755,10 @@ mod tests {
         // is carried by the ADD (one more): eleven fewer than with every record
         // written and every way a way out.
         assert_eq!(words(true) - words(false), 11);
-        // The loop is: add, cmp, the count, the jump back.
+        // The loop is: the look for a signal (two), add, cmp, the count, the jump
+        // back to the look.
         let built = translate(&m, CODE, false).unwrap();
-        assert_eq!(built.words[3], a64::b_cond(a64::Cond::Ne, -3));
+        assert_eq!(built.words[5], a64::b_cond(a64::Cond::Ne, -5));
     }
 
     #[test]
@@ -2946,5 +2955,32 @@ mod tests {
         m.protect(CODE, 4096, R | X).unwrap();
         jit.guest_changed(CODE - 0x10_0000, CODE + 1, &mut m);
         assert_eq!((run(&mut jit, &mut m), jit.stats.blocks), (11, 3));
+    }
+    #[test]
+    fn only_a_block_that_a_cycle_passes_through_looks_for_a_signal() {
+        // The look: a load of the thread's word and a branch if it is set.
+        let look = a64::mem_imm(a64::Size::W, a64::Mem::Load, 16, CPU, offset_of!(Cpu, kick) as u32);
+        let begins = |code: &[u8]| translate(&guest(code, &[]), CODE, false).unwrap().words[0];
+        // A straight run, and a jump forward: no look.
+        assert_ne!(begins(&[0x83, 0xc2, 0x01, 0x0f, 0x05]), look);
+        assert_ne!(begins(&[0x83, 0xc2, 0x01, 0xeb, 0x02, 0x90, 0x90, 0x0f, 0x05]), look);
+        // A jump back to itself, a jump back to before itself, a return, a call
+        // through a register: each looks.
+        assert_eq!(begins(&[0x83, 0xea, 0x01, 0x75, 0xfb, 0x0f, 0x05]), look);
+        assert_eq!(begins(&[0x83, 0xea, 0x01, 0xeb, 0xf0]), look);
+        assert_eq!(begins(&[0x83, 0xc2, 0x01, 0xc3]), look);
+        assert_eq!(begins(&[0x83, 0xc2, 0x01, 0xff, 0xd0]), look);
+        // A loop is left when the word is set, at its start, with what it had done.
+        let code = [0x83, 0xc2, 0x01, 0x83, 0xeb, 0x01, 0x75, 0xf8, 0x0f, 0x05];
+        let mut m = guest(&code, &[]);
+        let mut jit = Jit::new(false, 1).unwrap();
+        let mut c = Cpu::new(CODE, DATA + 4096);
+        c.reg[RBX] = 1000;
+        c.kick = 1;
+        assert!(matches!(jit.run(&mut c, &mut m), Event::Signal));
+        assert_eq!((c.rip, c.steps), (CODE, 0));
+        c.kick = 0;
+        assert!(matches!(jit.run(&mut c, &mut m), Event::Syscall));
+        assert_eq!((c.reg[RDX], c.reg[RBX]), (1000, 0));
     }
 }

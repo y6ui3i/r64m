@@ -2913,3 +2913,89 @@ The card, written before the run.
     makes (a handler that prints its own frame, run on hal)
 - **Cut-off**: the cases chosen here, three ways each; the primitives raced against
   R036's build, three at once, least of three.
+
+The result (this Mac's Docker VM; what is right is what hal printed; the primitives
+raced on macOS, three at once, least of three).
+
+**Signals are delivered as on the real machine in every case tried. The look is not
+cheap where code is branches: it costs four primitives 3 to 7%, over the card's 2%,
+and the card's cure did not help.**
+
+What is right:
+
+- A C program of eight cases (compiled on hal by the container's GCC, the same file
+  run under r64m; not kept, as `big.c` was not): a timer every 5 ms while the program
+  only counts; a store through a bad pointer caught and left by `siglongjmp`; the
+  same stepped over by the handler adding 3 to RIP in its frame and changing RBX
+  there; a division by nothing caught; a `read` cut short (EINTR) and one started
+  again (`SA_RESTART`) with a child writing later; a handler on another stack; one
+  signal raised inside another's handler (order 1 2 3); one held back, seen pending,
+  and let go. All eight lines as hal's by the interpreter, with `--jit` and with
+  `--jit-check`; twenty runs of twenty with `--jit`, ten of ten by the interpreter.
+- Six commands for the shell (a trap for a signal to itself; a trap that ends a busy
+  loop; a child killed and waited for, 143; a child's end noticed; a signal
+  ignored; a trap in a subshell) and six for Python (a timer's handler; an interrupt
+  from a signal to itself; a timer while the program counts; a child ended by
+  SIGTERM, -15; a signal sent from another thread and handled by the first; a child
+  that faults, -11): kept in the tests' data, all as hal's in the three ways.
+- In their images, three ways each: Python 22 cases, 66 of 66; Alpine with GCC 48,
+  144 of 144; redis 13, 39 of 39. 110 unit tests plain and ordered and the 62
+  programs on both hosts.
+
+What was built: `rt_sigaction` gives the host's signal r64m's handler, which notes it
+for its thread and sets the thread's word; a block that a cycle must pass through
+begins by looking at the word and leaves if it is set; the frame (the restorer's
+address, the context with every register, what the signal was, floating point's
+state above) and the handler's entry; `rt_sigreturn`; `sigaltstack`; `tkill`,
+`rt_sigpending`, `pause`; a call cut short started again if the handler asked; a
+fault of the guest's own as its signal, with the address and the kind, or the end of
+the process as that signal ends one.
+
+Found on the way:
+
+1. **A call that waits with its own set of blocked signals must deliver by that
+   set.** The shell blocks SIGCHLD, waits in `rt_sigsuspend` with it open, and
+   counts on its handler having run when the call comes back. The handler was
+   entered only when the signal was no longer blocked by the thread's own set, which
+   was after, and the shell waited for ever. Now what arrives during
+   `rt_sigsuspend`, `ppoll`, `pselect6` or `epoll_pwait` is delivered by the call's
+   set, and the first handler's frame holds the thread's own set to put back: as the
+   kernel does it.
+2. **A signal that arrives just before a call is made** was delivered after the
+   call, which may wait. The word is looked at as the call begins now, and the
+   handler is entered first. **A few instructions' width is still open** (between
+   that look and the kernel taking the call): to be closed by making that stretch
+   one that the host's handler recognises and starts again.
+3. `raise` is `tkill`, and `sigpending` asks the kernel and r64m both.
+
+Not explained: one run of Python's "child ended by SIGTERM" under `--jit-check` took
+68 seconds where others take 10. It gave the right answer. It may be the open width
+of 2.
+
+**The cost of the look.** Every block, at first; then only blocks that a cycle must
+pass through (a jump or call to an address not after itself, a return, a jump
+through an operand), and the way out it needs left off the others:
+
+| new / R036's build | every block | only where a cycle passes |
+|---|---|---|
+| p_if | 1.067 | 1.070 |
+| p_bignum | 1.056 | 1.054 |
+| p_ternary | 1.043 | 1.042 |
+| p_switch | 1.032 | 1.039 |
+| p_funcptr | 1.031 | 1.030 |
+| p_loop, p_recursion, p_rotate, p_shift | 0.965 to 0.971 | 0.975 to 0.98 |
+| the other fourteen | 0.986 to 1.020 | |
+
+Narrowing it changed nothing: in p_if thirteen blocks of seventeen are ones a cycle
+passes through (the code is short runs ended by jumps back, and returns), read from
+the two builds' generated code. So the two instructions (a load of the word, a
+branch) are the cost, where blocks are short. (Four primitives came out 2 to 3%
+faster, which is where the compiler happened to put code: the race's noise is of
+that size, and the slower ones are slower by more.)
+
+The next thing to try, a card of its own: the look as one instruction on a register,
+with no load. The host's handler can set a bit of a register of the interrupted
+thread when it interrupts generated code (the kernel hands it the registers); a block
+then tests that bit and branches. The count of instructions (x27) has room for it.
+
+Not measured: NetHack's build and the container cases' time with the look.

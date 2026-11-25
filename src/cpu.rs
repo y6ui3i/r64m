@@ -70,6 +70,22 @@ pub struct Cpu {
     /// A `rep movs` or `rep stos` may do all its repetitions in one step (R006). Off
     /// when each is to be seen (a trace). The count goes on by one for each either way.
     pub rep_whole: bool,
+    /// Not zero when a signal waits for this thread: set by the host's handler, looked
+    /// at by every block as it begins and between the interpreter's instructions
+    /// (ADR 0019, point 2).
+    pub kick: u32,
+}
+
+/// Floating point's state as FXSAVE lays it out (its first 416 bytes), and the state
+/// taken from such bytes: for a signal's frame.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn fx_image(c: &Cpu) -> [u8; 416] {
+    sse::fx_image(c)
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn fx_take(c: &mut Cpu, image: &[u8; 416]) -> bool {
+    sse::fx_take(c, image)
 }
 
 impl Cpu {
@@ -93,6 +109,7 @@ impl Cpu {
             mxcsr: 0x1f80,
             x87: x87::X87::new(),
             rep_whole: false,
+            kick: 0,
         }
     }
 }
