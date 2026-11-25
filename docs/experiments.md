@@ -2396,3 +2396,32 @@ Not measured: `make -j`; a second run of Rosetta (the VM is now on QEMU: it is
 switched back by the owner); how much of r64m's 266 s is generated code and how much
 its own keeping, over the whole build (for one compilation it was 2.75 s of 4.9 s,
 R029).
+
+## R031: where a compilation's time goes outside generated code (2026-11-25)
+
+The first principle (ADR 0018) asks that r64m's time be spent behaving as x86-64. In
+one compilation (`cc1 -O2` on `apply.i`, 4.9 s with the clocks on, 3.9 s without) the
+clocks of R029 say 2.75 s is in generated code and 0.27 s making blocks. The rest,
+between one and two seconds, is not accounted for.
+
+The card, written before the run.
+
+- **Hypothesis**: the rest is two things of about the same size: the runner's work
+  each time generated code is entered (14 million times: a look in the map of
+  places, the block's first run from Rust, joining), and the interpreter for the 56
+  million instructions that are still its own, each of which under the JIT also
+  keeps a copy of the registers and asks the map. Which is the larger is not known,
+  and neither is whether something else is there, as `guest_changed` was.
+- **What is changed from before** (R030): a sampler in r64m (`--profile`): a timer
+  that interrupts a thousand times a second of CPU time and notes where r64m was;
+  at the end the places are printed with their counts, and how many were in
+  generated code. Nothing else.
+- **Next move for each result**:
+  - One function of r64m's own keeping is a large share → that is cut first, and
+    the profile taken again
+  - The interpreter's own instructions are the share → the instructions `--jit-why`
+    names are translated, by count
+  - It is spread thin over many places → said; then the gain is in entering less
+    often (the table's size, calls and returns joined), measured by entries
+- **Cut-off**: one profile; after each change one more and the time without the
+  profile, three runs, least.
