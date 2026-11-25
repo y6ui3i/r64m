@@ -2530,3 +2530,35 @@ The card, written before the run.
 - **Cut-off**: four counts on hal (Python's line, Python's threads, Python's own
   HTTP server answering one request, redis-server starting and answering one PING),
   and one try of each under r64m.
+
+The result (hal: `strace -f -c` of each program's process in its container; then each
+tried under r64m in this Mac's Docker VM, the images copied from hal).
+
+**As guessed on all three counts.**
+
+| on hal | different calls | what is new beyond the build's |
+|---|---|---|
+| Python 3.13 printing a line | 38 | `futex` (1), `getrandom`, `set_robust_list`, `rseq`, `gettid`; no `clone`, and no signal but the shell's own |
+| Python starting four threads | 40 | `clone` 4 and `clone3` 1, `futex` 111, `set_robust_list` 5, `rseq` 5, `madvise` |
+| Python's HTTP server answering one request | 55 | `socket`, `bind`, `listen`, `accept4`, `connect`, `sendto`, `recvfrom`, `getsockname`, `getpeername`, `setsockopt`, `shutdown`, `epoll_create1`, `poll`; a thread |
+| redis-server started, one PING, stopped | 57 | `epoll_pwait` 16, `epoll_ctl` 7, `clone` 5 (threads), `fork`, `prctl`, `setitimer`, `membarrier`, `rt_sigreturn` 4: a timer's signal reaches a handler |
+
+Under r64m as it was, Python stopped twice before its line, neither time for a
+thread or a signal:
+
+1. "CPU ISA level is lower than required": glibc will not start on a CPU that does
+   not say MMX, which every x86-64 CPU has, and r64m's CPUID did not say it. It says
+   it now. **MMX's registers and instructions are not written**: owed, when a
+   program uses them (compiled x86-64 code uses SSE2 in their place).
+2. "The futex facility returned an unexpected error code": glibc calls `futex` with
+   one thread. It is handed on: the word waited on is the guest's memory, which is
+   the host's, so the kernel's futex at `base + g` is the guest's futex.
+
+Then `python3 -c 'print("Hello, world"); ...'` (a line, pi, 2 to the 100th, a third,
+a sorted set) prints what it should and ends with 0 by the interpreter, with `--jit`
+and with `--jit-check`: 46.6 million instructions, glibc's loader and CPython's start.
+`set_robust_list` and `rseq` are answered ENOSYS, which glibc takes.
+
+The threads program stops where it was guessed to: `clone3` and then `clone` with
+shared memory are refused, and Python says "can't start new thread". That is ADR
+0019's to decide.

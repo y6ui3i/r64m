@@ -411,6 +411,16 @@ pub fn call(c: &mut Cpu, m: &mut Mem, s: &mut Sys, n: u64, a: [u64; 6]) -> Optio
         // madvise: advice, which need not be taken.
         28 => Ok(0),
 
+        // futex: the word waited on is the guest's memory, which is the host's (ADR
+        // 0008), so the kernel's own futex on `base + g` is the guest's. The fourth
+        // argument is a time to wait for the calls that wait (WAIT, LOCK_PI,
+        // WAIT_BITSET, WAIT_REQUEUE_PI) and a number for the others.
+        202 => (|| {
+            let waits = matches!(a[1] & 0x7f, 0 | 6 | 9 | 11);
+            let fourth = if waits { p(m, a[3])? } else { a[3] };
+            raw(libc::SYS_futex, [p(m, a[0])?, a[1], a[2], fourth, p(m, a[4])?, a[5]])
+        })(),
+
         // ---- who the process is
         39 => same(m, libc::SYS_getpid, 0),
         102 => same(m, libc::SYS_getuid, 0),

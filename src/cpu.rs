@@ -950,8 +950,11 @@ impl Run<'_> {
         let (a, b, c, d): (u64, u64, u64, u64) = match self.c.reg[RAX] as u32 {
             // "GenuineIntel"
             0 => (1, 0x756e_6547, 0x6c65_746e, 0x4965_6e69),
-            // FPU TSC CX8 CMOV FXSR SSE SSE2; POPCNT
-            1 => (0x0003_06a9, 0, 0x0080_0000, 0x0700_8111),
+            // FPU TSC CX8 CMOV MMX FXSR SSE SSE2; POPCNT. (MMX is said because every
+            // x86-64 CPU has it and glibc will not start without: its registers and
+            // instructions are not written yet, and are owed when a program uses
+            // them. R032.)
+            1 => (0x0003_06a9, 0, 0x0080_0000, 0x0780_8111),
             0x8000_0000 => (0x8000_0001, 0, 0, 0),
             // long mode, SYSCALL; LAHF
             0x8000_0001 => (0, 0, 1, 0x2000_0800),
