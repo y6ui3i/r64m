@@ -2248,3 +2248,29 @@ opcode (`--jit-why`):
 None of these is in any primitive. Every function compiled with the stack protector
 (Alpine's GCC does so by default, and was itself built so) leaves generated code
 twice. That is the first thing: R029.
+
+## R029: the instructions that end cc1's blocks (2026-11-25)
+
+The card, written before the run.
+
+- **Hypothesis**: `cc1` leaves generated code once in 77 instructions because of a
+  handful of instructions no primitive has (R028's table), the stack protector's two
+  above all. With an operand relative to FS or GS, `bt`, `bts`, `btr`, `btc` of a
+  register (by a register and by a constant), the no-operation of two bytes, and the
+  XMM shifts by bytes translated, generated code is entered at most a tenth as often
+  (under 9 million times for `apply.c`) and `cc1` takes under a third of its 47 s.
+  It will not be near Rosetta's 2 s by this alone: 168,160 blocks are made in one
+  compilation, and what making them costs is not known yet.
+- **What is changed from before** (R028): the translator reads those; the bit tests
+  leave the host's flags saying what the carry is, and are translated where the
+  other flags are written over before anything reads them, as a rotation is. The
+  room for generated code is 64 MB for 16 (it was filled once).
+- **Next move for each result**:
+  - Entered a tenth as often, time under a third → what is left is counted again
+    (`--jit-why`, and the time of making blocks apart from running them) and that is
+    the next card; then the whole build again
+  - Entered a tenth as often and the time hardly less → the time is not in the
+    leaving: the making of blocks is measured next (a count of blocks made by time)
+  - Not a tenth → the table says what else; added if it is of the same kind
+- **Cut-off**: `cc1` on `apply.i` once with `--jit-stats` and once with `--jit-why`,
+  after every test passes on both hosts and the 42 cases in the container.
