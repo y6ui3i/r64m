@@ -2562,3 +2562,34 @@ and with `--jit-check`: 46.6 million instructions, glibc's loader and CPython's 
 The threads program stops where it was guessed to: `clone3` and then `clone` with
 shared memory are refused, and Python says "can't start new thread". That is ADR
 0019's to decide.
+
+## R033: threads (2026-11-25)
+
+ADR 0019 was accepted as proposed (A, B, C). Its first step: a guest thread is a host
+thread. Beginning it, a thing the proposal had missed was seen and added as point D
+(proposed): x86 orders memory between threads more strictly than arm64, and plain
+loads and stores in blocks do not keep that order. This card builds threads without
+it; whether a program is right for the right reason with more than one thread is not
+claimed until D is decided.
+
+The card, written before the run.
+
+- **Hypothesis**: with `clone` with shared memory starting a host thread that has its
+  own CPU state and its own blocks, the list of regions shared under a lock, and the
+  LOCK-prefixed instructions made atomic in the interpreter, R032's Python program
+  (four threads that each sum, joined, the sums printed sorted) prints what hal
+  printed, and redis-server starts, answers PING and stops, in the interpreter and
+  with `--jit`. Run twenty times each, since what is wrong with threads is wrong
+  only sometimes.
+- **What is changed from before** (R032): `Mem` is a thread's view of a shared list;
+  `Sys` keeps what is the process's (the end of the heap, where mappings go, what
+  signals do) behind a lock; `clone`; the exits (`exit` ends a thread, `exit_group`
+  the process); the interpreter's LOCK. Nothing of the blocks' code.
+- **Next move for each result**:
+  - Right twenty times of twenty in both ways → sockets and `epoll` (0019's order),
+    and D's cost measured beside
+  - Wrong or hung sometimes → the instruction or call is found before anything is
+    added; a hang's threads are looked at where they wait
+  - redis needs what is not built (a signal delivered: its timer) → said; it waits
+    for 0019's third step and Python's threads stand alone for this card
+- **Cut-off**: the two programs, twenty runs each way.

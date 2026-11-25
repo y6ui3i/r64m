@@ -1,6 +1,8 @@
 # 0019: A thread is the host's thread; a signal is the host's signal, delivered between blocks
 
-**Status**: proposed (2026-11-25). Three points are the owner's: A, B and C below.
+**Status**: accepted (2026-11-25, the owner: the three points, A, B and C, as proposed).
+Point D, on the order of memory between threads, was missed in the proposal, was
+added the same day when the work began, and is **proposed**: not yet the owner's.
 
 ## Context
 
@@ -25,6 +27,13 @@ is x86-64's: each thread's registers, and the frame a handler is entered with.
    word the guest asked to have cleared and wakes who waits on it, as the kernel
    does. `exit` ends the thread; `exit_group` the process. `clone3` is refused: the
    C libraries then use `clone`.
+   - **An instruction with the LOCK prefix, and an exchange with memory, is atomic**:
+     no other thread's store can fall between its read and its write. (Until now
+     the interpreter read, worked, and wrote, which is the same thing with one
+     thread and is not with two: every mutex of a C library is such an instruction.)
+     The interpreter writes with the host's compare-and-swap what it read, and runs
+     the instruction again if another thread got there first. These instructions
+     are the interpreter's, not blocks'.
    - **Each thread has its own blocks.** Generated code and the table of blocks are
      a thread's own, as its registers are: nothing is locked to make a block, to
      join two, or to run one. The price is that code two threads run is translated
@@ -69,6 +78,29 @@ is x86-64's: each thread's registers, and the frame a handler is entered with.
    3. signals delivered: a timer's (redis), a child's end, a server told to stop;
    4. the goal: FastAPI behind nginx, over TLS. (What it needs fetched is asked for
       then.)
+
+4. **D (proposed): between threads, memory is ordered as x86 orders it.** x86
+   promises more than arm64 does: a thread's stores reach the others in the order
+   it made them, and its loads see them in order (TSO). A compiled x86-64 program
+   counts on it wherever it shares memory without a LOCK: one thread writes a value
+   and then a flag, with two plain stores, and another reads the flag and then the
+   value. On arm64 two plain stores may reach another core in either order, so a
+   block that is a plain load or store for each of the guest's would, rarely and
+   not repeatably, give the second thread the flag without the value. (Rosetta
+   avoids it by a mode of Apple's own processors that orders memory as x86 does;
+   QEMU by a barrier at each access.)
+   - Proposed: **while a process has one thread, blocks are as they are; from its
+     second thread on, blocks are made with the host's ordered load and store**
+     (`ldapr` and `stlr`: a load that sees what was released, a store that
+     releases), and blocks made before are dropped once. A program with one thread,
+     which is every program of the build raced in R030, pays nothing. What a
+     program with threads pays is measured (a card) before anything else is tried.
+   - The other ways: plain loads and stores always (fast, and wrong in a way no
+     test of r64m's would show and a real server sooner or later would); the
+     processor's own x86 order where the host has it (Apple's, and only if the
+     kernel lets a process ask: to be looked at; a Raspberry Pi has none).
+   - Until this is decided, threads are built with plain loads and stores, and the
+     README says that programs with threads are not yet to be trusted.
 
 ## Not yet
 
