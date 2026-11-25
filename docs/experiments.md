@@ -2199,3 +2199,52 @@ The card, written before the run.
   - A file differs that should not → the first one in the build's order is the
     finding; `--jit-check` on that one compilation says whether it is a block
 - **Cut-off**: one whole build compared file by file; three timed builds of each.
+
+The result (the image as built: the test for the Linux text console taken out of
+`unixtty.c`, since the kernel's headers are not in the image; Alpine's fortified
+headers off, since the curses interface does not compile with them; the Guidebook
+said to be made, since its making needs nroff. hal builds the same image's tree.)
+
+**The build is right. And it is 27 times the real machine's time: far too slow, as
+the owner said while it ran.**
+
+`make all` under `r64m --jit` ended with 0. Of the 284 files it made (137 object
+files, the three programs of NetHack's own that make its data, the levels, the
+archive of data, `nethack` itself) 281 have hal's MD5 sums. The three that have not
+are the three that hold the time of the build: `include/date.h`, `src/version.o`,
+`src/nethack`. Nothing was changed in r64m to get there.
+
+| `make all` | time |
+|---|---|
+| hal (i7-3770K, the real machine, in the container) | 111 s |
+| r64m `--jit` (MacBook Air M1, the Docker VM) | 3,008 s |
+
+One compilation, to see where it goes (`cc1` on `apply.c` after the preprocessor:
+10,831 lines, 7.07 thousand million instructions; the assembly made is the same):
+
+| `cc1 -O2 apply.i` | time | |
+|---|---|---|
+| Rosetta | 2.0 s | |
+| r64m `--jit` | 47 s | 150 million instructions a second |
+| r64m, the interpreter | 128 s | 55 million |
+
+With `--jit`: 168,160 blocks made, the 16 MB of generated code filled and emptied
+once, 97.4% of the instructions run in blocks, and generated code entered 92 million
+times: once for every 77 instructions. The primitives are entered a few thousand
+times in thousands of millions. What the interpreter ran in the blocks' stead, by
+opcode (`--jit-why`):
+
+| | times | what it is |
+|---|---|---|
+| `mov r, fs:[...]` (64 48 8B) | 27.1 million | the stack protector's word read at a function's start |
+| `sub r, fs:[...]` (64 48 2B) | 27.1 million | and compared at its end |
+| `jne` after it (0F 85) | 24.8 million | |
+| `bt r/m64, r64` (48 0F A3) | 16.2 million | a bit of a set tested (GCC's sets are bits) |
+| `jnc`, `jc` after it (73, 72) | 14.2 million | |
+| `pslldq` (66 0F 73 /7) | 4.9 million | an XMM register moved by bytes |
+| `xchg ax, ax` (66 90) | 3.1 million | a no-operation of two bytes |
+| `bt`, `bts`, `btr` in other forms | 4.5 million | |
+
+None of these is in any primitive. Every function compiled with the stack protector
+(Alpine's GCC does so by default, and was itself built so) leaves generated code
+twice. That is the first thing: R029.
