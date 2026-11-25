@@ -72,7 +72,17 @@ struct Shared {
     /// How many stores any thread has made into host pages that hold guarded code:
     /// by this the others know to drop their blocks from such pages.
     guarded_writes: AtomicU64,
+    /// Every thread of the process has the processor's own x86 order of memory (R035):
+    /// plain loads and stores keep it, and nothing need be ordered by instructions.
+    /// False until the first thread has asked and been given it; false for good once
+    /// any thread is refused.
+    x86_order: std::sync::atomic::AtomicU8,
 }
+
+/// `Shared::x86_order`: not asked yet, given to every thread so far, refused to one.
+const NOT_ASKED: u8 = 0;
+const GIVEN: u8 = 1;
+const REFUSED: u8 = 2;
 
 pub struct Mem {
     base: *mut u8,
@@ -184,7 +194,7 @@ impl Mem {
     /// has changed.
     pub fn view(&mut self) -> Mem {
         let shared = self.shared.get_or_insert_with(|| {
-            Arc::new(Shared { regions: Mutex::new(self.regions.clone()), version: AtomicU64::new(1), guarded_writes: AtomicU64::new(0) })
+            Arc::new(Shared { regions: Mutex::new(self.regions.clone()), version: AtomicU64::new(1), guarded_writes: AtomicU64::new(0), x86_order: std::sync::atomic::AtomicU8::new(NOT_ASKED) })
         });
         if self.seen == 0 {
             self.seen = 1;
@@ -220,6 +230,26 @@ impl Mem {
         self.shared.is_some()
     }
 
+    /// Must loads and stores be ordered by the instructions that make them: is the
+    /// memory shared between threads that have not all the processor's own x86 order?
+    #[inline(always)]
+    pub fn must_order(&self) -> bool {
+        self.shared.as_ref().is_some_and(|shared| shared.x86_order.load(Ordering::Relaxed) != GIVEN)
+    }
+
+    /// A thread of this memory asked for the processor's x86 order and says whether
+    /// it was given. One refusal is for all: the memory is one.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub fn thread_has_x86_order(&self, given: bool) {
+        if let Some(shared) = &self.shared {
+            if !given {
+                shared.x86_order.store(REFUSED, Ordering::Relaxed);
+            } else {
+                let _ = shared.x86_order.compare_exchange(NOT_ASKED, GIVEN, Ordering::Relaxed, Ordering::Relaxed);
+            }
+        }
+    }
+
     /// How many stores into guarded code the threads of this memory have made; and
     /// one more of them, made by this thread. Nothing where there is one thread.
     #[inline(always)]
@@ -237,7 +267,7 @@ impl Mem {
     /// interpreter's accesses are few beside the blocks'.
     #[inline(always)]
     fn ordered(&self) {
-        if self.shared.is_some() {
+        if self.must_order() {
             std::sync::atomic::fence(Ordering::SeqCst);
         }
     }

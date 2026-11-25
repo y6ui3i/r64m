@@ -2764,3 +2764,51 @@ The card, written before the run.
   - Found with the mode too → the mode is not what it says in this VM: not used
 - **Cut-off**: the probe, each way for at most a minute; then the build and the
   timings of R034's table.
+
+The result (this Mac's Docker VM: OrbStack's arm64 Linux 7.2 on an Apple M1).
+
+**As guessed, and plainly: without the mode x was behind y in half of all looks; with
+it, never. A guest's threads now ask for it and keep their plain blocks.**
+
+The probe (a program of the host's own, not kept: one thread stores a rising count to
+x and then to y, another loads y and then x, with plain stores and loads; 15 seconds
+each, twice):
+
+| | looks | x found behind y |
+|---|---|---|
+| without the mode | 13,310,168,064 | 6,926,587,365 |
+| with the mode | 543,300,608 | 0 |
+| without, again | 13,243,520,000 | 7,003,202,331 |
+| with, again | 567,986,176 | 0 |
+
+Half of all looks without it: the second load is made before the first is done, and
+nothing puts that right. So the order that arm64 does not keep is not a rare thing
+here; a block of plain loads would have shown it to any program that shares memory
+without a lock. (With the mode the reader makes a twentieth as many looks in the
+time: the processor does over again what it did out of order, as an x86 does. That
+is the cost of two threads reading and writing the same words, on x86 too.)
+
+What was built: when a guest's `clone` first shares the memory, the thread that
+shares it asks the kernel for the mode, and each new thread asks as it starts. If
+every one is given it, blocks stay plain and the interpreter leaves its barrier out.
+If any is refused (a host without it: a Raspberry Pi; a kernel that does not offer
+it), all threads go to R034's ordered blocks. `R64M_NO_X86_ORDER` refuses on
+purpose, to test that way on a host that has the mode.
+
+| CPU ms, least of five | not ordered (R033) | ordered by instructions (R034) | the processor's order |
+|---|---|---|---|
+| Python's four threads summing | 119 | 199 | 136 |
+| Python's eight threads taking one lock 160,000 times | 248 | 972 | 302 |
+
+The mode costs 1.14 and 1.22 times what no order at all cost, where the
+instructions cost 1.67 and 3.9.
+
+Both ways are held: the nine Python cases in the three ways with the mode (27 of 27)
+and with it refused (27 of 27); the threads program twenty of twenty each way; the
+109 unit tests plain and ordered and the 62 programs on both hosts; the Alpine cases
+126 of 126.
+
+Not shown: the mode on any other host (Docker Desktop's VM, a Mac running Linux
+itself); that every program's order is right with it (the probe is one pattern, the
+one arm64 is known to break most easily); a guest thread started while another
+host thread of r64m's own exists (there is none).

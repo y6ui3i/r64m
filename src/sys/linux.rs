@@ -260,12 +260,16 @@ fn thread(c: &mut Cpu, m: &mut Mem, s: &mut Sys, flags: u64, stack: u64, parent_
         its.clear_tid = child_tid;
     }
     let mut view = m.view();
+    // The memory is shared from here: the thread that shares it asks for the
+    // processor's x86 order, and the new one will as it starts.
+    m.thread_has_x86_order(ask_x86_order());
     let (tell, told) = std::sync::mpsc::channel();
     let set_tid = flags & CLONE_CHILD_SETTID != 0;
     super::THREADS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     std::thread::Builder::new()
         .spawn(move || {
             let tid = unsafe { libc::gettid() };
+            view.thread_has_x86_order(ask_x86_order());
             if set_tid {
                 let _ = view.write_u32(child_tid, tid as u32);
             }
@@ -278,6 +282,18 @@ fn thread(c: &mut Cpu, m: &mut Mem, s: &mut Sys, flags: u64, stack: u64, parent_
         let _ = m.write_u32(parent_tid, tid as u32);
     }
     Ok(tid as u64)
+}
+
+/// Asks the kernel to have the processor order this thread's memory as x86 does
+/// (TSO); says whether it was given. Apple's processors can, and a kernel that lets a
+/// thread ask takes the Asahi kernel's call (`PR_SET_MEM_MODEL`, 4D4D444Ch, with 1).
+/// Shown to do what it says in R035. Anywhere else the answer is no, and loads and
+/// stores are ordered by the instructions that make them (R034).
+fn ask_x86_order() -> bool {
+    if std::env::var_os("R64M_NO_X86_ORDER").is_some() {
+        return false;
+    }
+    unsafe { libc::prctl(0x4d4d_444c, 1 as libc::c_ulong, 0 as libc::c_ulong, 0 as libc::c_ulong, 0 as libc::c_ulong) == 0 }
 }
 
 /// The end of one thread of the guest's (see `sys::end_thread`).

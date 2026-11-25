@@ -210,9 +210,10 @@ impl Jit {
             // into such code could drop only its own blocks; every other thread drops
             // its guarded ones here, when it next comes by.
             m.sync();
-            if !self.ordered && m.is_shared() {
-                // A second thread: every block from here on is ordered, and those
-                // made before are dropped.
+            if !self.ordered && m.must_order() {
+                // A second thread, on a host that does not order memory as x86 does
+                // by itself: every block from here on is ordered, and those made
+                // before are dropped.
                 self.ordered = true;
                 self.empty(m);
                 arrived = true;

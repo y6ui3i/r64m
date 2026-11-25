@@ -100,7 +100,10 @@ is x86-64's: each thread's registers, and the frame a handler is entered with.
      test of r64m's would show and a real server sooner or later would); the
      processor's own x86 order where the host has it (Apple's, and only if the
      kernel lets a process ask: to be looked at; a Raspberry Pi has none).
-   - (Threads were built first with plain loads and stores, R033; ordered in R034.)
+   - (Threads were built first with plain loads and stores, R033; ordered in R034.
+     As built in R035: where the kernel gives a thread the processor's own x86 order,
+     every thread of the guest's asks for it and blocks stay plain; the ordered
+     blocks are for hosts that have no such thing.)
 
 ## Not yet
 
