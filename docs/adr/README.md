@@ -30,4 +30,4 @@ Each file has: **Status** (accepted, or replaced by which), **Context**, **Decis
 | [0015](0015-sse-in-blocks.md) | SSE in blocks: the host's vector registers, the interpreter for what is not a number |
 | [0016](0016-only-writable-code-is-guarded.md) | Only code the guest may write is guarded against writes |
 | [0017](0017-the-containers-way.md) | The container's way: a program's system calls are the host kernel's |
-| [0018](0018-one-thing-well.md) | r64m does one thing: it runs an x86-64 program's instructions; it is not a machine |
+| [0018](0018-one-thing-well.md) | r64m does one thing: on Arm, it behaves as x86-64; a machine may come of it by a fork |

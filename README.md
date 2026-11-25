@@ -39,10 +39,10 @@ a Python process serving FastAPI, and `Hello, world` comes back
 
 ## What r64m is not
 
-- **Not a machine.** r64m does one thing ([0018](docs/adr/0018-one-thing-well.md)): it
-  runs the instructions of an x86-64 Linux program. It boots no kernel and has no
-  disk; a program's files, processes and network are the host kernel's. The machine
-  is g64m's.
+- **Not a machine.** r64m does one thing ([0018](docs/adr/0018-one-thing-well.md)): on
+  Arm, it behaves as x86-64. It boots no kernel and has no disk; a program's files,
+  processes and network are the host kernel's. A machine may be made from it by a
+  fork; it is not grown here.
 - **Not a boundary of security.** A program's memory is the host's
   ([0008](docs/adr/0008-a-programs-memory-is-the-hosts.md)): the guest and r64m are one
   process with one set of rights, and an address that no x86 program can form validly
