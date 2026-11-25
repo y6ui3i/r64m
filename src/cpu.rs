@@ -57,6 +57,8 @@ pub struct Cpu {
     pub fault_pc: u64,
     /// The jump generated code was left by, if it is one that can be rewritten to go
     /// to its target's block; zero if it was left some other way.
+    /// Where generated code goes to leave: an address in `jit::enter`, written by it.
+    pub way_out: u64,
     pub left_from: u64,
     /// How many instructions the blocks ran that were run to their ends, since
     /// generated code was last gone into.
@@ -84,6 +86,7 @@ impl Cpu {
             steps: 0,
             flag_rec: [0; 3],
             fault_pc: 0,
+            way_out: 0,
             left_from: 0,
             ran: 0,
             xmm: [0; 32],

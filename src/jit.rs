@@ -14,7 +14,7 @@
 //! | x19 | the address of the `Cpu` |
 //! | x20 | the base of the guest's memory |
 //! | x21 to x23 | the record of the flags |
-//! | x24 | the address of the way out |
+//! | x24 | the address of the way out; in blocks with ordered accesses (ADR 0019, point D) the host's address of each, the way out's being in the `Cpu` too |
 //! | x25, x26 | scratch that the way in saves |
 //! | x27 | how many instructions the blocks run to their ends have run |
 //! | x28 | the address of the table of blocks (`TABLE_BITS`) |
@@ -36,7 +36,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// way out, while generated code runs.
 pub const CPU: u8 = 19;
 pub const BASE: u8 = 20;
-pub const OUT: u8 = 24;
+/// The host register that holds the host's address of an ordered load or store.
+pub const HOST: u8 = 24;
 /// The host register that counts the instructions of the blocks run to their ends.
 pub const RAN: u8 = 27;
 /// The host register that holds the address of the table generated code looks a
@@ -89,7 +90,11 @@ pub unsafe extern "C" fn enter(cpu: *mut Cpu, code: *const u8, base: *mut u8, ta
         "mov x20, x2",
         "mov x28, x3",
         "mov x17, x1",
+        // The way out's address: in x24 for blocks that leave it there, and in the
+        // `Cpu` for those that use x24 (ordered accesses) and for the handler of
+        // faults.
         "adr x24, 2f",
+        "str x24, [x19, #{out}]",
         "ldp x21, x22, [x19, #{rec}]",
         "ldr x23, [x19, #{rec} + 16]",
         "ldp x0, x1, [x19, #{reg}]",
@@ -146,6 +151,7 @@ pub unsafe extern "C" fn enter(cpu: *mut Cpu, code: *const u8, base: *mut u8, ta
         rec = const offset_of!(Cpu, flag_rec),
         ran = const offset_of!(Cpu, ran),
         xmm = const offset_of!(Cpu, xmm),
+        out = const offset_of!(Cpu, way_out),
         loaded = const XMM_LOADED,
         kept = const KEPT_D8,
     )
@@ -358,7 +364,7 @@ extern "C" fn on_fault(signal: libc::c_int, _info: *mut libc::siginfo_t, context
     let cpu = regs[CPU as usize] as *mut Cpu;
     unsafe { (*cpu).fault_pc = *pc };
     regs[REASON as usize] = LEFT_BY_FAULT;
-    *pc = regs[OUT as usize];
+    *pc = unsafe { (*cpu).way_out };
 }
 
 #[cfg(test)]
@@ -368,8 +374,12 @@ mod tests {
     use crate::mem::{Mem, PAGE, R, W};
 
     /// The end of a block made by hand: the reason, and the jump to the way out.
-    fn leave(reason: u64) -> [u32; 2] {
-        [a64::movz(true, REASON, reason as u16, 0), a64::br(OUT)]
+    fn leave(reason: u64) -> [u32; 3] {
+        [
+            a64::movz(true, REASON, reason as u16, 0),
+            a64::mem_imm(Size::X, Op::Load, 17, CPU, offset_of!(Cpu, way_out) as u32),
+            a64::br(17),
+        ]
     }
 
     fn cpu() -> Cpu {

@@ -2692,3 +2692,44 @@ The card, written before the run.
 - **Cut-off**: all tests on both hosts; the primitives raced against R033's build
   (three at once, least of three); the Python cases with threads timed plain and
   ordered, five runs each.
+
+The result (this Mac's Docker VM; CPU time by the sampler, milliseconds).
+
+**It is right by every test, a program with one thread pays nothing, and a program
+with threads pays far more than was guessed: the card's third line.**
+
+What was built: `ldapr` and `stlr` in the encoder; every load and store of the
+guest's memory in a block goes through one place (`Emit::mem`, `Emit::fmem`), which
+writes it plain or, ordered, as the host's address in x24 and the ordered
+instruction (a vector register by way of general ones); a thread's blocks are
+dropped and made ordered when the memory is first shared; the interpreter's accesses
+are followed by a full barrier when it is shared; an ordered access the host refuses
+(16 bytes not aligned and across a line of 16) leaves the block for the interpreter,
+which the tests met and passed through. `--jit-ordered` makes every block ordered,
+to measure; the unit tests can be run so (`R64M_ORDERED`).
+
+All 109 unit tests pass plain and with every block ordered, on macOS and in the Linux
+container; the 62 programs in the four JIT modes on both; the Python cases 27 of 27
+and the Alpine ones 126 of 126.
+
+| CPU ms, least of the runs | plain | ordered | |
+|---|---|---|---|
+| `cc1 -O2 apply.i` (one thread), every block ordered by `--jit-ordered` | 3,225 | 4,947 | 1.53 |
+| Python summing squares (one thread), the same | 678 | 1,063 | 1.57 |
+| Python's four threads summing | 123 | 203 | 1.65 |
+| Python's eight threads taking one lock 160,000 times | 251 | 983 | 3.9 |
+
+(The last counts the time eight threads spend waiting for one another too, and an
+interpreted LOCK now costs barriers; it is not all loads and stores.)
+
+A program with one thread: the way out's address was first moved out of x24 for
+every block, and `cc1` took 3,196 for 3,117 (least of six), 2.5% more: over the
+card's 1%. Plain blocks keep it in x24 again and only ordered ones load it: 3,164
+for 3,157.
+
+So ordering by the instructions costs a program with threads half again and more.
+The card's next move for that is the processor's own x86 order. A first look, made
+here because it is one call: **this VM's kernel takes it.** `prctl(PR_SET_MEM_MODEL,
+TSO)` (the Asahi kernel's call, 4D4D444Ch) answers 0 in an arm64 container, and the
+model read back is 1. Whether memory is then ordered as x86 orders it, and what a
+thread's blocks should do with it, is R035.

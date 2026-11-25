@@ -231,6 +231,17 @@ impl Mem {
         self.shared.as_ref().map_or(0, |shared| shared.guarded_writes.fetch_add(1, Ordering::AcqRel) + 1)
     }
 
+    /// After an access of the interpreter's to the guest's memory: where there are
+    /// other threads, nothing of this thread's that comes after may be seen or see
+    /// before it, which is more than x86 asks and so enough (ADR 0019, point D). The
+    /// interpreter's accesses are few beside the blocks'.
+    #[inline(always)]
+    fn ordered(&self) {
+        if self.shared.is_some() {
+            std::sync::atomic::fence(Ordering::SeqCst);
+        }
+    }
+
     #[cold]
     fn renew(&mut self) {
         let shared = self.shared.clone().expect("called for a shared list");
@@ -394,6 +405,7 @@ impl Mem {
         }
         // The list allowed it, and the host is at least as open as the list.
         unsafe { ptr::copy_nonoverlapping(from.as_ptr(), self.host(addr), from.len()) };
+        self.ordered();
         Ok(())
     }
 
@@ -530,6 +542,7 @@ impl Mem {
     fn copy_out(&self, addr: u64, into: &mut [u8], access: Access) -> Result<(), Fault> {
         self.check(addr, into.len() as u64, access)?;
         unsafe { ptr::copy_nonoverlapping(self.host(addr), into.as_mut_ptr(), into.len()) };
+        self.ordered();
         Ok(())
     }
 

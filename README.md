@@ -29,9 +29,10 @@ code is guarded against writes only where the guest may write it
 ([0016](docs/adr/0016-only-writable-code-is-guarded.md)). On a Linux host a dynamically
 linked program runs with its files and its child processes: busybox's shell and its
 programs in an x86-64 Alpine container (R026), GCC there (R027), and Python 3.13 on
-Debian with its threads (R033). **A program with more than one thread is not yet to
-be trusted**: memory is not yet ordered between threads as x86 orders it
-([0019](docs/adr/0019-threads-and-signals.md), point D). No signal is delivered to a
+Debian with its threads (R033). Between threads memory is ordered as x86 orders it
+([0019](docs/adr/0019-threads-and-signals.md), point D; R034): a process's blocks
+are made with ordered loads and stores from its second thread on, which costs such
+a program half again and more. No signal is delivered to a
 handler, there are no sockets, and there is no machine.
 
 ## The principle, the aim, the goal
@@ -126,8 +127,9 @@ real CPU does.
    (R030: 266 s for 590 s, three builds each; Rosetta 168 s), and 2.9 times since
    R031 (203 s). `--profile` shows where r64m's own time goes. Python 3.13 runs,
    and its threads (R033): a guest thread is a host thread
-   ([0019](docs/adr/0019-threads-and-signals.md)). Next: memory ordered between
-   threads as x86 orders it; sockets and `epoll`; signals delivered.
+   ([0019](docs/adr/0019-threads-and-signals.md)). Memory is ordered
+   between threads as x86 orders it (R034). Next: the processor's own x86 order
+   where the host has it; sockets and `epoll`; signals delivered.
 
 One case is owed: the x87's square root when what is left over equals the root (the
 rounding there is not touched by any of g64m's cases; found by breaking it on purpose).

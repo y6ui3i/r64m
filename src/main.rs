@@ -176,6 +176,9 @@ fn main() {
     let jit_why = option("--jit-why");
     // For the tests: every block made the first time its address is arrived at.
     let jit_now = option("--jit-now");
+    // For measuring: every block with ordered loads and stores, as a process with
+    // more than one thread has them.
+    let jit_ordered = option("--jit-ordered");
     let jit = option("--jit") || jit_check;
     let trace_xmm = args.first().is_some_and(|a| a == "--trace-xmm");
     let trace = trace_xmm || args.first().is_some_and(|a| a == "--trace");
@@ -255,6 +258,7 @@ fn main() {
             made.why = Some(Default::default());
         }
         made.timed = jit_stats;
+        made.ordered = jit_ordered;
         Some(made)
     } else {
         None

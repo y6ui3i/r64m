@@ -160,6 +160,17 @@ pub fn mem_reg(size: Size, op: Mem, rt: u8, rn: u8, rm: u8) -> u32 {
     (size as u32) << 30 | 0x3820_6800 | (op as u32) << 22 | r(rm) << 16 | r(rn) << 5 | r(rt)
 }
 
+/// A load that sees every store released before it, and a store that releases: at a
+/// register's address and nowhere else. Between threads these keep the order x86
+/// keeps (ADR 0019, point D). The rest of the register a load writes is zero.
+pub fn ldapr(size: Size, rt: u8, rn: u8) -> u32 {
+    (size as u32) << 30 | 0x38bf_c000 | r(rn) << 5 | r(rt)
+}
+
+pub fn stlr(size: Size, rt: u8, rn: u8) -> u32 {
+    (size as u32) << 30 | 0x089f_fc00 | r(rn) << 5 | r(rt)
+}
+
 /// A load or a store at a register and a constant, which is a multiple of the size and
 /// less than 4096 of them.
 pub fn mem_imm(size: Size, op: Mem, rt: u8, rn: u8, offset: u32) -> u32 {
@@ -408,6 +419,16 @@ pub enum VLogic {
 
 pub fn vlogic(op: VLogic, rd: u8, rn: u8, rm: u8) -> u32 {
     op as u32 | r(rm) << 16 | r(rn) << 5 | r(rd)
+}
+
+/// The 64-bit element above the lowest of a vector register, from a general register
+/// (the lowest kept) and to one.
+pub fn ins_high_from(rd: u8, rn: u8) -> u32 {
+    0x4e18_1c00 | r(rn) << 5 | r(rd)
+}
+
+pub fn high_to(rd: u8, rn: u8) -> u32 {
+    0x4e18_3c00 | r(rn) << 5 | r(rd)
 }
 
 /// How much of a vector register a load or a store is of.
@@ -761,6 +782,18 @@ mod tests {
             (vshift(VShift::Shl, Lane::S, 1, 1, 24), 0x4f385421, "shl v1.4s, v1.4s, #24"),
             (vshift(VShift::Shl, Lane::D, 1, 1, 63), 0x4f7f5421, "shl v1.2d, v1.2d, #63"),
             (vshift(VShift::Shl, Lane::H, 1, 1, 1), 0x4f115421, "shl v1.8h, v1.8h, #1"),
+            // (Apple clang, -march=armv8.4-a.)
+            (ldapr(Size::B, 3, 24), 0x38bfc303, "ldaprb w3, [x24]"),
+            (ldapr(Size::H, 3, 24), 0x78bfc303, "ldaprh w3, [x24]"),
+            (ldapr(Size::W, 3, 24), 0xb8bfc303, "ldapr w3, [x24]"),
+            (ldapr(Size::X, 15, 24), 0xf8bfc30f, "ldapr x15, [x24]"),
+            (ldapr(Size::X, 24, 24), 0xf8bfc318, "ldapr x24, [x24]"),
+            (stlr(Size::B, 3, 24), 0x089fff03, "stlrb w3, [x24]"),
+            (stlr(Size::H, 3, 24), 0x489fff03, "stlrh w3, [x24]"),
+            (stlr(Size::W, 3, 24), 0x889fff03, "stlr w3, [x24]"),
+            (stlr(Size::X, 15, 24), 0xc89fff0f, "stlr x15, [x24]"),
+            (ins_high_from(3, 30), 0x4e181fc3, "mov v3.d[1], x30"),
+            (high_to(29, 3), 0x4e183c7d, "mov x29, v3.d[1]"),
             (ins_high(1, 17), 0x6e180621, "mov v1.d[1], v17.d[0]"),
             (ins_high(9, 2), 0x6e180449, "mov v9.d[1], v2.d[0]"),
             (ext(1, 1, 16, 3), 0x6e101821, "ext v1.16b, v1.16b, v16.16b, #3"),
@@ -775,7 +808,7 @@ mod tests {
         for (ours, theirs, name) in cases {
             assert_eq!(ours, theirs, "{name}: {ours:08x}, the assembler {theirs:08x}");
         }
-        assert_eq!(cases.len(), 237);
+        assert_eq!(cases.len(), 248);
     }
 
     #[test]

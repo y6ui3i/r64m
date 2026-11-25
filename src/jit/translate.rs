@@ -20,7 +20,7 @@
 //!   between (R009).
 
 use super::a64::{self, Cond, Fp, FpSize, Lane, Logic, Mem as Op, Shift, Size, V3, VLogic, VShift};
-use super::{BASE, CPU, KEPT_D8, LEFT_AT_END, LEFT_FOR_THE_INTERPRETER, OUT, RAN, REASON, TABLE, TABLE_BITS, XMM_LOADED};
+use super::{BASE, CPU, HOST, KEPT_D8, LEFT_AT_END, LEFT_FOR_THE_INTERPRETER, RAN, REASON, TABLE, TABLE_BITS, XMM_LOADED};
 use crate::cpu::{Cpu, REC_ADC, REC_ADD, REC_ADD_BY_RESULT, REC_BSF, REC_BSR, REC_CARRY_GIVEN, REC_FLOAT, REC_IMUL, REC_KEEP, REC_LOGIC, REC_MUL, REC_SBB, REC_SHIFT, REC_SUB, REC_SUB_BY_RESULT};
 use crate::mem::Mem;
 use std::mem::offset_of;
@@ -676,6 +676,9 @@ fn condition(cc: u8, flags: HostFlags) -> Option<Jump> {
 
 struct Emit<'a> {
     w: Vec<u32>,
+    /// Loads and stores of the guest's memory are ordered as x86 orders them: the
+    /// process has more than one thread.
+    ordered: bool,
     /// The segment the memory operand of the instruction being translated is
     /// relative to (`Ins::seg`); nothing for LEA, which only works an address out.
     seg: u8,
@@ -723,6 +726,68 @@ impl Emit<'_> {
 
     fn put(&mut self, word: u32) {
         self.w.push(word);
+    }
+
+    /// The jump to the way out. Its address is in x24 as the way in left it, but for
+    /// blocks with ordered accesses, which use x24 for an address: those load it from
+    /// the `Cpu`. (T1 is free wherever a block leaves. Loading it always cost a
+    /// compilation with one thread 1 to 2 in a hundred, R034.)
+    fn way_out(&mut self) {
+        if self.ordered {
+            self.put(a64::mem_imm(Size::X, Op::Load, T1, CPU, offset_of!(Cpu, way_out) as u32));
+            self.put(a64::br(T1));
+        } else {
+            self.put(a64::br(HOST));
+        }
+    }
+
+    /// A load from the guest's memory at the address in `at`, or a store to it: plain,
+    /// or, where memory is shared between threads, ordered as x86 orders it (ADR
+    /// 0019, point D): the host's address worked out, then the load that sees what
+    /// was released or the store that releases. Either way one instruction touches
+    /// the memory, and a fault is at it.
+    fn mem(&mut self, size: Size, op: Op, rt: u8, at: u8) {
+        if !self.ordered {
+            return self.put(a64::mem_reg(size, op, rt, BASE, at));
+        }
+        self.put(a64::arith(true, false, false, HOST, BASE, at, 0));
+        match op {
+            Op::Store => self.put(a64::stlr(size, rt, HOST)),
+            Op::Load => self.put(a64::ldapr(size, rt, HOST)),
+            Op::LoadSigned => {
+                self.put(a64::ldapr(size, rt, HOST));
+                self.put(a64::sxt(true, rt, rt, 8 << size as u32));
+            }
+        }
+    }
+
+    /// The same for a vector register. Ordered, it goes by way of T4 (and T5 for the
+    /// upper half of all 128 bits): the host's ordered accesses are of general
+    /// registers. A register loaded is not changed before its last load.
+    fn fmem(&mut self, size: FpSize, load: bool, rt: u8, at: u8) {
+        if !self.ordered {
+            return self.put(a64::fp_mem(size, load, rt, BASE, at));
+        }
+        let part = if size == FpSize::S { Size::W } else { Size::X };
+        let wide = size != FpSize::S;
+        if !load {
+            self.put(a64::fmov_from_fp(wide, T4, rt));
+            if size == FpSize::Q {
+                self.put(a64::high_to(T5, rt));
+            }
+        }
+        self.put(a64::arith(true, false, false, HOST, BASE, at, 0));
+        self.put(if load { a64::ldapr(part, T4, HOST) } else { a64::stlr(part, T4, HOST) });
+        if size == FpSize::Q {
+            self.put(a64::arith_imm(true, false, false, HOST, HOST, 8, false));
+            self.put(if load { a64::ldapr(Size::X, T5, HOST) } else { a64::stlr(Size::X, T5, HOST) });
+        }
+        if load {
+            self.put(a64::fmov_to_fp(wide, rt, T4));
+            if size == FpSize::Q {
+                self.put(a64::ins_high_from(rt, T5));
+            }
+        }
     }
 
     fn constant(&mut self, rd: u8, value: u64) {
@@ -864,7 +929,7 @@ impl Emit<'_> {
         self.constant(T0, at);
         self.put(a64::mem_imm(Size::X, Op::Store, T0, CPU, offset_of!(Cpu, rip) as u32));
         self.put(a64::movz(true, REASON, LEFT_FOR_THE_INTERPRETER as u16, 0));
-        self.put(a64::br(OUT));
+        self.way_out();
     }
 
     /// A jump, if what the host's instruction made is not a number (the host's
@@ -883,7 +948,7 @@ impl Emit<'_> {
             Rm::Reg(s) => s,
             Rm::Mem { base, index, disp } => {
                 let a = self.address(base, index, disp);
-                self.put(a64::fp_mem(size, true, V1, BASE, a));
+                self.fmem(size, true, V1, a);
                 V1
             }
         }
@@ -906,7 +971,7 @@ impl Emit<'_> {
                 (Rm::Reg(s), true) => self.put(a64::ins_low(double, reg, s)),
                 (Rm::Mem { base, index, disp }, scalar) => {
                     let a = self.address(base, index, disp);
-                    self.put(a64::fp_mem(if scalar { low } else { FpSize::Q }, true, reg, BASE, a));
+                    self.fmem(if scalar { low } else { FpSize::Q }, true, reg, a);
                 }
             },
             // And out of one.
@@ -915,7 +980,7 @@ impl Emit<'_> {
                 (Rm::Reg(d), true) => self.put(a64::ins_low(double, d, reg)),
                 (Rm::Mem { base, index, disp }, scalar) => {
                     let a = self.address(base, index, disp);
-                    self.put(a64::fp_mem(if scalar { low } else { FpSize::Q }, false, reg, BASE, a));
+                    self.fmem(if scalar { low } else { FpSize::Q }, false, reg, a);
                 }
             },
             // Into the upper half, the lower kept: from memory, or another's lower.
@@ -928,7 +993,7 @@ impl Emit<'_> {
                 Rm::Reg(s) => self.put(a64::fmov_to_fp(wide, reg, s)),
                 Rm::Mem { base, index, disp } => {
                     let a = self.address(base, index, disp);
-                    self.put(a64::fp_mem(if wide { FpSize::D } else { FpSize::S }, true, reg, BASE, a));
+                    self.fmem(if wide { FpSize::D } else { FpSize::S }, true, reg, a);
                 }
             },
             // MOVD and MOVQ to a general register or memory (66h).
@@ -936,7 +1001,7 @@ impl Emit<'_> {
                 Rm::Reg(d) => self.put(a64::fmov_from_fp(wide, d, reg)),
                 Rm::Mem { base, index, disp } => {
                     let a = self.address(base, index, disp);
-                    self.put(a64::fp_mem(if wide { FpSize::D } else { FpSize::S }, false, reg, BASE, a));
+                    self.fmem(if wide { FpSize::D } else { FpSize::S }, false, reg, a);
                 }
             },
             // MOVQ between XMM registers or from memory (F3h): the upper half zero.
@@ -944,7 +1009,7 @@ impl Emit<'_> {
                 Rm::Reg(s) => self.put(a64::fmov(true, reg, s)),
                 Rm::Mem { base, index, disp } => {
                     let a = self.address(base, index, disp);
-                    self.put(a64::fp_mem(FpSize::D, true, reg, BASE, a));
+                    self.fmem(FpSize::D, true, reg, a);
                 }
             },
             // MOVQ to an XMM register (its upper half zero) or to memory.
@@ -952,7 +1017,7 @@ impl Emit<'_> {
                 Rm::Reg(d) => self.put(a64::fmov(true, d, reg)),
                 Rm::Mem { base, index, disp } => {
                     let a = self.address(base, index, disp);
-                    self.put(a64::fp_mem(FpSize::D, false, reg, BASE, a));
+                    self.fmem(FpSize::D, false, reg, a);
                 }
             },
             // AND, ANDN (not the register, and the operand), OR, XOR of all 128 bits.
@@ -1249,7 +1314,7 @@ impl Emit<'_> {
             Rm::Reg(d) => (self.small(ins, d, T2), None),
             Rm::Mem { base, index, disp } => {
                 let at = self.address(base, index, disp);
-                self.put(a64::mem_reg(small, Op::Load, T2, BASE, at));
+                self.mem(small, Op::Load, T2, at);
                 (T2, Some(at))
             }
         };
@@ -1286,7 +1351,7 @@ impl Emit<'_> {
         match (dst, at) {
             (_, Some(at)) => {
                 if keeps {
-                    self.put(a64::mem_reg(small, Op::Store, T4, BASE, at));
+                    self.mem(small, Op::Store, T4, at);
                 }
                 self.record(kind_of, bits, rec_a, rec_b);
             }
@@ -1314,7 +1379,7 @@ impl Emit<'_> {
             Rm::Reg(d) => (d, d, None),
             Rm::Mem { base, index, disp } => {
                 let at = self.address(base, index, disp);
-                self.put(a64::mem_reg(size(bits), Op::Load, T2, BASE, at));
+                self.mem(size(bits), Op::Load, T2, at);
                 (T2, T0, Some(at))
             }
         };
@@ -1364,7 +1429,7 @@ impl Emit<'_> {
         }
         if let Some(at) = at {
             if keeps {
-                self.put(a64::mem_reg(size(bits), Op::Store, to, BASE, at));
+                self.mem(size(bits), Op::Store, to, at);
             }
             // Memory's old value is still in T2: recorded when the store is done.
             if matches!(kind, 2 | 3) {
@@ -1424,7 +1489,7 @@ impl Emit<'_> {
     fn out(&mut self) {
         self.put(a64::mem_imm(Size::X, Op::Store, T0, CPU, offset_of!(Cpu, rip) as u32));
         self.put(a64::movz(true, REASON, LEFT_AT_END as u16, 0));
-        self.put(a64::br(OUT));
+        self.way_out();
     }
 }
 
@@ -1449,8 +1514,15 @@ fn size(bits: u32) -> Size {
 /// Translates the block that begins at `rip`. `None` if its first instruction is not
 /// one that is translated. With `exact` every record of the flags is written, whether
 /// or not anything can read them.
+#[cfg(test)]
 pub fn translate(m: &Mem, rip: u64, exact: bool) -> Option<Built> {
-    let mut e = Emit { w: Vec::new(), seg: 0, flags: None, m, rip, exact, skip: false, seen: None, later: None, host: true, bails: Vec::new() };
+    translate_as(m, rip, exact, false)
+}
+
+/// The same; with `ordered`, for a process that has more than one thread: every load
+/// and store of the guest's memory keeps x86's order between threads.
+pub fn translate_as(m: &Mem, rip: u64, exact: bool, ordered: bool) -> Option<Built> {
+    let mut e = Emit { w: Vec::new(), ordered, seg: 0, flags: None, m, rip, exact, skip: false, seen: None, later: None, host: true, bails: Vec::new() };
     let mut starts = Vec::new();
     let mut taken: Vec<Taken> = Vec::new();
     let mut sse = false;
@@ -1550,9 +1622,9 @@ pub fn translate(m: &Mem, rip: u64, exact: bool) -> Option<Built> {
                 Rm::Reg(d) => e.put(a64::mvn(wide, d, d)),
                 Rm::Mem { base, index, disp } => {
                     let a = e.address(base, index, disp);
-                    e.put(a64::mem_reg(size(bits), Op::Load, T2, BASE, a));
+                    e.mem(size(bits), Op::Load, T2, a);
                     e.put(a64::mvn(wide, T4, T2));
-                    e.put(a64::mem_reg(size(bits), Op::Store, T4, BASE, a));
+                    e.mem(size(bits), Op::Store, T4, a);
                 }
             },
             0xf7 if field >= 4 => {
@@ -1734,7 +1806,7 @@ pub fn translate(m: &Mem, rip: u64, exact: bool) -> Option<Built> {
                             Rm::Reg(d) => e.set_small(&ins, d, T4),
                             Rm::Mem { base, index, disp } => {
                                 let a = e.address(base, index, disp);
-                                e.put(a64::mem_reg(Size::B, Op::Store, T4, BASE, a));
+                                e.mem(Size::B, Op::Store, T4, a);
                             }
                         }
                     }
@@ -1779,7 +1851,7 @@ pub fn translate(m: &Mem, rip: u64, exact: bool) -> Option<Built> {
                     Rm::Reg(d) => e.put(a64::mov(wide, d, src)),
                     Rm::Mem { base, index, disp } => {
                         let a = e.address(base, index, disp);
-                        e.put(a64::mem_reg(size(bits), Op::Store, src, BASE, a));
+                        e.mem(size(bits), Op::Store, src, a);
                     }
                 }
             }
@@ -1791,7 +1863,7 @@ pub fn translate(m: &Mem, rip: u64, exact: bool) -> Option<Built> {
                 Rm::Reg(s) => e.put(a64::mov(wide, reg, s)),
                 Rm::Mem { base, index, disp } => {
                     let a = e.address(base, index, disp);
-                    e.put(a64::mem_reg(size(bits), Op::Load, reg, BASE, a));
+                    e.mem(size(bits), Op::Load, reg, a);
                 }
             },
             0x8d => {
@@ -1808,7 +1880,7 @@ pub fn translate(m: &Mem, rip: u64, exact: bool) -> Option<Built> {
                 Rm::Mem { base, index, disp } => {
                     e.constant(T3, ins.imm as u64);
                     let a = e.address(base, index, disp);
-                    e.put(a64::mem_reg(size(bits), Op::Store, T3, BASE, a));
+                    e.mem(size(bits), Op::Store, T3, a);
                 }
             },
             0xb8..=0xbf => e.constant(reg, if wide { ins.imm as u64 } else { ins.imm as u32 as u64 }),
@@ -1816,7 +1888,7 @@ pub fn translate(m: &Mem, rip: u64, exact: bool) -> Option<Built> {
                 Rm::Reg(s) => e.put(a64::sxt(true, reg, s, 32)),
                 Rm::Mem { base, index, disp } => {
                     let a = e.address(base, index, disp);
-                    e.put(a64::mem_reg(Size::W, Op::LoadSigned, reg, BASE, a));
+                    e.mem(Size::W, Op::LoadSigned, reg, a);
                 }
             },
             0x63 => {
@@ -1836,7 +1908,7 @@ pub fn translate(m: &Mem, rip: u64, exact: bool) -> Option<Built> {
                     Rm::Reg(s) => e.put(a64::uxt(reg, s, from)),
                     Rm::Mem { base, index, disp } => {
                         let a = e.address(base, index, disp);
-                        e.put(a64::mem_reg(small, if signed { Op::LoadSigned } else { Op::Load }, reg, BASE, a));
+                        e.mem(small, if signed { Op::LoadSigned } else { Op::Load }, reg, a);
                         // The sign went to all 64 bits; a 32-bit result has none above.
                         if signed && !wide {
                             e.put(a64::mov(false, reg, reg));
@@ -1858,7 +1930,7 @@ pub fn translate(m: &Mem, rip: u64, exact: bool) -> Option<Built> {
                 e.push(src);
             }
             0x58..=0x5f => {
-                e.put(a64::mem_reg(Size::X, Op::Load, T0, BASE, RSP));
+                e.mem(Size::X, Op::Load, T0, RSP);
                 e.put(a64::arith_imm(true, false, false, RSP, RSP, 8, false));
                 e.put(a64::mov(true, reg, T0));
             }
@@ -1880,7 +1952,7 @@ pub fn translate(m: &Mem, rip: u64, exact: bool) -> Option<Built> {
                     Rm::Reg(s) => e.put(a64::mov(true, T2, s)),
                     Rm::Mem { base, index, disp } => {
                         let a = e.address(base, index, disp);
-                        e.put(a64::mem_reg(Size::X, Op::Load, T2, BASE, a));
+                        e.mem(Size::X, Op::Load, T2, a);
                     }
                 }
                 if field == 2 {
@@ -1892,7 +1964,7 @@ pub fn translate(m: &Mem, rip: u64, exact: bool) -> Option<Built> {
                 ended = true;
             }
             0xc3 => {
-                e.put(a64::mem_reg(Size::X, Op::Load, T0, BASE, RSP));
+                e.mem(Size::X, Op::Load, T0, RSP);
                 e.put(a64::arith_imm(true, false, false, RSP, RSP, 8, false));
                 e.leave_at_t0(starts.len());
                 ended = true;
@@ -2031,7 +2103,7 @@ impl Emit<'_> {
             Rm::Reg(s) => self.small(ins, s, T0),
             Rm::Mem { base, index, disp } => {
                 let a = self.address(base, index, disp);
-                self.put(a64::mem_reg(size(ins.size), Op::Load, T0, BASE, a));
+                self.mem(size(ins.size), Op::Load, T0, a);
                 T0
             }
         }
@@ -2040,7 +2112,7 @@ impl Emit<'_> {
     /// PUSH of a register's 64 bits: stored first, so that a fault finds RSP as it was.
     fn push(&mut self, src: u8) {
         self.put(a64::arith_imm(true, true, false, T1, RSP, 8, false));
-        self.put(a64::mem_reg(Size::X, Op::Store, src, BASE, T1));
+        self.mem(Size::X, Op::Store, src, T1);
         self.put(a64::mov(true, RSP, T1));
     }
 }

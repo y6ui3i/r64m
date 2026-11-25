@@ -2,8 +2,8 @@
 //! what is done when one is left, and the check of every block against the
 //! interpreter (ADR 0014, points 2, 7, 8 and 11).
 
-use super::translate::{translate, Built};
-use super::{a64, enter, Code, CPU, LEFT_AT_END, LEFT_FOR_THE_INTERPRETER, OUT, REASON, TABLE_BITS};
+use super::translate::{translate_as, Built};
+use super::{a64, enter, Code, CPU, LEFT_AT_END, LEFT_FOR_THE_INTERPRETER, REASON, TABLE_BITS};
 use crate::cpu::{self, Cpu, Step, Stop};
 use std::mem::offset_of;
 use crate::mem::{Access, Mem, PAGE};
@@ -107,6 +107,10 @@ pub struct Jit {
     /// (R029: `cc1` maps memory many thousand times, and each was a walk through
     /// every place known).
     known: std::collections::BTreeSet<u64>,
+    /// Blocks are made with ordered loads and stores (ADR 0019, point D): from when
+    /// the memory is first shared with another thread, or because it was asked for
+    /// (`--jit-ordered`, to measure what it costs).
+    pub ordered: bool,
     /// How many stores into guarded code, by any thread, this thread has taken
     /// account of (`Mem::guarded_writes`).
     writes_seen: u64,
@@ -156,7 +160,8 @@ impl Jit {
             a64::mem_imm(a64::Size::X, a64::Mem::Store, a64::ZR, CPU, offset_of!(Cpu, left_from) as u32),
             a64::mem_imm(a64::Size::X, a64::Mem::Store, REASON, CPU, offset_of!(Cpu, rip) as u32),
             a64::movz(true, REASON, LEFT_AT_END as u16, 0),
-            a64::br(OUT),
+            a64::mem_imm(a64::Size::X, a64::Mem::Load, 17, CPU, offset_of!(Cpu, way_out) as u32),
+            a64::br(17),
         ];
         self.miss = self.code.append(&miss).expect("room in a piece just emptied") as u64;
         // An address with every bit set chooses the last place; whatever is asked of
@@ -175,6 +180,8 @@ impl Jit {
             blocks: Vec::new(),
             places: HashMap::default(),
             known: Default::default(),
+            // (The tests can be run with every block ordered: R64M_ORDERED.)
+            ordered: cfg!(test) && std::env::var_os("R64M_ORDERED").is_some(),
             writes_seen: 0,
             timed: false,
             writes: HashMap::new(),
@@ -203,6 +210,13 @@ impl Jit {
             // into such code could drop only its own blocks; every other thread drops
             // its guarded ones here, when it next comes by.
             m.sync();
+            if !self.ordered && m.is_shared() {
+                // A second thread: every block from here on is ordered, and those
+                // made before are dropped.
+                self.ordered = true;
+                self.empty(m);
+                arrived = true;
+            }
             let writes = m.guarded_writes();
             if writes != self.writes_seen {
                 self.writes_seen = writes;
@@ -402,7 +416,7 @@ impl Jit {
         if self.writes.get(&page).is_some_and(|&n| n >= GIVEN_UP) {
             return false;
         }
-        let Some(Built { words, starts, end, seen }) = translate(m, rip, self.check) else {
+        let Some(Built { words, starts, end, seen }) = translate_as(m, rip, self.check, self.ordered) else {
             return false;
         };
         if std::env::var_os("R64M_JIT_DUMP").is_some() {
@@ -2571,7 +2585,10 @@ mod tests {
             c.reg[RSI] = DATA;
             c.reg[9] = 0xfedc_ba98_7654_3210;
         });
-        assert_eq!(n as usize, list.len() * 2);
+        // (Ordered, an access of 16 bytes that is not aligned and crosses a line of
+        // 16 is refused by the host and made by the interpreter: one of these, twice.)
+        let ordered = std::env::var_os("R64M_ORDERED").is_some();
+        assert_eq!(n as usize, list.len() * 2 - if ordered { 2 } else { 0 });
         // Said outright, one of each kind: movsd from a register keeps the upper half
         // and from memory clears it; movd clears all above 32 bits.
         let (c, _) = checked(&[0xf2, 0x0f, 0x10, 0xca, 0xf2, 0x0f, 0x10, 0x1e, 0x66, 0x0f, 0x6e, 0xe0, 0x0f, 0x05], &9u64.to_le_bytes(), &|c| {
