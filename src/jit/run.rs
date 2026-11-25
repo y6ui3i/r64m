@@ -391,23 +391,27 @@ impl Jit {
     }
 
     /// For `--jit-check`: what the interpreter makes of a block's instructions. The
-    /// CPU and the memory are put back as they were; what comes back is the CPU as the
+    /// CPU is not touched and the memory is put back as it was; what comes back is the CPU as the
     /// interpreter left it and what it wrote. `None` if the interpreter did not get
     /// through them all (a fault): then there is nothing to compare a whole block with.
-    fn interpreted(&self, id: usize, c: &mut Cpu, m: &mut Mem) -> Option<(Cpu, Vec<(u64, Vec<u8>)>)> {
+    fn interpreted(&self, id: usize, c: &Cpu, m: &mut Mem) -> Option<(Cpu, Vec<(u64, Vec<u8>)>)> {
         let n = self.blocks[id].starts.len();
-        let start = c.clone();
+        // On a copy: the thread's own `Cpu` holds the word the host's handler sets
+        // when a signal arrives, and is not to be written over with what it was
+        // before. (It was, until R043: a signal that arrived while the interpreter
+        // ran here was noted and never looked for, and a guest in a loop without
+        // calls went round for ever. About two runs in a hundred under load.)
+        let mut alone = c.clone();
         m.log_writes();
         let mut whole = true;
         for _ in 0..n {
-            if !matches!(cpu::step(c, m), Ok(Step::Next)) {
+            if !matches!(cpu::step(&mut alone, m), Ok(Step::Next)) {
                 whole = false;
                 break;
             }
         }
         let written = m.undo_writes();
-        let end = std::mem::replace(c, start);
-        whole.then_some((end, written))
+        whole.then_some((alone, written))
     }
 
     fn timed_make(&mut self, rip: u64, m: &mut Mem) -> bool {
@@ -2015,14 +2019,16 @@ mod tests {
                 cpu.reg[RSI] = DATA;
             });
         }
-        // Where the host's flags do not say what the carry is, it is the
-        // interpreter's: at a block's start, and after a shift.
+        // Where the host's flags do not say what the carry is, it is taken from the
+        // record if the record says its carry was given, and the instruction is left
+        // to the interpreter from inside the block if not (R043; before, the block
+        // ended before it): at a block's start, and after a shift.
         let block_of = |code: &[u8]| {
             let m = guest(code, &[]);
             translate(&m, CODE, false).map(|b| b.starts.len())
         };
-        assert_eq!(block_of(&[0x11, 0xf9, 0x0f, 0x05]), None);
-        assert_eq!(block_of(&[0xc1, 0xe0, 0x03, 0x11, 0xf9, 0x0f, 0x05]), Some(1));
+        assert_eq!(block_of(&[0x11, 0xf9, 0x0f, 0x05]), Some(1));
+        assert_eq!(block_of(&[0xc1, 0xe0, 0x03, 0x11, 0xf9, 0x0f, 0x05]), Some(2));
         assert_eq!(block_of(&[0x01, 0xd8, 0x11, 0xf9, 0x0f, 0x05]), Some(2));
         // And there it reads the record, which the instruction before must then have
         // written: an addition that is a block's last instruction, the ADC the next
@@ -2984,5 +2990,149 @@ mod tests {
         c.kick = 0;
         assert!(matches!(jit.run(&mut c, &mut m), Event::Syscall));
         assert_eq!((c.reg[RDX], c.reg[RBX]), (1000, 0));
+    }
+
+    #[test]
+    fn inc_and_dec_keep_the_carry_and_write_the_rest() {
+        // inc/dec of EAX and RAX; every condition after; the carry before both ways.
+        //   stc or clc is not translated, so the carry comes from cmp ebx, 1 (EBX 0 or 1):
+        //   cmp ebx, 1; inc/dec; jcc taken; mov edx, 1; jmp end; taken: mov edx, 2;
+        //   end: adc edx, 0; syscall
+        // The ADC reads the carry the INC kept, from the record: the jump before it
+        // ended the block the INC was in.
+        let values = [0u64, 1, 2, 0x7fff_ffff, 0x8000_0000, 0xffff_ffff, 0x7fff_ffff_ffff_ffff, 1 << 63, u64::MAX, 0x1_0000_0000];
+        let mut code = Vec::new();
+        let mut programs = Vec::new();
+        for form in [&[0xff, 0xc0][..], &[0xff, 0xc8], &[0x48, 0xff, 0xc0], &[0x48, 0xff, 0xc8]] {
+            for cc in 0..16u8 {
+                programs.push(CODE + code.len() as u64);
+                code.extend([0x83, 0xfb, 0x01]);
+                code.extend(form);
+                code.extend([0x70 | cc, 7, 0xba, 1, 0, 0, 0, 0xeb, 5, 0xba, 2, 0, 0, 0, 0x83, 0xd2, 0x00, 0x0f, 0x05]);
+            }
+        }
+        let mut m = guest(&code, &[]);
+        let mut jit = Jit::new(true, 1).unwrap();
+        let mut joined = Jit::new(false, 1).unwrap();
+        for &at in &programs {
+            for &v in &values {
+                for carry in [0u64, 1] {
+                    let set = |c: &mut Cpu| (c.reg[RAX], c.reg[RBX]) = (v, 1 - carry);
+                    both(&mut jit, &mut m, at, &set);
+                    let c = both(&mut joined, &mut m, at, &set);
+                    assert!(matches!(c.reg[RDX], 1..=3));
+                }
+            }
+        }
+        assert!(jit.stats.checked as usize >= programs.len());
+        // Of memory, at both widths, the flags read by SETcc in the same block and
+        // then by a jump on the carry in the next.
+        //   cmp ebx, 1; inc/dec [rsi]; seto dl; jmp +0; jc over; add edx, 4; over: syscall
+        for form in [&[0xff, 0x06][..], &[0xff, 0x0e], &[0x48, 0xff, 0x06], &[0x48, 0xff, 0x0e]] {
+            for &v in &values {
+                for carry in [0u64, 1] {
+                    let code = [&[0x83, 0xfb, 0x01][..], form, &[0x0f, 0x90, 0xc2, 0xeb, 0x00, 0x72, 0x03, 0x83, 0xc2, 0x04, 0x0f, 0x05]].concat();
+                    let (c, m) = checked(&code, &v.to_le_bytes(), &|c| {
+                        (c.reg[RSI], c.reg[RBX], c.reg[RDX]) = (DATA, 1 - carry, 0);
+                    });
+                    let wide = form[0] == 0x48;
+                    let dec = form[form.len() - 1] == 0x0e;
+                    let mask = if wide { u64::MAX } else { 0xffff_ffff };
+                    let want = if dec { v.wrapping_sub(1) } else { v.wrapping_add(1) } & mask | v & !mask;
+                    assert_eq!(m.read_u64(DATA).unwrap(), want, "{form:02x?} of {v:#x}");
+                    let sign = if wide { 1 << 63 } else { 1 << 31 };
+                    let over = if dec { v & mask == sign } else { v & mask == sign - 1 };
+                    assert_eq!(c.reg[RDX], over as u64 + 4 * (1 - carry), "{form:02x?} of {v:#x}, carry {carry}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_carry_goes_round_a_loop_through_dec_and_a_jump_without_leaving_blocks() {
+        // Four words at RSI added to (or taken from) by four at RDI, as hand-written
+        // code does it: the carry of one round is the next round's, kept by DEC (or
+        // INC) across the jump.
+        //   cmp ebx, 1          (the carry in: EBX 0 sets it)
+        //   top: mov rax, [rsi]; adc/sbb rax, [rdi]; mov [rsi], rax
+        //        lea rsi, [rsi+8]; lea rdi, [rdi+8]; dec ecx / inc rcx; jnz top
+        //   setc dl; syscall
+        let a = [u64::MAX, u64::MAX, 0, 5];
+        let b = [1u64, 0, 0, 7];
+        let data: Vec<u8> = a.iter().chain(&b).flat_map(|v| v.to_le_bytes()).collect();
+        for sub in [false, true] {
+            for (count, start) in [(&[0xff, 0xc9][..], 4u64), (&[0x48, 0xff, 0xc1], (-4i64) as u64)] {
+                for carry in [0u64, 1] {
+                    let mut code = vec![0x83, 0xfb, 0x01, 0x48, 0x8b, 0x06, 0x48, if sub { 0x1b } else { 0x13 }, 0x07, 0x48, 0x89, 0x06];
+                    code.extend([0x48, 0x8d, 0x76, 0x08, 0x48, 0x8d, 0x7f, 0x08]);
+                    code.extend(count);
+                    let back = 3i64 - (code.len() as i64 + 2);
+                    code.extend([0x75, back as u8, 0x0f, 0x92, 0xc2, 0x0f, 0x05]);
+                    let set = |c: &mut Cpu| {
+                        (c.reg[RSI], c.reg[7], c.reg[1], c.reg[RBX], c.reg[RDX]) = (DATA, DATA + 32, start, 1 - carry, 0);
+                    };
+                    let (c, m) = checked(&code, &data, &set);
+                    // What it should be, a word at a time.
+                    let mut want = [0u64; 4];
+                    let mut k = carry;
+                    for i in 0..4 {
+                        let (r, k1) = if sub { a[i].overflowing_sub(b[i]) } else { a[i].overflowing_add(b[i]) };
+                        let (r, k2) = if sub { r.overflowing_sub(k) } else { r.overflowing_add(k) };
+                        (want[i], k) = (r, (k1 | k2) as u64);
+                    }
+                    let got: Vec<u64> = (0..4).map(|i| m.read_u64(DATA + 8 * i).unwrap()).collect();
+                    assert_eq!((&got[..], c.reg[RDX]), (&want[..], k), "sub {sub}, carry {carry}");
+                    // And all of it in blocks but the two at the end (SETC asks for
+                    // the carry, which the host's flags after a DEC do not say, and
+                    // the SYSCALL): nothing in the loop is the interpreter's.
+                    let mut m = guest(&code, &data);
+                    let mut jit = Jit::new(false, 1).unwrap();
+                    let mut c = Cpu::new(CODE, DATA + 4096);
+                    set(&mut c);
+                    assert!(matches!(jit.run(&mut c, &mut m), Event::Syscall));
+                    assert_eq!(jit.stats.in_blocks, c.steps - 2, "sub {sub}, by {count:02x?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn leave_a_push_of_an_operand_a_hint_and_a_prefix_that_does_nothing() {
+        // push rbp; mov rbp, rsp; sub rsp, 32; leave
+        // push qword [rsi]; push r8 (FFh /6); pop rax; pop rbx
+        // prefetcht0 [rsi]; 67h mul rbx; 67h mov rdi, rax; syscall
+        let code = [
+            0x55, 0x48, 0x89, 0xe5, 0x48, 0x83, 0xec, 0x20, 0xc9, 0xff, 0x36, 0x41, 0xff, 0xf0, 0x58, 0x5b, 0x0f, 0x18, 0x0e, 0x67, 0x48,
+            0xf7, 0xe3, 0x67, 0x48, 0x89, 0xc7, 0x0f, 0x05,
+        ];
+        let (c, _) = checked(&code, &0x1_0000_0003u64.to_le_bytes(), &|c| {
+            (c.reg[RSI], c.reg[8], c.reg[5]) = (DATA, 0x2_0000_0005, 0x1234);
+        });
+        assert_eq!((c.reg[5], c.reg[4]), (0x1234, DATA + 4096));
+        assert_eq!((c.reg[RAX], c.reg[RDX], c.reg[7]), (0x0000_000b_0000_000f, 2, 0x0000_000b_0000_000f));
+        let mut m = guest(&code, &0x1_0000_0003u64.to_le_bytes());
+        let mut jit = Jit::new(false, 1).unwrap();
+        let mut c = Cpu::new(CODE, DATA + 4096);
+        c.reg[RSI] = DATA;
+        assert!(matches!(jit.run(&mut c, &mut m), Event::Syscall));
+        assert_eq!(jit.stats.in_blocks, c.steps - 1);
+    }
+
+    #[test]
+    fn inc_and_dec_whose_flags_nothing_reads() {
+        // inc eax; add edx, 1; syscall: the flags are written over at once.
+        let (c, _) = checked(&[0xff, 0xc0, 0x83, 0xc2, 0x01, 0x0f, 0x05], &[], &|c| (c.reg[RAX], c.reg[RDX]) = (0xffff_ffff, 6));
+        assert_eq!((c.reg[RAX], c.reg[RDX]), (0, 7));
+        // A count down with both ways of the jump writing the flags over:
+        //   top: add edx, 3; dec rbx; jnz top; add edx, 1; syscall
+        let code = [0x83, 0xc2, 0x03, 0x48, 0xff, 0xcb, 0x75, 0xf8, 0x83, 0xc2, 0x01, 0x0f, 0x05];
+        let (c, _) = checked(&code, &[], &|c| (c.reg[RBX], c.reg[RDX]) = (50, 0));
+        assert_eq!((c.reg[RBX], c.reg[RDX]), (0, 151));
+        let mut m = guest(&code, &[]);
+        let mut jit = Jit::new(false, 1).unwrap();
+        let mut c = Cpu::new(CODE, DATA + 4096);
+        c.reg[RBX] = 50;
+        assert!(matches!(jit.run(&mut c, &mut m), Event::Syscall));
+        assert_eq!(jit.stats.in_blocks, c.steps - 1);
     }
 }
