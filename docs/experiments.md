@@ -2812,3 +2812,28 @@ Not shown: the mode on any other host (Docker Desktop's VM, a Mac running Linux
 itself); that every program's order is right with it (the probe is one pattern, the
 one arm64 is known to break most easily); a guest thread started while another
 host thread of r64m's own exists (there is none).
+
+## R036: sockets and epoll (2026-11-25)
+
+ADR 0019's second step.
+
+The card, written before the run.
+
+- **Hypothesis**: the socket calls are the kernel's as they stand (addresses,
+  options and flags are numbered alike on x86-64 and arm64), with three things to
+  write over: `epoll`'s event (12 bytes packed on x86-64, 16 on arm64), a message's
+  header (it holds pointers of the guest's: to an address, to a list of pieces, to
+  control data), and the calls arm64 has only in a newer form (`epoll_create`,
+  `epoll_wait`, `select`, `eventfd`, `alarm`). With these, Python's HTTP server
+  answers a request from a client in the same process, a TCP echo between two
+  threads works, `asyncio` runs a small server and client, and redis-server starts,
+  answers PING, stores and gives back a value, and stops: all as hal has them, in
+  the interpreter and with `--jit`. redis sets a timer whose signal reaches a
+  handler; no handler is called yet (0019's third step), so redis may stop there.
+- **What is changed from before** (R035): `src/sys/linux.rs` gains those calls.
+- **Next move for each result**:
+  - All as hal's → signals delivered (0019's third step)
+  - redis stops for its signal and the rest is right → said; redis is the third
+    step's first case
+  - A call or a structure not foreseen → added by its kind and named in the result
+- **Cut-off**: the cases chosen here, in the two images, three ways each.
