@@ -2495,3 +2495,38 @@ results).
 
 106 unit tests and the 62 programs in the four JIT modes on both hosts; the 42
 container cases in three ways.
+
+## R032: what Python and a server ask for beyond a build (2026-11-25)
+
+ADR 0017's fifth step is threads, signals delivered and sockets, for the goal's
+programs (0011: nginx, Python with FastAPI). How they are built is a decision (0017
+left it: "threads share blocks: how?"). A look before it, as R024 was before 0017.
+
+The card, written before the run.
+
+- **Hypothesis**: three things are guessed, each to be shown or not by the real
+  machine's count (hal, `strace -f`, with the images on it: `python:3.13-slim`,
+  which is Debian with glibc, and `redis:alpine`, a server with threads):
+  1. Python printing a line starts no thread and is delivered no signal; what it
+     asks beyond the build's calls is small (and glibc asks the CPU what it is,
+     which musl does not: `cpuid`);
+  2. a Python program that starts threads uses `clone` (or `clone3`) with shared
+     memory, `futex`, and `set_robust_list`, and nothing else new: so a guest thread
+     can be a host thread with the guest's `futex` handed on as it is;
+  3. a server that waits for connections uses `epoll` and sockets, whose calls are
+     handed on but for `epoll`'s structure, which is packed on x86-64 and not on
+     arm64; and a signal reaches a handler only when the server is told to stop.
+- **What is changed from before**: nothing of r64m is changed for the count. Then
+  each program is tried under r64m as it is (the Python image copied from hal to
+  this Mac, not fetched), to see what stops it first.
+- **Next move for each result**:
+  - As guessed → ADR 0019 proposes: a guest thread is a host thread with its own CPU
+    state and its own blocks; signals are noted by the host's handler and delivered
+    between blocks; and the order is by what the goal's programs meet first
+  - Python's line needs threads or a delivered signal → the order changes: that
+    first
+  - A call of a kind not decided (a structure that differs, memory shared between
+    processes) → named in the ADR as a point
+- **Cut-off**: four counts on hal (Python's line, Python's threads, Python's own
+  HTTP server answering one request, redis-server starting and answering one PING),
+  and one try of each under r64m.
