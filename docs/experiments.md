@@ -2168,3 +2168,34 @@ cases write their few lines of C from the shell.
 102 unit tests on macOS and in the Linux container (`mremap`'s there too now); the
 62 programs in the four JIT modes on both; the 116 of the primitives and the 39
 traces on macOS.
+
+## R028: NetHack built by make under r64m (2026-11-25)
+
+ADR 0017's fourth step, its first half: the build is right before it is raced.
+
+NetHack 3.6.7's sources are g64m's oracle's copy on hal (`nethack-367-src.tgz`, 5.6 MB,
+SHA-256 98cf67df...2aacb2; copied from there, not fetched). The image is the Alpine
+3.22.8 with GCC 14.2 of the steps before, with Alpine's `ncurses-dev` added (fetched
+from Alpine's mirror with the owner's word, 2026-11-25) and the sources unpacked and
+set up for Linux. The same image is put on hal, so that both build the same thing.
+
+The card, written before the run.
+
+- **Hypothesis**: `make all` in that tree runs to its end under r64m with `--jit`
+  (some hundred compilations, an archive, three programs of NetHack's own that are
+  built and then run to make its data, and the link), and every file it makes has
+  the MD5 sum of the one hal makes, but for those that hold the time of the build.
+  It is guessed to take several times what Rosetta takes for the same `make`: each
+  compilation is a new process whose blocks are made from nothing.
+- **What is changed from before** (R027): nothing until something is met.
+- **Next move for each result**:
+  - It ends and the sums are hal's → timed three times beside Rosetta (the same
+    container, one after the other and then at once), and where r64m's time goes is
+    counted (`--jit-stats` of one compilation: translated, run, interpreted) before
+    anything is built to make it less. The race with QEMU waits for the owner's
+    switch of the Docker VM from Rosetta to QEMU
+  - It stops (a call, an instruction, a signal that was to be delivered: `make`
+    waits for its children and may want SIGCHLD) → that is built, by its kind
+  - A file differs that should not → the first one in the build's order is the
+    finding; `--jit-check` on that one compilation says whether it is a block
+- **Cut-off**: one whole build compared file by file; three timed builds of each.
