@@ -7,10 +7,10 @@
 //! ways (the interpreter, the JIT, the JIT with every block checked) and must give
 //! that output and that code each time.
 //!
-//! They can be run only where the programs are: on Linux, with an x86-64 Alpine as
-//! the root (r64m hands a program's paths to the kernel as they are). That is told
-//! by the dynamic linker's file being there. Anywhere else every case is shown as
-//! ignored. The image is not in the repository. To run them, the test and r64m are
+//! They can be run only where the programs are: on Linux, with the x86-64 image a
+//! file's cases were taken in as the root (r64m hands a program's paths to the kernel
+//! as they are). Each file's first line names a file that is there in its image
+//! (`#! needs PATH`); where that is not, the file's cases are shown as ignored. The image is not in the repository. To run them, the test and r64m are
 //! built for arm64 Linux and started inside such a container, with `R64M_BIN` saying
 //! where r64m is there (the place Cargo knows is the building host's).
 
@@ -86,10 +86,17 @@ fn run(case: &Case, way: &[&str]) -> Result<(), Failed> {
 
 fn main() {
     let args = Arguments::from_args();
-    // Only where the programs are.
-    let here = cfg!(target_os = "linux") && Path::new("/lib/ld-musl-x86_64.so.1").exists();
     let mut trials = Vec::new();
-    for (file, text) in [("busybox", include_str!("container/busybox.txt")), ("shell", include_str!("container/shell.txt")), ("gcc", include_str!("container/gcc.txt"))] {
+    let files = [
+        ("busybox", include_str!("container/busybox.txt")),
+        ("shell", include_str!("container/shell.txt")),
+        ("gcc", include_str!("container/gcc.txt")),
+        ("python", include_str!("container/python.txt")),
+    ];
+    for (file, text) in files {
+        // Only where the file's programs are.
+        let needs = text.lines().next().and_then(|l| l.strip_prefix("#! needs ")).expect("a file of cases begins by saying what it needs");
+        let here = cfg!(target_os = "linux") && Path::new(needs).exists();
         for case in cases(text) {
             let case = std::sync::Arc::new(case);
             for (way, options) in WAYS {

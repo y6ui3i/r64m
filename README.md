@@ -28,8 +28,11 @@ is long double's: the x87 is interpreted, by soft arithmetic of 80 bits. Transla
 code is guarded against writes only where the guest may write it
 ([0016](docs/adr/0016-only-writable-code-is-guarded.md)). On a Linux host a dynamically
 linked program runs with its files and its child processes: busybox's shell and its
-programs in an x86-64 Alpine container (R026), and GCC there (R027). There are no threads, no signal is
-delivered to a handler, and there is no machine.
+programs in an x86-64 Alpine container (R026), GCC there (R027), and Python 3.13 on
+Debian with its threads (R033). **A program with more than one thread is not yet to
+be trusted**: memory is not yet ordered between threads as x86 orders it
+([0019](docs/adr/0019-threads-and-signals.md), point D). No signal is delivered to a
+handler, there are no sockets, and there is no machine.
 
 ## The principle, the aim, the goal
 

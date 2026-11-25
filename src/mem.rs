@@ -16,6 +16,8 @@
 use std::cell::Cell;
 use std::io;
 use std::ptr;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// The guest's page: x86's.
 pub const PAGE: u64 = 4096;
@@ -61,6 +63,17 @@ pub enum MapError {
     Host(io::Error),
 }
 
+/// The list of regions as every thread of the process is to see it (ADR 0019): the
+/// list itself, changed only by whoever holds it, and a number that goes up at each
+/// change, by which a thread knows that its own copy is old.
+struct Shared {
+    regions: Mutex<Vec<Region>>,
+    version: AtomicU64,
+    /// How many stores any thread has made into host pages that hold guarded code:
+    /// by this the others know to drop their blocks from such pages.
+    guarded_writes: AtomicU64,
+}
+
 pub struct Mem {
     base: *mut u8,
     size: u64,
@@ -75,7 +88,15 @@ pub struct Mem {
     /// and the bytes that were there (for `--jit-check`, which runs the same
     /// instructions twice from the same memory).
     log: Option<Vec<(u64, Vec<u8>)>>,
+    /// Once the process has a second thread: the list all of them share, and the
+    /// number of the version this thread's copy (`regions`) was taken at.
+    shared: Option<Arc<Shared>>,
+    seen: u64,
 }
+
+// The memory is the process's; a `Mem` is one thread's handle on it, and goes with
+// that thread.
+unsafe impl Send for Mem {}
 
 const NOWHERE: Region = Region { start: 0, end: 0, prot: 0 };
 
@@ -130,6 +151,8 @@ impl Mem {
                     regions: Vec::new(),
                     near: [const { [const { Cell::new(NOWHERE) }; 2] }; 3],
                     log: None,
+                    shared: None,
+                    seen: 0,
                 });
             }
             refused = io::Error::last_os_error();
@@ -154,11 +177,113 @@ impl Mem {
         &self.regions
     }
 
+    // ---- more than one thread ------------------------------------------------------
+
+    /// Another handle on the same memory, for a new thread: from now on the list of
+    /// regions is shared, and each handle holds a copy that it renews when the list
+    /// has changed.
+    pub fn view(&mut self) -> Mem {
+        let shared = self.shared.get_or_insert_with(|| {
+            Arc::new(Shared { regions: Mutex::new(self.regions.clone()), version: AtomicU64::new(1), guarded_writes: AtomicU64::new(0) })
+        });
+        if self.seen == 0 {
+            self.seen = 1;
+        }
+        let shared = shared.clone();
+        self.sync();
+        Mem {
+            base: self.base,
+            size: self.size,
+            host_page: self.host_page,
+            regions: self.regions.clone(),
+            near: [const { [const { Cell::new(NOWHERE) }; 2] }; 3],
+            log: None,
+            seen: self.seen,
+            shared: Some(shared),
+        }
+    }
+
+    /// Renews this thread's copy of the list if another thread has changed it. To be
+    /// called between instructions: an instruction that is running keeps the list it
+    /// began with.
+    #[inline(always)]
+    pub fn sync(&mut self) {
+        if let Some(shared) = &self.shared {
+            if shared.version.load(Ordering::Acquire) != self.seen {
+                self.renew();
+            }
+        }
+    }
+
+    /// Has the process more than one thread's handle on this memory?
+    pub fn is_shared(&self) -> bool {
+        self.shared.is_some()
+    }
+
+    /// How many stores into guarded code the threads of this memory have made; and
+    /// one more of them, made by this thread. Nothing where there is one thread.
+    #[inline(always)]
+    pub fn guarded_writes(&self) -> u64 {
+        self.shared.as_ref().map_or(0, |shared| shared.guarded_writes.load(Ordering::Acquire))
+    }
+
+    pub fn wrote_guarded(&self) -> u64 {
+        self.shared.as_ref().map_or(0, |shared| shared.guarded_writes.fetch_add(1, Ordering::AcqRel) + 1)
+    }
+
+    #[cold]
+    fn renew(&mut self) {
+        let shared = self.shared.clone().expect("called for a shared list");
+        let master = shared.regions.lock().unwrap_or_else(|e| e.into_inner());
+        self.regions = master.clone();
+        self.seen = shared.version.load(Ordering::Acquire);
+        self.forget_near();
+    }
+
+    /// A change of the list: alone, or, where the list is shared, with the list held,
+    /// made on its newest state, and given to the others when done.
+    fn changing<T>(&mut self, change: impl FnOnce(&mut Mem) -> T) -> T {
+        let Some(shared) = self.shared.clone() else {
+            return change(self);
+        };
+        let mut master = shared.regions.lock().unwrap_or_else(|e| e.into_inner());
+        if shared.version.load(Ordering::Acquire) != self.seen {
+            self.regions = master.clone();
+            self.forget_near();
+        }
+        let done = change(self);
+        *master = self.regions.clone();
+        self.seen = shared.version.fetch_add(1, Ordering::AcqRel) + 1;
+        done
+    }
+
     // ---- the guest's view: mapping -------------------------------------------------
+
+    /// Maps `[start, start + len)` afresh: whatever was there is gone and the pages
+    /// read as zero.
+    pub fn map(&mut self, start: u64, len: u64, prot: u8) -> Result<(), MapError> {
+        self.changing(|m| m.map_alone(start, len, prot))
+    }
+
+    /// Unmaps `[start, start + len)`.
+    pub fn unmap(&mut self, start: u64, len: u64) -> Result<(), MapError> {
+        self.changing(|m| m.unmap_alone(start, len))
+    }
+
+    /// Changes the protection of `[start, start + len)`, all of which must be mapped.
+    pub fn protect(&mut self, start: u64, len: u64, prot: u8) -> Result<(), MapError> {
+        self.changing(|m| m.protect_alone(start, len, prot))
+    }
+
+    /// Says of the host pages that hold `[start, end)` that code from them has been
+    /// translated (`on`), or that it no longer is.
+    pub fn mark_code(&mut self, start: u64, end: u64, on: bool) -> Result<(), MapError> {
+        self.changing(|m| m.mark_code_alone(start, end, on))
+    }
 
     /// Maps `[start, start + len)` afresh, as `mmap` with `MAP_FIXED` and no file does:
     /// whatever was there is gone and the pages read as zero.
-    pub fn map(&mut self, start: u64, len: u64, prot: u8) -> Result<(), MapError> {
+    fn map_alone(&mut self, start: u64, len: u64, prot: u8) -> Result<(), MapError> {
         let end = self.range(start, len)?;
         self.carve(start, end);
 
@@ -180,7 +305,7 @@ impl Mem {
 
     /// Unmaps `[start, start + len)`. Pages that were not mapped are passed over, as
     /// `munmap` does.
-    pub fn unmap(&mut self, start: u64, len: u64) -> Result<(), MapError> {
+    fn unmap_alone(&mut self, start: u64, len: u64) -> Result<(), MapError> {
         let end = self.range(start, len)?;
         self.carve(start, end);
         self.host_sync(start, end).map_err(MapError::Host)
@@ -188,7 +313,7 @@ impl Mem {
 
     /// Changes the protection of `[start, start + len)`, all of which must be mapped,
     /// as `mprotect` does. The contents stay.
-    pub fn protect(&mut self, start: u64, len: u64, prot: u8) -> Result<(), MapError> {
+    fn protect_alone(&mut self, start: u64, len: u64, prot: u8) -> Result<(), MapError> {
         let end = self.range(start, len)?;
         if self.walk(start, end, |_| true).is_some() {
             return Err(MapError::NotMapped);
@@ -272,6 +397,33 @@ impl Mem {
         Ok(())
     }
 
+    /// Writes the low `bits` of `new` at `addr` if what is there is still `old`, as
+    /// one act that no other thread's store can fall into; says whether it was.
+    /// (An address that is not a multiple of the width has no such act on the host:
+    /// there it is written as any store is.)
+    pub fn swap_if(&mut self, addr: u64, bits: u32, old: u64, new: u64) -> Result<bool, Fault> {
+        use std::sync::atomic::{AtomicU16, AtomicU32, AtomicU8};
+        let bytes = bits as usize / 8;
+        self.check(addr, bytes as u64, Access::Write)?;
+        if self.log.is_some() {
+            self.note(addr, bytes);
+        }
+        let at = self.host(addr);
+        if addr % bytes as u64 != 0 {
+            unsafe { ptr::copy_nonoverlapping(new.to_le_bytes().as_ptr(), at, bytes) };
+            return Ok(true);
+        }
+        const ORDER: Ordering = Ordering::SeqCst;
+        Ok(unsafe {
+            match bits {
+                8 => (*(at as *const AtomicU8)).compare_exchange(old as u8, new as u8, ORDER, ORDER).is_ok(),
+                16 => (*(at as *const AtomicU16)).compare_exchange(old as u16, new as u16, ORDER, ORDER).is_ok(),
+                32 => (*(at as *const AtomicU32)).compare_exchange(old as u32, new as u32, ORDER, ORDER).is_ok(),
+                _ => (*(at as *const AtomicU64)).compare_exchange(old, new, ORDER, ORDER).is_ok(),
+            }
+        })
+    }
+
     #[cold]
     fn note(&mut self, addr: u64, len: usize) {
         let mut old = vec![0u8; len];
@@ -307,7 +459,7 @@ impl Mem {
     /// translated (`on`), or that it no longer is: while it is, nothing may write
     /// them. It is the host's page that is marked, since that is what the host can
     /// protect: on a host with 16 KB pages three more of the guest's go with each.
-    pub fn mark_code(&mut self, start: u64, end: u64, on: bool) -> Result<(), MapError> {
+    fn mark_code_alone(&mut self, start: u64, end: u64, on: bool) -> Result<(), MapError> {
         let (start, end) = (self.host_down(start), self.host_up(end).min(self.size));
         let inside: Vec<Region> = self
             .regions
@@ -615,7 +767,11 @@ impl Mem {
 }
 
 impl Drop for Mem {
+    /// The reservation goes with the last handle on it, not with any one thread's.
     fn drop(&mut self) {
+        if self.shared.as_ref().is_some_and(|shared| Arc::strong_count(shared) > 1) {
+            return;
+        }
         unsafe { libc::munmap(self.base as *mut libc::c_void, self.size as usize) };
     }
 }
@@ -1036,5 +1192,54 @@ mod tests {
         m.unmap(A, PAGE).unwrap();
         m.map(A, hp, RW).unwrap();
         assert_eq!(m.read_u64(A), Ok(0));
+    }
+    #[test]
+    fn two_handles_on_one_memory_see_each_others_changes() {
+        let mut first = mem();
+        first.map(A, PAGE, RW).unwrap();
+        first.write_u64(A, 7).unwrap();
+        assert!(!first.is_shared());
+        let mut second = first.view();
+        assert!(first.is_shared() && second.is_shared());
+        // What was there is there for both: the memory is one.
+        assert_eq!(second.read_u64(A), Ok(7));
+        second.write_u64(A, 8).unwrap();
+        assert_eq!(first.read_u64(A), Ok(8));
+        // A mapping made through one is the other's when it next looks; until it
+        // looks, its own list is the old one.
+        second.map(A + 4 * PAGE, PAGE, RW).unwrap();
+        assert!(first.write_u64(A + 4 * PAGE, 1).is_err());
+        first.sync();
+        first.write_u64(A + 4 * PAGE, 1).unwrap();
+        assert_eq!(second.read_u64(A + 4 * PAGE), Ok(1));
+        // A change made on an old list is made on the newest: nothing of the
+        // other's is lost.
+        second.map(A + 8 * PAGE, PAGE, RW).unwrap();
+        first.unmap(A, PAGE).unwrap();
+        second.sync();
+        assert!(second.read_u64(A).is_err());
+        second.write_u64(A + 8 * PAGE, 2).unwrap();
+        assert_eq!(first.read_u64(A + 8 * PAGE), Ok(2));
+        // Stores into guarded code are counted for all of them.
+        assert_eq!((first.guarded_writes(), second.wrote_guarded(), first.guarded_writes()), (0, 1, 1));
+    }
+
+    #[test]
+    fn a_write_made_only_if_nothing_came_between() {
+        let mut m = mem();
+        m.map(A, PAGE, RW).unwrap();
+        m.write_u64(A, 0x1111_2222_3333_4444).unwrap();
+        // The low 32 bits are still what was read: written. Then they are not.
+        assert_eq!(m.swap_if(A, 32, 0x3333_4444, 0xaaaa_bbbb), Ok(true));
+        assert_eq!(m.swap_if(A, 32, 0x3333_4444, 0xcccc_dddd), Ok(false));
+        assert_eq!(m.read_u64(A), Ok(0x1111_2222_aaaa_bbbb));
+        for (bits, old, new, after) in [(8u32, 0xbbu64, 0x01u64, 0x1111_2222_aaaa_bb01u64), (16, 0xbb01, 0x0203, 0x1111_2222_aaaa_0203), (64, 0x1111_2222_aaaa_0203, 9, 9)] {
+            assert_eq!(m.swap_if(A, bits, old, new), Ok(true));
+            assert_eq!(m.read_u64(A), Ok(after));
+        }
+        // Where it may not be written, a fault, and nothing written.
+        m.protect(A, PAGE, R).unwrap();
+        assert_eq!(m.swap_if(A, 64, 9, 1), Err(fault(A, Access::Write)));
+        assert_eq!(m.read_u64(A), Ok(9));
     }
 }

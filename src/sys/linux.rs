@@ -184,10 +184,11 @@ const CLONE_CHILD_SETTID: u64 = 0x100_0000;
 /// A new process: the host's `fork` of r64m whole, its blocks with it. If the parent
 /// is to wait until the child has started another program or ended (`vfork`), it
 /// waits at a pipe whose other end the child holds until then.
-fn fork(c: &mut Cpu, m: &mut Mem, s: &mut Sys, flags: u64, stack: u64, parent_tid: u64, child_tid: u64) -> Result<u64, u64> {
-    // Threads are not built: memory shared with a child that goes on beside.
+#[allow(clippy::too_many_arguments)]
+fn fork(c: &mut Cpu, m: &mut Mem, s: &mut Sys, flags: u64, stack: u64, parent_tid: u64, child_tid: u64, tls: u64) -> Result<u64, u64> {
+    // Memory shared with a child that goes on beside: a thread.
     if flags & CLONE_VM != 0 && flags & CLONE_VFORK == 0 {
-        return Err(ENOSYS);
+        return thread(c, m, s, flags, stack, parent_tid, child_tid, tls);
     }
     let mut wait = [-1i32; 2];
     if flags & CLONE_VFORK != 0 {
@@ -235,6 +236,60 @@ fn fork(c: &mut Cpu, m: &mut Mem, s: &mut Sys, flags: u64, stack: u64, parent_ti
             Ok(pid as u64)
         }
     }
+}
+
+const CLONE_SETTLS: u64 = 0x8_0000;
+const EAGAIN: u64 = 11;
+
+/// A new thread of the guest's: a thread of the host's that runs the guest from the
+/// registers `clone` leaves a child with (nothing in RAX, the stack and the FS base
+/// the guest chose), on the same memory, with blocks of its own (ADR 0019). Its id
+/// is the host's.
+#[allow(clippy::too_many_arguments)]
+fn thread(c: &mut Cpu, m: &mut Mem, s: &mut Sys, flags: u64, stack: u64, parent_tid: u64, child_tid: u64, tls: u64) -> Result<u64, u64> {
+    let Some(body) = s.thread else { return Err(ENOSYS) };
+    let mut child = c.clone();
+    child.reg[crate::cpu::RAX] = 0;
+    child.reg[RSP] = stack;
+    if flags & CLONE_SETTLS != 0 {
+        child.fs_base = tls;
+    }
+    child.left_from = 0;
+    let mut its = s.for_thread();
+    if flags & CLONE_CHILD_CLEARTID != 0 {
+        its.clear_tid = child_tid;
+    }
+    let mut view = m.view();
+    let (tell, told) = std::sync::mpsc::channel();
+    let set_tid = flags & CLONE_CHILD_SETTID != 0;
+    super::THREADS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    std::thread::Builder::new()
+        .spawn(move || {
+            let tid = unsafe { libc::gettid() };
+            if set_tid {
+                let _ = view.write_u32(child_tid, tid as u32);
+            }
+            let _ = tell.send(tid);
+            body(child, view, its);
+        })
+        .map_err(|_| EAGAIN)?;
+    let tid = told.recv().map_err(|_| EAGAIN)?;
+    if flags & CLONE_PARENT_SETTID != 0 {
+        let _ = m.write_u32(parent_tid, tid as u32);
+    }
+    Ok(tid as u64)
+}
+
+/// The end of one thread of the guest's (see `sys::end_thread`).
+pub fn end_thread(m: &mut Mem, s: &Sys, code: i32) -> ! {
+    if s.clear_tid != 0 && m.write_u32(s.clear_tid, 0).is_ok() {
+        // FUTEX_WAKE, one waiter.
+        let _ = raw(libc::SYS_futex, [m.base() as u64 + s.clear_tid, 1, 1, 0, 0, 0]);
+    }
+    // The host's thread, and nothing after it of r64m's: no more of the guest's
+    // memory is touched.
+    unsafe { libc::syscall(libc::SYS_exit, code as libc::c_long) };
+    unreachable!("a thread that has ended")
 }
 
 /// Another program in this process: r64m started again with it, by the host's
@@ -408,7 +463,10 @@ pub fn call(c: &mut Cpu, m: &mut Mem, s: &mut Sys, n: u64, a: [u64; 6]) -> Optio
         230 => same(m, libc::SYS_clock_nanosleep, 0b1100),
         302 => same(m, libc::SYS_prlimit64, 0b1100),
         318 => buf(m, a[0], a[1]).and_then(|to| raw(libc::SYS_getrandom, [to, a[1], a[2], 0, 0, 0])),
-        // madvise: advice, which need not be taken.
+        // madvise: advice, which need not be taken, but for "this is not needed"
+        // (4), which is a promise that the pages read as nothing afterwards:
+        // allocators count on it. The pages are the host's (ADR 0008).
+        28 if a[2] == 4 => buf(m, a[0], a[1]).and_then(|at| raw(libc::SYS_madvise, [at, a[1], 4, 0, 0, 0])),
         28 => Ok(0),
 
         // futex: the word waited on is the guest's memory, which is the host's (ADR
@@ -444,9 +502,9 @@ pub fn call(c: &mut Cpu, m: &mut Mem, s: &mut Sys, n: u64, a: [u64; 6]) -> Optio
         186 => same(m, libc::SYS_gettid, 0),
 
         // ---- processes
-        56 => fork(c, m, s, a[0], a[1], a[2], a[3]),
-        57 => fork(c, m, s, 0, 0, 0, 0),
-        58 => fork(c, m, s, CLONE_VM | CLONE_VFORK, 0, 0, 0),
+        56 => fork(c, m, s, a[0], a[1], a[2], a[3], a[4]),
+        57 => fork(c, m, s, 0, 0, 0, 0, 0),
+        58 => fork(c, m, s, CLONE_VM | CLONE_VFORK, 0, 0, 0, 0),
         59 => execve(m, s, a[0], a[1], a[2]),
         61 => same(m, libc::SYS_wait4, 0b1010),
         62 => same(m, libc::SYS_kill, 0),
@@ -468,7 +526,7 @@ pub fn inherited(s: &mut Sys) {
             }
             let mut was: libc::sigaction = std::mem::zeroed();
             if libc::sigaction(signal, std::ptr::null(), &mut was) == 0 && was.sa_sigaction == libc::SIG_IGN {
-                s.actions[signal as usize][0] = 1;
+                s.proc().actions[signal as usize][0] = 1;
             }
         }
     }

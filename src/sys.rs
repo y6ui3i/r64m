@@ -20,6 +20,7 @@ use crate::elf::INTERP_AT;
 use crate::mem::Access;
 use crate::mem::{MapError, Mem, PAGE};
 use std::collections::BTreeSet;
+use std::sync::{Arc, Mutex};
 #[cfg(not(target_os = "linux"))]
 use std::io::Write;
 
@@ -46,9 +47,9 @@ pub enum Output {
     Nowhere,
 }
 
-/// What r64m keeps of the process for its system calls.
-pub struct Sys {
-    pub out: Output,
+/// What r64m keeps of the process for its system calls, the same for every thread
+/// of it: held by one thread at a time, and never across a call that waits.
+pub struct Proc {
     /// Where the program's own memory after its segments ends (`brk`), and where it
     /// began.
     brk: u64,
@@ -56,24 +57,42 @@ pub struct Sys {
     /// Below here the next mapping without an address of its own is put: they go
     /// downwards from under the interpreter, as Linux's do.
     mmap_top: u64,
-    /// Where the kernel is to write a zero when the thread ends (`set_tid_address`).
-    /// Kept; nothing reads it until there are threads.
-    pub clear_tid: u64,
     /// What the program asked to be done at each signal (`rt_sigaction`): the
     /// handler, the flags, the restorer and the mask, as it gave them. Kept and given
-    /// back; no handler is called until signals are delivered (ADR 0017, "Not yet").
+    /// back; no handler is called until signals are delivered (ADR 0019, point 2).
     actions: [[u64; 4]; 65],
-    /// The signals the program has blocked, as it sees them. The host's own mask is
-    /// this without the two a fault in generated code arrives by.
-    blocked: u64,
     /// The calls that were named as not known.
     named: BTreeSet<u64>,
+}
+
+/// How a thread or the process ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Exit {
+    /// `exit`: this thread, with this code (the process's, if it is the last).
+    Thread(i32),
+    /// `exit_group`: every thread.
+    Group(i32),
+}
+
+/// What r64m keeps for one thread's system calls, and its hold on the process's.
+pub struct Sys {
+    pub out: Output,
+    proc: Arc<Mutex<Proc>>,
+    /// Where a zero is to be written, and whoever waits there woken, when the thread
+    /// ends (`set_tid_address`, `clone`).
+    pub clear_tid: u64,
+    /// The signals the thread has blocked, as it sees them. The host's own mask is
+    /// this without the two a fault in generated code arrives by.
+    blocked: u64,
     /// For `execve`, which is r64m started again: where r64m itself is, and the
     /// options it was given. And the program's own path, which is what a program
     /// that asks who it is must be told.
     pub exe: String,
     pub options: Vec<String>,
     pub program: String,
+    /// What a new thread of the guest's is to run: r64m's own loop, given by `main`,
+    /// with the thread's registers, its handle on the memory and its `Sys`.
+    pub thread: Option<fn(Cpu, Mem, Sys)>,
     /// The guest's pages whose mapping or protection a call has just changed: blocks
     /// made from them are to be forgotten before the program goes on (ADR 0016).
     pub changed: Option<(u64, u64)>,
@@ -84,19 +103,17 @@ impl Sys {
     pub fn new(out: Output, brk: u64) -> Sys {
         // A gap under the interpreter, as much as a stack: nothing of the two meets.
         let mmap_top = INTERP_AT - (256 << 20);
+        let proc = Proc { brk, brk_start: brk, mmap_top, actions: [[0; 4]; 65], named: BTreeSet::new() };
         #[allow(unused_mut)]
         let mut s = Sys {
             out,
-            brk,
-            brk_start: brk,
-            mmap_top,
+            proc: Arc::new(Mutex::new(proc)),
             clear_tid: 0,
-            actions: [[0; 4]; 65],
             blocked: 0,
-            named: BTreeSet::new(),
             exe: String::new(),
             options: Vec::new(),
             program: String::new(),
+            thread: None,
             changed: None,
         };
         #[cfg(target_os = "linux")]
@@ -104,11 +121,55 @@ impl Sys {
         s
     }
 
+    /// The same process's, for a new thread: what is the thread's own begins as its
+    /// maker's is.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub fn for_thread(&self) -> Sys {
+        Sys {
+            out: if self.out == Output::Host { Output::Host } else { Output::Nowhere },
+            proc: self.proc.clone(),
+            clear_tid: 0,
+            blocked: self.blocked,
+            exe: self.exe.clone(),
+            options: self.options.clone(),
+            program: self.program.clone(),
+            thread: self.thread,
+            changed: None,
+        }
+    }
+
+    /// The process's part, held until what comes back is dropped.
+    fn proc(&self) -> std::sync::MutexGuard<'_, Proc> {
+        self.proc.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn change(&mut self, start: u64, end: u64) {
         self.changed = Some(match self.changed {
             Some((a, b)) => (a.min(start), b.max(end)),
             None => (start, end),
         });
+    }
+}
+
+/// How many threads the guest has started.
+static THREADS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Has the guest ever started a thread?
+pub fn threads_started() -> bool {
+    THREADS.load(std::sync::atomic::Ordering::Relaxed) != 0
+}
+
+/// The calling thread of the guest's ends (`exit`): the word it asked to have
+/// cleared is cleared and whoever waits on it woken, as the kernel does for a thread
+/// of its own, and then the host's thread ends. If it is the last, the process ends
+/// with `code`.
+pub fn end_thread(m: &mut Mem, s: &Sys, code: i32) -> ! {
+    #[cfg(target_os = "linux")]
+    linux::end_thread(m, s, code);
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (m, s);
+        std::process::exit(code)
     }
 }
 
@@ -120,8 +181,9 @@ fn map_errno(e: MapError) -> u64 {
     }
 }
 
-/// Answers the call the registers describe. `Some` is the program's exit code.
-pub fn call(c: &mut Cpu, m: &mut Mem, s: &mut Sys) -> Option<i32> {
+/// Answers the call the registers describe. `Some` is the end of the thread or of
+/// the process.
+pub fn call(c: &mut Cpu, m: &mut Mem, s: &mut Sys) -> Option<Exit> {
     let (a, b, d) = (c.reg[RDI], c.reg[RSI], c.reg[RDX]);
     let (e, f, g) = (c.reg[R10], c.reg[R8], c.reg[R9]);
     let number = c.reg[RAX];
@@ -135,7 +197,8 @@ pub fn call(c: &mut Cpu, m: &mut Mem, s: &mut Sys) -> Option<i32> {
         14 => sigprocmask(m, s, a, b, d, e),
         20 => writev(m, s, a, b, d),
         25 => mremap(m, s, a, b, d, e),
-        60 | 231 => return Some((a & 0xff) as i32),
+        60 => return Some(Exit::Thread((a & 0xff) as i32)),
+        231 => return Some(Exit::Group((a & 0xff) as i32)),
         158 => arch_prctl(c, m, a, b),
         218 => {
             s.clear_tid = a;
@@ -144,7 +207,7 @@ pub fn call(c: &mut Cpu, m: &mut Mem, s: &mut Sys) -> Option<i32> {
         _ => match handed_on(c, m, s, number, [a, b, d, e, f, g]) {
             Some(result) => result,
             None => {
-                if s.named.insert(number) {
+                if s.proc().named.insert(number) {
                     eprintln!("r64m: system call {number} is not known: answered ENOSYS");
                 }
                 Err(ENOSYS)
@@ -163,10 +226,12 @@ pub fn call(c: &mut Cpu, m: &mut Mem, s: &mut Sys) -> Option<i32> {
 /// Sets the end of the program's own memory, if it can be set there, and says where
 /// it is now.
 fn brk(m: &mut Mem, s: &mut Sys, to: u64) -> u64 {
-    if to < s.brk_start {
-        return s.brk;
+    let proc = s.proc.clone();
+    let mut p = proc.lock().unwrap_or_else(|e| e.into_inner());
+    if to < p.brk_start {
+        return p.brk;
     }
-    let (old, new) = (s.brk.next_multiple_of(PAGE), to.next_multiple_of(PAGE));
+    let (old, new) = (p.brk.next_multiple_of(PAGE), to.next_multiple_of(PAGE));
     let done = if new > old {
         m.map(old, new - old, crate::mem::R | crate::mem::W)
     } else if new < old {
@@ -176,9 +241,9 @@ fn brk(m: &mut Mem, s: &mut Sys, to: u64) -> u64 {
         Ok(())
     };
     if done.is_ok() {
-        s.brk = to;
+        p.brk = to;
     }
-    s.brk
+    p.brk
 }
 
 const MAP_SHARED: u64 = 1;
@@ -209,7 +274,11 @@ fn mmap(m: &mut Mem, s: &mut Sys, addr: u64, len: u64, prot: u64, flags: u64, fd
         }
         addr
     } else {
-        s.mmap_top.checked_sub(size).ok_or(ENOMEM)?
+        // Taken at once, so that no other thread is given the same.
+        let mut p = s.proc();
+        let at = p.mmap_top.checked_sub(size).ok_or(ENOMEM)?;
+        p.mmap_top = at;
+        at
     };
     if file {
         // The file's bytes are read into memory of the guest's own: the same to a
@@ -221,9 +290,6 @@ fn mmap(m: &mut Mem, s: &mut Sys, addr: u64, len: u64, prot: u64, flags: u64, fd
     } else {
         m.map(at, size, prot).map_err(map_errno)?;
         s.change(at, at + size);
-    }
-    if flags & (MAP_FIXED | MAP_FIXED_NOREPLACE) == 0 {
-        s.mmap_top = at;
     }
     Ok(at)
 }
@@ -287,9 +353,13 @@ fn mremap(m: &mut Mem, s: &mut Sys, old: u64, old_len: u64, new_len: u64, flags:
     let Some(prot) = m.regions().iter().find(|r| r.start <= old && old < r.end).map(|r| r.prot & 7) else {
         return Err(EFAULT);
     };
-    let to = s.mmap_top.checked_sub(now).ok_or(ENOMEM)?;
+    let to = {
+        let mut p = s.proc();
+        let to = p.mmap_top.checked_sub(now).ok_or(ENOMEM)?;
+        p.mmap_top = to;
+        to
+    };
     m.map(to, now, crate::mem::R | crate::mem::W).map_err(map_errno)?;
-    s.mmap_top = to;
     let mut held = vec![0u8; was as usize];
     m.read_bytes(old, &mut held).map_err(|_| EFAULT)?;
     m.write_bytes(to, &held).map_err(|_| EFAULT)?;
@@ -408,13 +478,13 @@ fn sigaction(m: &mut Mem, s: &mut Sys, signal: u64, new: u64, old: u64, size: u6
     if size != 8 || signal == 0 || signal > 64 || (new != 0 && (signal == 9 || signal == 19)) {
         return Err(EINVAL);
     }
-    let was = s.actions[signal as usize];
+    let was = s.proc().actions[signal as usize];
     if new != 0 {
         let mut asked = [0; 4];
         for (i, word) in asked.iter_mut().enumerate() {
             *word = m.read_u64(new + 8 * i as u64).map_err(|_| EFAULT)?;
         }
-        s.actions[signal as usize] = asked;
+        s.proc().actions[signal as usize] = asked;
         #[cfg(target_os = "linux")]
         linux::disposition(signal, asked[0]);
     }
@@ -650,6 +720,10 @@ mod tests {
         // The exit's code is its low byte.
         c.reg[RAX] = 231;
         c.reg[RDI] = 0x1_02;
-        assert_eq!(call(&mut c, &mut m, &mut s), Some(2));
+        assert_eq!(call(&mut c, &mut m, &mut s), Some(Exit::Group(2)));
+        // And `exit` is the thread's.
+        c.reg[RAX] = 60;
+        c.reg[RDI] = 7;
+        assert_eq!(call(&mut c, &mut m, &mut s), Some(Exit::Thread(7)));
     }
 }

@@ -1,3 +1,4 @@
+#! needs /usr/bin/gcc
 # Commands given to the shell of an x86-64 Alpine container with GCC 14.2 and what
 # the real machine printed for each (hal; Alpine 3.22.8; 2026-11-25): the same form as
 # shell.txt. The sums are of what the compiler made: an object file, a linked

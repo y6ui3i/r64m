@@ -107,6 +107,9 @@ pub struct Jit {
     /// (R029: `cc1` maps memory many thousand times, and each was a walk through
     /// every place known).
     known: std::collections::BTreeSet<u64>,
+    /// How many stores into guarded code, by any thread, this thread has taken
+    /// account of (`Mem::guarded_writes`).
+    writes_seen: u64,
     /// Whether the making of blocks and the running of generated code are timed
     /// (`--jit-stats`).
     pub timed: bool,
@@ -172,6 +175,7 @@ impl Jit {
             blocks: Vec::new(),
             places: HashMap::default(),
             known: Default::default(),
+            writes_seen: 0,
             timed: false,
             writes: HashMap::new(),
             holds: HashMap::new(),
@@ -194,6 +198,19 @@ impl Jit {
         let mut arrived = true;
         self.from = 0;
         loop {
+            // What other threads have done since the last look: to the list of
+            // regions, and to code that is guarded (ADR 0019). A thread that stored
+            // into such code could drop only its own blocks; every other thread drops
+            // its guarded ones here, when it next comes by.
+            m.sync();
+            let writes = m.guarded_writes();
+            if writes != self.writes_seen {
+                self.writes_seen = writes;
+                if !self.holds.is_empty() {
+                    self.empty(m);
+                    arrived = true;
+                }
+            }
             // Is the interpreter about to run an instruction that no block begins with?
             let mut stands_in = false;
             if arrived {
@@ -276,6 +293,7 @@ impl Jit {
                     }
                     let (start, end) = m.host_pages(page, page + 2 * PAGE);
                     self.stats.beside += 1;
+                    self.writes_seen = m.wrote_guarded();
                     let _ = m.mark_code(start, end, false);
                     let stepped = cpu::step(c, m);
                     // Closed again where code is: every host page that a block lies in.
@@ -307,7 +325,9 @@ impl Jit {
     /// `Ok(true)` if it was left at a block's end; `Ok(false)` if the host faulted,
     /// and then RIP is on the instruction that did.
     fn run_block(&mut self, id: usize, c: &mut Cpu, m: &mut Mem) -> Result<bool, String> {
-        let expected = if self.check { self.interpreted(id, c, m) } else { None };
+        // (With more than one thread a block cannot be held to the interpreter: what
+        // another thread writes between the two runs makes them differ rightly.)
+        let expected = if self.check && !m.is_shared() { self.interpreted(id, c, m) } else { None };
         let start = self.timed.then(std::time::Instant::now);
         let reason = unsafe { enter(c, self.blocks[id].code, m.base(), self.table.as_ptr()) };
         if let Some(start) = start {
@@ -432,6 +452,9 @@ impl Jit {
     /// lets the page be written again. The jumps that were rewritten to come to those
     /// blocks go to their own ways out again.
     fn forget(&mut self, addr: u64, m: &mut Mem) {
+        // The other threads are told: their blocks from this page may be of what is
+        // no longer there.
+        self.writes_seen = m.wrote_guarded();
         let start = self.drop_page(addr, m);
         *self.writes.entry(start).or_insert(0) += 1;
         self.stats.forgotten += 1;

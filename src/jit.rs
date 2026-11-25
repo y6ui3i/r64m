@@ -156,8 +156,9 @@ pub unsafe extern "C" fn enter(cpu: *mut Cpu, code: *const u8, base: *mut u8, ta
 /// Where each piece of generated code in this process begins and ends, for the handler
 /// of faults to know its own: pairs of addresses, a zero start for a place not taken.
 /// (A program has one piece. The tests have one or two each and run several at once:
-/// with eight places some of them found none left, on Linux, on 2026-11-25.)
-static PIECES: [[AtomicUsize; 2]; 64] = [const { [const { AtomicUsize::new(0) }; 2] }; 64];
+/// with eight places some of them found none left, on Linux, on 2026-11-25. And
+/// every thread of the guest's has a piece of its own, ADR 0019.)
+static PIECES: [[AtomicUsize; 2]; 1024] = [const { [const { AtomicUsize::new(0) }; 2] }; 1024];
 
 /// Is this address of the host's in generated code? (For the profile.)
 pub fn is_generated(at: usize) -> bool {

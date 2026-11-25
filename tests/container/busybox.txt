@@ -1,3 +1,4 @@
+#! needs /bin/busybox
 # Programs of an x86-64 Alpine container and what the real machine printed for each
 # (hal, an x86-64 Linux; alpine:3.22; 2026-11-25). A case is the line after "$ ", split
 # at its spaces into a program and its arguments; then what it wrote to its standard

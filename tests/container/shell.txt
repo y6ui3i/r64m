@@ -1,3 +1,4 @@
+#! needs /etc/alpine-release
 # Commands given to the shell of an x86-64 Alpine container (busybox's) and what the
 # real machine printed for each (hal, an x86-64 Linux; Alpine 3.22.8 with GCC;
 # 2026-11-25). A case is the line after "$$ ", run as `/bin/sh -c` of it; then what it

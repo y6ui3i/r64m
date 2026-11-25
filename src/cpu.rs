@@ -11,6 +11,7 @@
 //! have changed registers or memory before it stopped: nothing is delivered to the
 //! guest yet, so a stop is the end of the program.
 
+use std::cell::Cell;
 use crate::mem::{Access, Fault, Mem};
 
 mod sse;
@@ -106,6 +107,9 @@ pub enum Stop {
     Protection,
     /// An instruction r64m has not been taught yet, with its bytes.
     NotWritten(String),
+    /// Never seen outside `step`: an instruction with LOCK found that another thread
+    /// had written its operand between its read and its write, and is run again.
+    Again,
 }
 
 impl From<Fault> for Stop {
@@ -440,6 +444,13 @@ struct Run<'a> {
     /// A memory operand's address without the segment's base (what LEA gives), and with.
     off: u64,
     ea: u64,
+    /// The instruction is to be atomic (it has the LOCK prefix, or exchanges with
+    /// memory): its write is made only if its operand is still what it read
+    /// (`held`: where, and what), and the registers and flags as they were are kept
+    /// for running it again if not (ADR 0019).
+    lock: bool,
+    held: Cell<(u64, u64)>,
+    kept: Option<([u64; 16], u64)>,
 }
 
 /// Runs the instruction at RIP.
@@ -448,28 +459,44 @@ pub fn step(c: &mut Cpu, m: &mut Mem) -> R<Step> {
     // Fewer than fifteen bytes may be there before memory that cannot be run; the
     // instruction faults only if it needs one of the missing ones.
     let (code, have) = m.code_at(rip);
-    let mut run = Run {
-        c,
-        m,
-        code,
-        have,
-        ip: rip,
-        rex: 0,
-        osz: 32,
-        p66: false,
-        asz32: false,
-        rep: 0,
-        seg: 0,
-        md: 0,
-        reg: 0,
-        rm: 0,
-        off: 0,
-        ea: 0,
-    };
-    let (next, what) = run.exec()?;
-    c.rip = next;
-    c.steps += 1;
-    Ok(what)
+    loop {
+        let mut run = Run {
+            c: &mut *c,
+                m: &mut *m,
+            code,
+            have,
+            ip: rip,
+            rex: 0,
+            osz: 32,
+            p66: false,
+            asz32: false,
+            rep: 0,
+            seg: 0,
+            md: 0,
+            reg: 0,
+            rm: 0,
+            off: 0,
+                ea: 0,
+            lock: false,
+            held: Cell::new((u64::MAX, 0)),
+            kept: None,
+        };
+        match run.exec() {
+            // Another thread wrote the operand first: from the beginning again, as
+            // it began.
+            Err(Stop::Again) => {
+                if let Some((reg, rflags)) = run.kept {
+                    (c.reg, c.rflags) = (reg, rflags);
+                }
+            }
+            done => {
+                let (next, what) = done?;
+                c.rip = next;
+                c.steps += 1;
+                return Ok(what);
+            }
+        }
+    }
 }
 
 impl Run<'_> {
@@ -654,7 +681,21 @@ impl Run<'_> {
 
     #[inline(always)]
     fn rm_get(&self, w: u32) -> R<u64> {
-        if self.md == 3 { Ok(self.gr(self.rm, w)) } else { self.rd(self.ea, w) }
+        if self.md == 3 {
+            return Ok(self.gr(self.rm, w));
+        }
+        let v = self.rd(self.ea, w)?;
+        if self.lock {
+            self.held.set((self.ea, v));
+        }
+        Ok(v)
+    }
+
+    /// From here the instruction is atomic: what it changes before its write is put
+    /// back if the write finds its operand changed.
+    fn atomic(&mut self) {
+        self.lock = true;
+        self.kept = Some((self.c.reg, self.c.rflags));
     }
 
     #[inline(always)]
@@ -662,6 +703,12 @@ impl Run<'_> {
         if self.md == 3 {
             self.sr(self.rm, w, v);
             Ok(())
+        } else if self.lock && self.held.get().0 == self.ea {
+            // Only if it is still what was read.
+            match self.m.swap_if(self.ea, w, self.held.get().1 & mask(w), v & mask(w))? {
+                true => Ok(()),
+                false => Err(Stop::Again),
+            }
         } else {
             self.wr(self.ea, w, v)
         }
@@ -1041,7 +1088,8 @@ impl Run<'_> {
                 0x66 => self.p66 = true,
                 0x67 => self.asz32 = true,
                 0xf2 | 0xf3 => self.rep = b,
-                0xf0 | 0x26 | 0x2e | 0x36 | 0x3e => {}
+                0xf0 => self.atomic(),
+                0x26 | 0x2e | 0x36 | 0x3e => {}
                 0x64 => self.seg = 1,
                 0x65 => self.seg = 2,
                 _ => break b,
@@ -1133,6 +1181,10 @@ impl Run<'_> {
             }
             0x86 | 0x87 => {
                 self.modrm(0)?;
+                // An exchange with memory is atomic without the prefix.
+                if self.md != 3 {
+                    self.atomic();
+                }
                 let (a, b) = (self.rm_get(w)?, self.gr(self.reg, w));
                 self.rm_set(w, b)?;
                 self.sr(self.reg, w, a);
@@ -1606,5 +1658,43 @@ mod tests {
             assert_eq!((c.reg[RDI], c.reg[RCX], c.rip, c.steps), (DATA + 4096, 2, CODE, 3));
             assert_eq!(m.read_u64(DATA + 4096 - 8), Ok(0x55));
         }
+    }
+    #[test]
+    fn an_instruction_with_lock_is_atomic_between_threads() {
+        // again: lock add dword [rsi], 1; lock inc qword [rsi + 8]; lock sub dword
+        // [rsi + 18h], 3; sub ebx, 1; jne again; ud2. Four threads, each its own
+        // registers, one memory: what each added is all there at the end.
+        let code = [
+            0xf0, 0x83, 0x06, 0x01, 0xf0, 0x48, 0xff, 0x46, 0x08, 0xf0, 0x83, 0x6e, 0x18, 0x03, 0x83, 0xeb, 0x01, 0x75, 0xed, 0x0f, 0x0b,
+        ];
+        let rounds = 50_000u64;
+        let mut first = Mem::reserve().unwrap();
+        first.map(CODE, 4096, READ | W).unwrap();
+        first.write_bytes(CODE, &code).unwrap();
+        first.protect(CODE, 4096, READ | X).unwrap();
+        first.map(DATA, 4096, READ | W).unwrap();
+        let threads: Vec<_> = (0..4)
+            .map(|_| {
+                let mut m = first.view();
+                std::thread::spawn(move || {
+                    let mut c = Cpu::new(CODE, DATA + 4096);
+                    (c.reg[RSI], c.reg[RBX]) = (DATA, rounds);
+                    loop {
+                        match step(&mut c, &mut m) {
+                            Ok(_) => {}
+                            Err(Stop::Undefined) => break,
+                            Err(other) => panic!("the program stopped: {other:?}"),
+                        }
+                    }
+                    c.steps
+                })
+            })
+            .collect();
+        for t in threads {
+            assert_eq!(t.join().unwrap(), 5 * rounds);
+        }
+        assert_eq!(first.read_u32(DATA), Ok((4 * rounds) as u32));
+        assert_eq!(first.read_u64(DATA + 8), Ok(4 * rounds));
+        assert_eq!(first.read_u32(DATA + 0x18), Ok((12 * rounds) as u32).map(u32::wrapping_neg));
     }
 }

@@ -2593,3 +2593,68 @@ The card, written before the run.
   - redis needs what is not built (a signal delivered: its timer) → said; it waits
     for 0019's third step and Python's threads stand alone for this card
 - **Cut-off**: the two programs, twenty runs each way.
+
+The result (this Mac's Docker VM, on QEMU for its own x86-64 programs; the Python and
+redis images copied from hal; what is right is what hal printed).
+
+**As guessed for Python's threads: twenty of twenty, by the interpreter and with
+`--jit`. redis waits for sockets, by the card's third line.**
+
+| Python's four threads, each summing, joined, the sums printed sorted | right |
+|---|---|
+| `--jit` | 20 of 20 |
+| the interpreter | 20 of 20 |
+
+Nine Python cases are kept (`tests/container/python.txt`, with hal's output): a line;
+arithmetic of floats and of large integers; a hash, JSON and a regular expression;
+four threads started and joined; a pool of eight threads over 2,000 tasks; a lock
+taken 160,000 times by eight threads, the count exact; a child process run and its
+output read; an exit code. All nine as hal's in the three ways: 27 of 27 in the
+Python container, and the 42 cases of before in the Alpine one (126 of 126).
+
+What was built:
+
+- `clone` with shared memory starts a thread of the host's with the registers the
+  guest gave the child, its own blocks, and a handle of its own on the memory; its
+  id is the host's; at its end the word the guest named is cleared and the waiter
+  woken. `exit` ends a thread, `exit_group` the process.
+- The list of regions is one for all threads: each has a copy and takes it anew when
+  the shared one's number has moved; a change is made holding the shared one.
+- What is the process's for system calls (the heap's end, where mappings go, what
+  each signal is to do) is behind a lock that is never held across a call that waits.
+- **The LOCK prefix means something now.** The interpreter writes the operand only if
+  it is still what it read (the host's compare-and-swap) and runs the instruction
+  again if not; `xchg` with memory the same. A test: four threads each do 50,000
+  `lock add`, `lock inc` and `lock sub` on the same words, and every one is counted.
+- A store by one thread into guarded code is counted with the memory; the other
+  threads drop their guarded blocks when they next come by.
+
+Found on the way:
+
+1. **A handle on the memory freed the whole reservation when it was dropped.** With
+   one thread there is one handle. A test with four threads ended r64m with a fault
+   the moment the first thread's handle went. The reservation now goes with the last
+   handle. (In a program's run a thread ends by the kernel's `exit` and drops
+   nothing: the test met what a run would not have.)
+2. **`--jit-check` cannot hold a block to the interpreter when there are threads**:
+   what another thread writes between the two runs makes them differ rightly ("RDX
+   31h -> 35h" in Python's own counter). With more than one thread blocks are no
+   longer checked.
+3. **`madvise` "not needed"** was answered "done" and nothing was done; an
+   allocator (redis's) tests that the pages read as nothing afterwards, found that
+   they did not, and said so. It is handed to the kernel now: the pages are the
+   host's. (A mapping of a file, which r64m holds as a copy, would read as nothing
+   where Linux reads the file again: not met.)
+4. **The test's data was wrong once**: a case's line was written out by the shell's
+   `echo` on hal, which turned `\2` into a byte. The lines are taken from the file
+   they were typed in now. r64m was right.
+
+redis-server stops at its first socket (`socket`, `epoll_create1`: not known yet):
+ADR 0019's second step.
+
+**Not claimed**: that a program with threads is right for the right reason. Blocks
+load and store plainly, and arm64 does not order plain loads and stores between
+threads as x86 does (ADR 0019, point D, proposed). The cases above pass because they
+share memory through locks, which are LOCK-prefixed and so atomic and ordered.
+
+109 unit tests and the 62 programs in the four JIT modes on both hosts.

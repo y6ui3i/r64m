@@ -21,6 +21,72 @@ fn banner() -> String {
     )
 }
 
+/// How the JIT was asked for: the same for every thread of the guest's.
+#[derive(Clone, Copy)]
+struct Mode {
+    jit: bool,
+    check: bool,
+    hot: u8,
+}
+
+static MODE: std::sync::OnceLock<Mode> = std::sync::OnceLock::new();
+
+/// The guest goes on by one step: an instruction of the interpreter's, or as far as
+/// blocks take it.
+fn one(c: &mut cpu::Cpu, mem: &mut mem::Mem, blocks: &mut Option<jit::run::Jit>) -> Result<cpu::Step, cpu::Stop> {
+    match blocks {
+        None => cpu::step(c, mem),
+        Some(blocks) => match blocks.run(c, mem) {
+            jit::run::Event::Syscall => Ok(cpu::Step::Syscall),
+            jit::run::Event::Stop(stop) => Err(stop),
+            jit::run::Event::Differs(what) => {
+                eprintln!("r64m: --jit-check: {what}");
+                std::process::exit(3);
+            }
+        },
+    }
+}
+
+/// The guest cannot go on. Nothing is delivered to it yet (ADR 0019, point 2): it
+/// ends, with what stopped it.
+fn stopped(stop: cpu::Stop, c: &cpu::Cpu) -> ! {
+    let what = match stop {
+        cpu::Stop::Fault(f) => format!("{:?} of {:#x} that is not allowed", f.access, f.addr),
+        cpu::Stop::Divide => "a division that cannot be done".to_string(),
+        cpu::Stop::Undefined => "not an instruction".to_string(),
+        cpu::Stop::Protection => "an instruction the CPU refuses".to_string(),
+        cpu::Stop::NotWritten(bytes) => format!("an instruction not written yet: {bytes}"),
+        cpu::Stop::Again => unreachable!("an instruction to be run again is run again where it stands"),
+    };
+    fail(format_args!("at {:#x} after {} instructions: {what}", c.rip, c.steps));
+}
+
+/// A thread of the guest's other than its first (ADR 0019): the same loop, with the
+/// thread's own registers, its own handle on the memory, and its own blocks.
+fn thread(mut c: cpu::Cpu, mut mem: mem::Mem, mut system: sys::Sys) {
+    let mode = *MODE.get().expect("set before any thread is started");
+    let mut blocks = mode.jit.then(|| {
+        jit::run::Jit::new(mode.check, mode.hot).unwrap_or_else(|e| fail(format_args!("no memory for a thread's generated code: {e}")))
+    });
+    loop {
+        mem.sync();
+        match one(&mut c, &mut mem, &mut blocks) {
+            Ok(cpu::Step::Next) => {}
+            Ok(cpu::Step::Syscall) => {
+                match sys::call(&mut c, &mut mem, &mut system) {
+                    Some(sys::Exit::Group(code)) => std::process::exit(code),
+                    Some(sys::Exit::Thread(code)) => sys::end_thread(&mut mem, &system, code),
+                    None => {}
+                }
+                if let (Some((start, end)), Some(blocks)) = (system.changed.take(), &mut blocks) {
+                    blocks.guest_changed(start, end, &mut mem);
+                }
+            }
+            Err(stop) => stopped(stop, &c),
+        }
+    }
+}
+
 /// r64m's own environment, as the guest's.
 fn environment() -> Vec<Vec<u8>> {
     use std::os::unix::ffi::OsStrExt;
@@ -196,26 +262,22 @@ fn main() {
     if profile {
         profile::start().unwrap_or_else(|e| fail(format_args!("--profile: {e}")));
     }
+    MODE.set(Mode { jit, check: jit_check, hot: if jit_now { 1 } else { jit_hot.unwrap_or(jit::run::HOT) } }).ok();
+    system.thread = Some(thread);
     let code = loop {
-        let stepped = match &mut blocks {
-            None => cpu::step(&mut c, &mut mem),
-            Some(blocks) => match blocks.run(&mut c, &mut mem) {
-                jit::run::Event::Syscall => Ok(cpu::Step::Syscall),
-                jit::run::Event::Stop(stop) => Err(stop),
-                jit::run::Event::Differs(what) => {
-                    lines.flush().ok();
-                    eprintln!("r64m: --jit-check: {what}");
-                    std::process::exit(3);
-                }
-            },
-        };
-        match stepped {
+        mem.sync();
+        match one(&mut c, &mut mem, &mut blocks) {
             Ok(cpu::Step::Next) => {}
             Ok(cpu::Step::Syscall) => {
                 // The exit that ends a program is not a line of the trace: there is
                 // nothing after it to show.
-                if let Some(code) = sys::call(&mut c, &mut mem, &mut system) {
-                    break code;
+                match sys::call(&mut c, &mut mem, &mut system) {
+                    Some(sys::Exit::Group(code)) => break code,
+                    // The first thread ends and others go on: only it ends, and the
+                    // process with the last of them, as the kernel has it.
+                    Some(sys::Exit::Thread(code)) if sys::threads_started() => sys::end_thread(&mut mem, &system, code),
+                    Some(sys::Exit::Thread(code)) => break code,
+                    None => {}
                 }
                 // Blocks made from pages the call unmapped, mapped over or protected
                 // otherwise are of what is no longer there (ADR 0016, point 2).
@@ -225,15 +287,7 @@ fn main() {
             }
             Err(stop) => {
                 lines.flush().ok();
-                let what = match stop {
-                    cpu::Stop::Fault(f) => format!("{:?} of {:#x} that is not allowed", f.access, f.addr),
-                    cpu::Stop::Divide => "a division that cannot be done".to_string(),
-                    cpu::Stop::Undefined => "not an instruction".to_string(),
-                    cpu::Stop::Protection => "an instruction the CPU refuses".to_string(),
-                    cpu::Stop::NotWritten(bytes) => format!("an instruction not written yet: {bytes}"),
-                };
-                // Nothing is delivered to the guest yet (ADR 0008's signals): it ends.
-                fail(format_args!("at {:#x} after {} instructions: {what}", c.rip, c.steps));
+                stopped(stop, &c);
             }
         }
         if trace {
