@@ -182,6 +182,7 @@ fn main() {
         if jit_why {
             made.why = Some(Default::default());
         }
+        made.timed = jit_stats;
         Some(made)
     } else {
         None
@@ -252,6 +253,12 @@ fn main() {
         eprintln!(
             "r64m: jit: {} blocks, entered {} times, {} of {} instructions in blocks, {} jumps joined, {} checked, {} left by a fault, {} stores made beside code, {} pages' blocks forgotten, emptied {} times",
             s.blocks, s.entered, s.in_blocks, c.steps, s.joined, s.checked, s.faults, s.beside, s.forgotten, s.emptied
+        );
+        // (Timed only when this is asked for: the clock is read twice for each.)
+        eprintln!(
+            "r64m: jit: {:.3} s making blocks, {:.3} s in generated code",
+            s.making as f64 / 1e9,
+            s.running as f64 / 1e9
         );
     }
     std::process::exit(code);

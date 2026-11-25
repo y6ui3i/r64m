@@ -493,6 +493,13 @@ pub fn vshift(op: VShift, lane: Lane, rd: u8, rn: u8, by: u32) -> u32 {
     form | field << 16 | r(rn) << 5 | r(rd)
 }
 
+/// Sixteen bytes from byte `from` of `rn` followed by `rm`: a move of the whole
+/// register by bytes, with what comes in from the other.
+pub fn ext(rd: u8, rn: u8, rm: u8, from: u32) -> u32 {
+    debug_assert!(from < 16);
+    0x6e00_0000 | r(rm) << 16 | from << 11 | r(rn) << 5 | r(rd)
+}
+
 /// A store of the lower halves of two vector registers, and a load of all of two, at a
 /// register (31: the stack pointer) and a constant that is a multiple of their size.
 pub fn stp_d(rt: u8, rt2: u8, rn: u8, offset: u32) -> u32 {
@@ -748,6 +755,8 @@ mod tests {
             (vshift(VShift::Shl, Lane::S, 1, 1, 24), 0x4f385421, "shl v1.4s, v1.4s, #24"),
             (vshift(VShift::Shl, Lane::D, 1, 1, 63), 0x4f7f5421, "shl v1.2d, v1.2d, #63"),
             (vshift(VShift::Shl, Lane::H, 1, 1, 1), 0x4f115421, "shl v1.8h, v1.8h, #1"),
+            (ext(1, 1, 16, 3), 0x6e101821, "ext v1.16b, v1.16b, v16.16b, #3"),
+            (ext(9, 16, 9, 12), 0x6e096209, "ext v9.16b, v16.16b, v9.16b, #12"),
             (stp_d(8, 9, 31, 96), 0x6d0627e8, "stp d8, d9, [sp, #96]"),
             (stp_d(14, 15, 31, 144), 0x6d093fee, "stp d14, d15, [sp, #144]"),
             (ldp_q(0, 1, 16, 0), 0xad400600, "ldp q0, q1, [x16]"),
@@ -758,7 +767,7 @@ mod tests {
         for (ours, theirs, name) in cases {
             assert_eq!(ours, theirs, "{name}: {ours:08x}, the assembler {theirs:08x}");
         }
-        assert_eq!(cases.len(), 233);
+        assert_eq!(cases.len(), 235);
     }
 
     #[test]

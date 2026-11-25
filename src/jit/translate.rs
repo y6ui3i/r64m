@@ -103,6 +103,9 @@ struct Ins {
     rm: Rm,
     /// The constant, with its sign; for a jump, where it goes.
     imm: i64,
+    /// The segment a memory operand is relative to: 0 none, 1 FS, 2 GS. (The others
+    /// are nothing in 64-bit code.)
+    seg: u8,
     /// For an SSE instruction, the prefix that says which it is: 0 none, 1 66h,
     /// 2 F3h, 3 F2h (the interpreter's numbers). Else 0.
     pre: u8,
@@ -171,6 +174,7 @@ fn read(bytes: &[u8], rip: u64) -> Option<Ins> {
     // allowed before), F2h (before an SSE opcode only), and the segments that do
     // nothing in 64-bit code. Then REX.
     let (mut p66, mut f3, mut f2) = (false, false, false);
+    let mut seg = 0;
     let mut b = next(1)? as u8;
     loop {
         match b {
@@ -178,6 +182,8 @@ fn read(bytes: &[u8], rip: u64) -> Option<Ins> {
             0xf3 => f3 = true,
             0xf2 => f2 = true,
             0x26 | 0x2e | 0x36 | 0x3e => {}
+            0x64 => seg = 1,
+            0x65 => seg = 2,
             _ => break,
         }
         b = next(1)? as u8;
@@ -210,7 +216,7 @@ fn read(bytes: &[u8], rip: u64) -> Option<Ins> {
         (_, _, true) => 16,
         _ => 32,
     };
-    let mut ins = Ins { op, len: 0, size, rex: rex != 0, reg: 0, rm: Rm::Reg(0), imm: 0, pre: if sse { pre } else { 0 } };
+    let mut ins = Ins { op, len: 0, size, rex: rex != 0, reg: 0, rm: Rm::Reg(0), imm: 0, seg, pre: if sse { pre } else { 0 } };
 
     // What follows the opcode: a ModRM byte, and a constant of how many bytes (for
     // the opcodes whose constant is as wide as the operand, 4 at most).
@@ -228,6 +234,9 @@ fn read(bytes: &[u8], rip: u64) -> Option<Ins> {
         0x1c8..=0x1cf => (false, 0),
         0x63 | 0x85 | 0x89 | 0x8b | 0x8d | 0xd1 | 0xd3 | 0xf7 | 0xff => (true, 0),
         0x11e | 0x11f | 0x1b6 | 0x1b7 | 0x1bc | 0x1bd | 0x1be | 0x1bf => (true, 0),
+        // BT, BTS, BTR, BTC by a register; by a constant (a group).
+        0x1a3 | 0x1ab | 0x1b3 | 0x1bb => (true, 0),
+        0x1ba => (true, 1),
         0x140..=0x14f | 0x190..=0x19f | 0x1af => (true, 0),
         0x81 | 0xc7 | 0x69 => (true, whole),
         0x83 | 0xc1 | 0x6b => (true, 1),
@@ -299,11 +308,11 @@ fn read(bytes: &[u8], rip: u64) -> Option<Ins> {
     }
     if sse {
         // Of the shifts by a constant: of a register, to the right without and with
-        // the sign and to the left (fields 2, 4 and 6); of 64 bits not with the sign
-        // (those fields of 73h shift the whole register by bytes).
+        // the sign and to the left (fields 2, 4 and 6); of 64 bits not with the sign.
         let shift_ok = match op {
             0x171 | 0x172 => matches!(ins.rm, Rm::Reg(_)) && matches!(ins.reg & 7, 2 | 4 | 6),
-            0x173 => matches!(ins.rm, Rm::Reg(_)) && matches!(ins.reg & 7, 2 | 6),
+            // (Fields 3 and 7 of 73h move the whole register by bytes.)
+            0x173 => matches!(ins.rm, Rm::Reg(_)) && matches!(ins.reg & 7, 2 | 3 | 6 | 7),
             _ => true,
         };
         return (sse_with(op, pre) && shift_ok).then_some(ins);
@@ -322,7 +331,7 @@ fn read(bytes: &[u8], rip: u64) -> Option<Ins> {
     let field = ins.reg & 7;
     let register = matches!(ins.rm, Rm::Reg(_));
     // An operand of 8 or 16 bits is translated for the arithmetic and the moves only.
-    let small_ok = matches!(op, 0x01..=0x3b | 0x81 | 0x83 | 0x85 | 0x89 | 0x8b | 0xc1 | 0xc7 | 0xd1 | 0xf7 | 0x11e | 0x11f | 0x190..=0x19f);
+    let small_ok = matches!(op, 0x01..=0x3b | 0x81 | 0x83 | 0x85 | 0x89 | 0x8b | 0xc1 | 0xc7 | 0xd1 | 0xf7 | 0x11e | 0x11f | 0x190..=0x19f | 0x90);
     let small = size < 32;
     // ADC and SBB are translated at 32 and 64 bits.
     let with_carry = matches!(op, 0x11 | 0x13 | 0x19 | 0x1b) || matches!(op, 0x81 | 0x83) && matches!(field, 2 | 3);
@@ -340,6 +349,10 @@ fn read(bytes: &[u8], rip: u64) -> Option<Ins> {
             0xc7 => field != 0,
             // LEA of a register is not an instruction.
             0x8d => register,
+            // The bit tests of a register only (of memory the bit may lie outside
+            // the operand); of the group, the four that are bit tests.
+            0x1a3 | 0x1ab | 0x1b3 | 0x1bb => !register,
+            0x1ba => !register || field < 4,
             // Of FFh only CALL and JMP through the operand.
             0xff => !matches!(field, 2 | 4),
             // Of F7h: TEST with a constant and NOT; NEG of a register, and MUL, IMUL,
@@ -534,7 +547,7 @@ impl Scan<'_> {
                     // A shift by CL or a rotation leaves the host's flags no longer
                     // what a jump would ask (and a rotation may end the block); so
                     // does a division, which tests its operands with them.
-                    if matches!(ins.op, 0xc1 | 0xd1 | 0xd3 | 0xf7) || sse_spends_flags(ins.op) {
+                    if matches!(ins.op, 0xc1 | 0xd1 | 0xd3 | 0xf7 | 0x1a3 | 0x1ab | 0x1b3 | 0x1bb | 0x1ba) || sse_spends_flags(ins.op) {
                         host = None;
                     }
                     at = next;
@@ -606,6 +619,9 @@ enum HostFlags {
     Sub,
     /// Of an ANDS: carry and overflow are clear, as x86's are.
     Logic,
+    /// Of a bit test: the host's carry is clear where x86's is set, as after a SUBS,
+    /// and nothing else of x86's flags is in the host's (a bit test leaves them).
+    Bit,
     /// Of a comparison of two floats, with "either is not a number" made 0111 (N Z C
     /// V): then each of x86's conditions on ZF, PF and CF is one of the host's
     /// (ADR 0015, point 4; the table there has two branches for equality, which the
@@ -625,6 +641,8 @@ fn condition(cc: u8, flags: HostFlags) -> Option<Jump> {
     use HostFlags::*;
     // By pairs: the odd one of each is the even one's opposite.
     let even = match (cc >> 1, flags) {
+        (1, Bit) => Jump::If(Lo),
+        (_, Bit) => return None,
         // After a comparison of floats OF and SF are clear, CF is "less or not
         // numbers", ZF "equal or not numbers", PF "not numbers".
         (0 | 4 | 6, Float) => Jump::Never,
@@ -655,6 +673,9 @@ fn condition(cc: u8, flags: HostFlags) -> Option<Jump> {
 
 struct Emit<'a> {
     w: Vec<u32>,
+    /// The segment the memory operand of the instruction being translated is
+    /// relative to (`Ins::seg`); nothing for LEA, which only works an address out.
+    seg: u8,
     flags: Option<HostFlags>,
     m: &'a Mem,
     /// Where the block begins: what is read to prove flags dead is to lie near it.
@@ -710,6 +731,19 @@ impl Emit<'_> {
     /// The register that holds a memory operand's address in the guest: one of the
     /// guest's own if the address is just that, else `T1`, made here.
     fn address(&mut self, base: Option<u8>, index: Option<(u8, u32)>, disp: i64) -> u8 {
+        let at = self.address_in_segment(base, index, disp);
+        if self.seg == 0 {
+            return at;
+        }
+        // Relative to FS or GS: the segment's base is added (the thread's own data
+        // and the stack protector's word are found so).
+        let base = if self.seg == 1 { offset_of!(Cpu, fs_base) } else { offset_of!(Cpu, gs_base) };
+        self.put(a64::mem_imm(Size::X, Op::Load, T5, CPU, base as u32));
+        self.put(a64::arith(true, false, false, T1, at, T5, 0));
+        T1
+    }
+
+    fn address_in_segment(&mut self, base: Option<u8>, index: Option<(u8, u32)>, disp: i64) -> u8 {
         let mut at = base;
         if let Some((i, scale)) = index {
             match at {
@@ -1074,6 +1108,17 @@ impl Emit<'_> {
                 let by = ins.imm as u8 as u32;
                 match (ins.reg & 7, by) {
                     (_, 0) => {}
+                    // The whole register by bytes: to the right (3) what comes in
+                    // at the top is nothing, to the left (7) at the bottom.
+                    (3 | 7, 16..) => self.put(a64::vlogic(VLogic::Eor, d, d, d)),
+                    (3, _) => {
+                        self.put(a64::vlogic(VLogic::Eor, V0, V0, V0));
+                        self.put(a64::ext(d, d, V0, by));
+                    }
+                    (7, _) => {
+                        self.put(a64::vlogic(VLogic::Eor, V0, V0, V0));
+                        self.put(a64::ext(d, V0, d, 16 - by));
+                    }
                     (4, _) => self.put(a64::vshift(VShift::Sshr, lane, d, d, by.min(bits - 1))),
                     (_, _) if by >= bits => self.put(a64::vlogic(VLogic::Eor, d, d, d)),
                     (2, _) => self.put(a64::vshift(VShift::Ushr, lane, d, d, by)),
@@ -1397,7 +1442,7 @@ fn size(bits: u32) -> Size {
 /// one that is translated. With `exact` every record of the flags is written, whether
 /// or not anything can read them.
 pub fn translate(m: &Mem, rip: u64, exact: bool) -> Option<Built> {
-    let mut e = Emit { w: Vec::new(), flags: None, m, rip, exact, skip: false, seen: None, later: None, host: true, bails: Vec::new() };
+    let mut e = Emit { w: Vec::new(), seg: 0, flags: None, m, rip, exact, skip: false, seen: None, later: None, host: true, bails: Vec::new() };
     let mut starts = Vec::new();
     let mut taken: Vec<Taken> = Vec::new();
     let mut sse = false;
@@ -1415,6 +1460,7 @@ pub fn translate(m: &Mem, rip: u64, exact: bool) -> Option<Built> {
             break;
         };
         let before = e.w.len();
+        e.seg = if ins.op == 0x8d { 0 } else { ins.seg };
         starts.push((e.w.len() as u32, at));
         let next = at.wrapping_add(ins.len as u64);
         let (bits, reg, field) = (ins.size, ins.reg, ins.reg & 7);
@@ -1545,6 +1591,50 @@ pub fn translate(m: &Mem, rip: u64, exact: bool) -> Option<Built> {
                 e.flags = None;
             }
             0x1c8..=0x1cf => e.put(a64::rev(wide, reg, reg)),
+            0x1a3 | 0x1ab | 0x1b3 | 0x1bb | 0x1ba => {
+                // BT, BTS, BTR, BTC of a register: the carry is the bit, and the
+                // other flags are left, which the record cannot say. So, as for a
+                // rotation, only where they are written over before anything reads
+                // the record; a jump on the carry asks the host's flags.
+                let Rm::Reg(d) = ins.rm else { unreachable!() };
+                let by_constant = ins.op == 0x1ba;
+                let what = if by_constant { field & 3 } else { (ins.op >> 3 & 3) as u8 };
+                if !e.dead(next, Some(HostFlags::Bit), room) {
+                    not_here = true;
+                } else {
+                    // The bit, alone, in T0; and for the three that change it, a
+                    // one at its place in T1.
+                    if by_constant {
+                        let n = ins.imm as u32 & (bits - 1);
+                        e.put(a64::ubfx(T0, d, n, 1));
+                        if what != 0 {
+                            e.constant(T1, 1 << n);
+                        }
+                    } else {
+                        // (A shift by a register takes its count by the width.)
+                        e.put(a64::shift_reg(wide, Shift::Lsr, T0, d, reg));
+                        e.put(a64::ubfx(T0, T0, 0, 1));
+                        if what != 0 {
+                            e.put(a64::movz(true, T1, 1, 0));
+                            e.put(a64::shift_reg(wide, Shift::Lsl, T1, T1, reg));
+                        }
+                    }
+                    // Nothing less the bit: a borrow, the host's carry clear, where
+                    // the bit is set.
+                    e.put(a64::arith(true, true, true, a64::ZR, a64::ZR, T0, 0));
+                    match what {
+                        0 => {}
+                        // Set; cleared (set, then turned over); turned over.
+                        1 => e.put(a64::logic(wide, Logic::Orr, d, d, T1)),
+                        2 => {
+                            e.put(a64::logic(wide, Logic::Orr, d, d, T1));
+                            e.put(a64::logic(wide, Logic::Eor, d, d, T1));
+                        }
+                        _ => e.put(a64::logic(wide, Logic::Eor, d, d, T1)),
+                    }
+                    e.flags = Some(HostFlags::Bit);
+                }
+            }
             0xc1 | 0xd1 | 0xd3 => {
                 let Rm::Reg(d) = ins.rm else { unreachable!() };
                 let by_cl = ins.op == 0xd3;
@@ -2048,7 +2138,8 @@ mod tests {
         no(&[0xf6, 0xdb]); // NEG of a byte
         no(&[0x66, 0x0f, 0xbc, 0xc3]); // a 16-bit BSF
         no(&[0x66, 0x98]); // CBW
-        no(&[0x64, 0x8b, 0x00]); // a segment
+        no(&[0x66, 0x0f, 0xa3, 0xd8]); // a 16-bit BT
+        no(&[0x0f, 0xa3, 0x18]); // BT of memory
         no(&[0x8d, 0xc0]); // LEA of a register
         no(&[0xc7, 0xf8, 0, 0, 0, 0]); // C7h's other field
         no(&[0x41, 0x90]); // XCHG R8, RAX

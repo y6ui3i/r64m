@@ -17,7 +17,7 @@ pub const HOT: u8 = 16;
 /// translated from again: it holds data that changes beside its code.
 const GIVEN_UP: u8 = 8;
 /// How much generated code there may be before all of it is forgotten.
-const CODE_BYTES: usize = 16 << 20;
+const CODE_BYTES: usize = 64 << 20;
 
 /// What is known of an address that has been arrived at.
 #[derive(Clone, Copy)]
@@ -83,6 +83,10 @@ pub struct Stats {
     pub checked: u64,
     pub joined: u64,
     pub beside: u64,
+    /// How long the making of blocks took, and the running of generated code, in
+    /// nanoseconds: the rest of a run is the interpreter and r64m's own keeping.
+    pub making: u64,
+    pub running: u64,
 }
 
 pub struct Jit {
@@ -95,6 +99,15 @@ pub struct Jit {
     /// For each of the guest's own 4 KB pages, how many blocks have an instruction
     /// in it. A host page may be larger: a store to it need not be a store to code.
     holds: HashMap<u64, u32>,
+    /// The guest's pages that anything is known of (`places`) or that a block rests
+    /// on, since generated code was last emptied: so that a change of mapping
+    /// elsewhere, which is nearly all of them, is seen at once to concern nothing
+    /// (R029: `cc1` maps memory many thousand times, and each was a walk through
+    /// every place known).
+    known: std::collections::BTreeSet<u64>,
+    /// Whether the making of blocks and the running of generated code are timed
+    /// (`--jit-stats`).
+    pub timed: bool,
     /// Every block is compared with the interpreter.
     check: bool,
     /// When asked for (`--jit-why`): how often the interpreter ran an instruction
@@ -156,6 +169,8 @@ impl Jit {
             code: Code::new(CODE_BYTES)?,
             blocks: Vec::new(),
             places: HashMap::default(),
+            known: Default::default(),
+            timed: false,
             writes: HashMap::new(),
             holds: HashMap::new(),
             check,
@@ -211,10 +226,12 @@ impl Jit {
                             _ => 1,
                         };
                         if heat < self.hot {
+                            self.know(c.rip);
                             self.places.insert(c.rip, Place::Heat(heat));
-                        } else if self.make(c.rip, m) {
+                        } else if self.timed_make(c.rip, m) {
                             continue;
                         } else {
+                            self.know(c.rip);
                             self.places.insert(c.rip, Place::StoodIn);
                             stands_in = true;
                         }
@@ -287,7 +304,11 @@ impl Jit {
     /// and then RIP is on the instruction that did.
     fn run_block(&mut self, id: usize, c: &mut Cpu, m: &mut Mem) -> Result<bool, String> {
         let expected = if self.check { self.interpreted(id, c, m) } else { None };
+        let start = self.timed.then(std::time::Instant::now);
         let reason = unsafe { enter(c, self.blocks[id].code, m.base(), self.table.as_ptr()) };
+        if let Some(start) = start {
+            self.stats.running += start.elapsed().as_nanos() as u64;
+        }
         // What the blocks that were run to their ends ran.
         c.steps += c.ran;
         self.stats.in_blocks += c.ran;
@@ -341,6 +362,16 @@ impl Jit {
         whole.then_some((end, written))
     }
 
+    fn timed_make(&mut self, rip: u64, m: &mut Mem) -> bool {
+        if !self.timed {
+            return self.make(rip, m);
+        }
+        let start = std::time::Instant::now();
+        let made = self.make(rip, m);
+        self.stats.making += start.elapsed().as_nanos() as u64;
+        made
+    }
+
     /// Translates the block at `rip` and keeps it. False if nothing was made.
     fn make(&mut self, rip: u64, m: &mut Mem) -> bool {
         let page = m.host_pages(rip, rip + 1).0;
@@ -374,6 +405,9 @@ impl Jit {
         // (ADR 0016: what the guest may not write needs no guard).
         let pages = m.host_pages(from, to);
         let guarded = m.guest_may_write(from & !(PAGE - 1), to.next_multiple_of(PAGE));
+        for page in (from & !(PAGE - 1)..to).step_by(PAGE as usize) {
+            self.known.insert(page);
+        }
         if guarded {
             if m.mark_code(pages.0, pages.1, true).is_err() {
                 return false;
@@ -382,6 +416,7 @@ impl Jit {
                 *self.holds.entry(page).or_insert(0) += 1;
             }
         }
+        self.know(rip);
         self.places.insert(rip, Place::Block(self.blocks.len()));
         self.blocks.push(Block { code, starts, pages, guest: (from, to), guarded, incoming: Vec::new() });
         self.stats.blocks += 1;
@@ -397,11 +432,20 @@ impl Jit {
         self.stats.forgotten += 1;
     }
 
+    /// Notes that something is known of the page `rip` is in.
+    fn know(&mut self, rip: u64) {
+        self.known.insert(rip & !(PAGE - 1));
+    }
+
     /// The guest's pages `[start, end)` were unmapped, mapped anew or given another
     /// protection: what was made from them, or learnt of addresses in them, is of
     /// what is no longer there. (It may be made again: if the pages can now be
     /// written, guarded; ADR 0016, point 2.)
     pub fn guest_changed(&mut self, start: u64, end: u64, m: &mut Mem) {
+        // Nearly always nothing is known of those pages: memory for data.
+        if self.known.range(start & !(PAGE - 1)..end).next().is_none() {
+            return;
+        }
         let mut pages: Vec<u64> = self
             .places
             .values()
@@ -481,6 +525,7 @@ impl Jit {
         }
         self.blocks.clear();
         self.places.clear();
+        self.known.clear();
         self.holds.clear();
         self.from = 0;
         self.code.empty();
@@ -2632,7 +2677,8 @@ mod tests {
         // psrlw, psraw, psllw; psrld, psrad, pslld; psrlq, psllq: of xmm1 and of
         // xmm9, by nothing, by less than the width, by the width, and by more.
         let mut list = Vec::new();
-        for (op, fields) in [(0x71u8, &[2u8, 4, 6][..]), (0x72, &[2, 4, 6]), (0x73, &[2, 6])] {
+        // And of the whole register by bytes: psrldq and pslldq.
+        for (op, fields) in [(0x71u8, &[2u8, 4, 6][..]), (0x72, &[2, 4, 6]), (0x73, &[2, 3, 6, 7])] {
             for &field in fields {
                 for by in [0u8, 1, 7, 8, 15, 16, 17, 24, 31, 32, 33, 63, 64, 65, 128, 255] {
                     list.push((vec![0x66, 0x0f, op, 0xc1 | field << 3, by], 1));
@@ -2646,9 +2692,8 @@ mod tests {
             (c.xmm[2], c.xmm[3], c.xmm[18], c.xmm[19]) = (values[case][0], values[case][1], values[case][1], values[case][0]);
         });
         assert_eq!(n as usize, list.len() * values.len());
-        // What is not read: a shift of memory, the shifts of the whole register by
-        // bytes, and a shift of 64 bits with its sign.
-        for code in [&[0x66u8, 0x0f, 0x72, 0x16, 1][..], &[0x66, 0x0f, 0x73, 0xd9, 1], &[0x66, 0x0f, 0x73, 0xf9, 1], &[0x66, 0x0f, 0x73, 0xe1, 1]] {
+        // What is not read: a shift of memory, and a shift of 64 bits with its sign.
+        for code in [&[0x66u8, 0x0f, 0x72, 0x16, 1][..], &[0x66, 0x0f, 0x73, 0xe1, 1]] {
             assert!(translate(&guest(code, &[]), CODE, true).is_none(), "{code:02x?}");
         }
         // Nor the instructions of the MMX registers, which these opcodes are without
@@ -2708,5 +2753,139 @@ mod tests {
         });
         assert_eq!((c.reg[crate::cpu::RDI], c.reg[RDX], c.steps), (0x80c0_0000, 1, 66));
         assert_eq!((shape(&code, true).0, shape(&code, false).0), (63, 64));
+    }
+    #[test]
+    fn operands_relative_to_fs_and_gs() {
+        // What a function compiled with the stack protector does: mov rax, fs:[28h];
+        // sub rax, fs:[28h]. And: mov fs:[rsi + 8], rbx; add eax, gs:[rbx*4 + 10h];
+        // movsd xmm1, fs:[30h]; lea rax, fs:[rsi + 8], which is the address without
+        // the segment.
+        let list = [
+            (vec![0x64, 0x48, 0x8b, 0x04, 0x25, 0x28, 0, 0, 0], 1),
+            (vec![0x64, 0x48, 0x2b, 0x04, 0x25, 0x28, 0, 0, 0], 1),
+            (vec![0x64, 0x48, 0x8b, 0x04, 0x25, 0x28, 0, 0, 0, 0x64, 0x48, 0x2b, 0x04, 0x25, 0x28, 0, 0, 0, 0x75, 0x02, 0x89, 0xc2], 3),
+            (vec![0x64, 0x48, 0x89, 0x5e, 0x08], 1),
+            (vec![0x65, 0x03, 0x04, 0x9d, 0x10, 0, 0, 0], 1),
+            (vec![0xf2, 0x64, 0x0f, 0x10, 0x0c, 0x25, 0x30, 0, 0, 0], 1),
+            (vec![0x64, 0x48, 0x8d, 0x46, 0x08], 1),
+        ];
+        let data: Vec<u8> = (0..=255u8).collect();
+        let n = sse(&list, 2, &|_| data.clone(), &|case, c| {
+            fill_xmm(c);
+            c.fs_base = DATA + 0x40 + 8 * case as u64;
+            c.gs_base = DATA + 0x80;
+            (c.reg[RAX], c.reg[RBX], c.reg[RSI]) = (0x1111_2222_3333_4444, 3, 0x20);
+        });
+        // (One of them is two blocks where each is checked: it has a jump.)
+        assert_eq!(n as usize, (list.len() + 1) * 2);
+        // Said outright: the word at FS + 28h, and LEA's answer.
+        let (c, m) = checked(&[0x64, 0x48, 0x8b, 0x04, 0x25, 0x28, 0, 0, 0, 0x64, 0x48, 0x8d, 0x5e, 0x08, 0x0f, 0x05], &data, &|c| {
+            c.fs_base = DATA + 0x40;
+            c.reg[RSI] = 0x20;
+        });
+        assert_eq!((c.reg[RAX], c.reg[RBX]), (m.read_u64(DATA + 0x68).unwrap(), 0x28));
+    }
+
+    #[test]
+    fn bit_tests_where_only_the_carry_is_asked_for() {
+        // bt, bts, btr, btc of EAX and of RAX, by EBX/RBX and by a constant.
+        let mut tests: Vec<Vec<u8>> = Vec::new();
+        for rex in [&[][..], &[0x48][..]] {
+            for op in [0xa3u8, 0xab, 0xb3, 0xbb] {
+                tests.push([rex, &[0x0f, op, 0xd8]].concat());
+            }
+            for field in 4..8u8 {
+                for n in [0u8, 5, 31, 32, 63, 200] {
+                    tests.push([rex, &[0x0f, 0xba, 0xc0 | field << 3, n]].concat());
+                }
+            }
+        }
+        let values = [(0u64, 0u64), (u64::MAX, 5), (0x8000_0000_0000_0020, 5), (0x8000_0000_0000_0020, 63), (0x1_0000_0000, 32), (0xffff_fffe, 64), (0x20, 0xffff_ff05), (1 << 31, 31)];
+        let set = |case: usize, c: &mut Cpu| {
+            (c.reg[RAX], c.reg[RBX]) = values[case];
+            c.reg[RDX] = 0x100;
+            // Flags that a bit test leaves and the instruction after writes over.
+            c.rflags |= 0x8c4;
+        };
+        // Read by setc and by adc, then all written over: in one block, checked.
+        let mut list = Vec::new();
+        for t in &tests {
+            list.push(([&t[..], &[0x0f, 0x92, 0xc1, 0x83, 0xc2, 0x05]].concat(), 3));
+            list.push(([&t[..], &[0x83, 0xd2, 0x00]].concat(), 2));
+        }
+        let n = sse(&list, values.len(), &|_| Vec::new(), &set);
+        assert_eq!(n as usize, list.len() * values.len());
+        // Read by a jump on the carry, with both ways writing the flags over: jc
+        // over; add edx, 1; over: add edx, 2. The block goes on past the jump, which
+        // a checked block does not: held to the interpreter by the whole run.
+        for t in &tests {
+            let code = [&t[..], &[0x72, 0x03, 0x83, 0xc2, 0x01, 0x83, 0xc2, 0x02, 0x0f, 0x05]].concat();
+            assert_eq!(shape(&code, false).0, 4, "{t:02x?}");
+            let mut m = guest(&code, &[]);
+            let mut jit = Jit::new(false, 1).unwrap();
+            for case in 0..values.len() {
+                both(&mut jit, &mut m, CODE, &|c| set(case, c));
+            }
+            assert_eq!(jit.stats.in_blocks as usize, values.iter().map(|&(a, b)| if carry_of(t, a, b) { 3 } else { 4 }).sum::<usize>());
+        }
+        // Where the other flags are read after it (every condition, and nothing
+        // writes them again), it is the interpreter's, and right.
+        let list: Vec<&[u8]> = tests.iter().step_by(5).map(|t| &t[..]).collect();
+        for &(a, b) in &values[..4] {
+            under_every_condition(&list, &[], &|c| {
+                (c.reg[RAX], c.reg[RBX]) = (a, b);
+                c.rflags |= 0x8c4;
+            });
+        }
+        // Not read: of memory, and the rest of the group.
+        for code in [&[0x0fu8, 0xa3, 0x1e][..], &[0x0f, 0xba, 0x26, 1], &[0x0f, 0xba, 0xc0, 1]] {
+            assert!(translate(&guest(code, &[]), CODE, false).is_none(), "{code:02x?}");
+        }
+    }
+
+    /// The carry a bit test of `a` by `b` (or by its own constant) gives.
+    fn carry_of(test: &[u8], a: u64, b: u64) -> bool {
+        let wide = test[0] == 0x48;
+        let rest = &test[wide as usize..];
+        let n = if rest[1] == 0xba { rest[3] as u64 } else { b } & if wide { 63 } else { 31 };
+        a >> n & 1 != 0
+    }
+
+    #[test]
+    fn a_no_operation_of_two_bytes_is_in_its_block() {
+        // xchg ax, ax; add edx, 1; syscall
+        let code = [0x66, 0x90, 0x83, 0xc2, 0x01, 0x0f, 0x05];
+        let (c, _) = checked(&code, &[], &|c| c.reg[RAX] = 0x1234_5678);
+        assert_eq!((c.reg[RAX], c.reg[RDX], shape(&code, true).0), (0x1234_5678, 1, 2));
+    }
+    #[test]
+    fn a_change_of_mapping_forgets_what_was_made_there_and_nothing_else() {
+        // mov edx, 7; syscall at CODE; then the page is mapped anew with mov edx, 9.
+        let mut m = guest(&[0xba, 7, 0, 0, 0, 0x0f, 0x05], &[]);
+        let mut jit = Jit::new(false, 1).unwrap();
+        let run = |jit: &mut Jit, m: &mut Mem| {
+            let mut c = Cpu::new(CODE, DATA + 4096);
+            assert!(matches!(jit.run(&mut c, m), Event::Syscall));
+            c.reg[RDX]
+        };
+        assert_eq!(run(&mut jit, &mut m), 7);
+        // A change somewhere else (memory for data, which is nearly every change):
+        // the block is kept and run again.
+        m.map(DATA + 0x10_0000, 4096, R | W).unwrap();
+        jit.guest_changed(DATA + 0x10_0000, DATA + 0x10_1000, &mut m);
+        assert_eq!((run(&mut jit, &mut m), jit.stats.blocks, jit.stats.entered), (7, 1, 2));
+        // The code's own page mapped anew with other code: what was made is dropped,
+        // and the new code is what runs.
+        m.map(CODE, 4096, R | W).unwrap();
+        m.write_bytes(CODE, &[0xba, 9, 0, 0, 0, 0x0f, 0x05]).unwrap();
+        m.protect(CODE, 4096, R | X).unwrap();
+        jit.guest_changed(CODE, CODE + 4096, &mut m);
+        assert_eq!((run(&mut jit, &mut m), jit.stats.blocks), (9, 2));
+        // A range that only begins before the code's page reaches it too.
+        m.map(CODE, 4096, R | W).unwrap();
+        m.write_bytes(CODE, &[0xba, 11, 0, 0, 0, 0x0f, 0x05]).unwrap();
+        m.protect(CODE, 4096, R | X).unwrap();
+        jit.guest_changed(CODE - 0x10_0000, CODE + 1, &mut m);
+        assert_eq!((run(&mut jit, &mut m), jit.stats.blocks), (11, 3));
     }
 }
