@@ -3282,3 +3282,38 @@ Not done, and owed:
 - ADR 0011 says the images are the ordinary ones, unchanged: this one is
   `python:3.13-slim` with nginx added. The official nginx image beside a Python
   one, as two containers, has not been tried.
+
+## R042: the goal's request beside QEMU (2026-11-26)
+
+The aim is twice QEMU on real work in a container. R030/R031 measured a build; this is
+the goal's own work.
+
+The card, written before the run.
+
+- **Hypothesis**: with the same image and the same client, r64m (`--jit`) is at
+  least twice as fast as user-mode QEMU (OrbStack's, 9.2.2) on each of three
+  measures: (a) from the container's start to the first answer (Python starting,
+  FastAPI imported: mostly new code, where making blocks counts); (b) a request on
+  a new connection, servers warm (a TLS handshake each: nginx's RSA 2048 signature,
+  where QEMU says it has every extension and OpenSSL takes its AVX2/ADX/AES-NI
+  paths, and r64m says none and it takes the plain ones); (c) a request on a
+  connection kept open, servers warm (nginx's proxying and uvicorn's Python, and
+  system calls). My guess before measuring: (c) is past 2, (a) near it, (b) the one
+  most likely under.
+- **What is changed from before** (R041): nothing in r64m. The key and certificate
+  are made once outside and given to both; the client is one native program on the
+  Mac (Python, through a published port) for both, so its own time is in both and
+  pulls the ratios toward 1: the times are given beside the ratios.
+- **Next move for each result**:
+  - All three at 2 or more → recorded; the next is hal and the form Docker runs
+  - (a) under 2 → `--jit-stats` on the Python process: making against running, as
+    R031 did for the build
+  - (b) under 2 → `--profile` on nginx's worker during handshakes; if the time is in
+    the plain bignum and AES code, the extensions OpenSSL would use are listed with
+    what each asks of r64m, as the next experiment's card (none is switched on here)
+  - (c) under 2 → `--profile` on the worker and on uvicorn, and the share of time in
+    system calls
+- **Cut-off**: three launches of the two side by side; in each, the start timed,
+  300 requests to warm, then 300 on new connections and 1,000 on one kept open; the
+  least of the three for each measure. One profile for each measure under 2, no
+  fix in this experiment.
