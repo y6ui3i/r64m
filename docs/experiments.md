@@ -3373,3 +3373,43 @@ slow in this VM). The numbers above are from runs without it.
 
 Next (R043): these instructions translated, the commonest first, and the same
 three measures again.
+
+## R043: the instructions that leave blocks in the goal's work (2026-11-26)
+
+R042: a handshake in nginx is 62% interpreter for 1.7% of its instructions, and
+uvicorn leaves blocks ten million times in 2,000 requests for LEAVE alone.
+
+The card, written before the run.
+
+- **Hypothesis**: with these translated, the servers' CPU time for a request is at
+  least twice QEMU's on both: nginx's worker 5.6 ms or less a handshake (11.6 now,
+  QEMU 11.3), uvicorn 1.75 ms or less on a kept connection (2.1 now, QEMU 3.5).
+  The handshake is the surer of the two: what leaves is nearly all of four kinds.
+  1. **INC and DEC** (FEh/FFh /0 /1) of a register, 32 and 64 bits. They write
+     every flag but the carry. The record is an addition's or a subtraction's of
+     one with "the carry was given" above the kind (R031's bits), the carry taken
+     from the host's flags where they say it, else from the record before if that
+     one says its carry was given, else the instruction is the interpreter's as
+     now. Where every flag is dead after, a plain addition.
+  2. **ADC and SBB where the host's flags do not say the carry** (the top of a
+     loop whose carry came round through a DEC and a jump): taken from the record
+     if it says its carry was given, else the interpreter's as now.
+  3. **A 67h prefix** on an instruction with no memory operand, where it does
+     nothing (OpenSSL pads with it).
+  4. **LEAVE**.
+  Then by their counts, as far as each is simple: PUSH of an operand, XCHG of two
+  registers, PREFETCH, PMOVMSKB, MOVLPD. Not in this experiment: LOCK CMPXCHG and
+  LOCK XADD in blocks, REP STOS and REP MOVS.
+- **What is changed from before** (R042): the translator only; each new form with
+  a unit test against the interpreter (`--jit-check` does the rest on the
+  programs), and the encodings it needs tested against clang as the others are.
+- **Next move for each result**:
+  - Both at 2 or more → the three measures by the client's clock again, recorded;
+    then the primitives raced against R039's build (nothing there should move)
+  - The handshake still under 2 → `--jit-why` and `--profile` again: what is left
+    (the carry coming round by a way the record does not say; MUL's flags; the
+    way in and out between blocks) decides the next card
+  - uvicorn still under 2 → the same two, and the share of REP and LOCK
+  - A test fails under `--jit-check` → that form is taken out until it is right
+- **Cut-off**: all tests on both hosts; the container cases; one launch for the
+  CPU times, three for the client's clock.
