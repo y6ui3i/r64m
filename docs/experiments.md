@@ -3317,3 +3317,59 @@ The card, written before the run.
   300 requests to warm, then 300 on new connections and 1,000 on one kept open; the
   least of the three for each measure. One profile for each measure under 2, no
   fix in this experiment.
+
+The result (the Mac; OrbStack's QEMU 9.2.2 against r64m `--jit`, the two side by
+side; the client a native Python program on the Mac through a published port; the
+least of three launches).
+
+**Twice QEMU at the start, not at a request: 1.15 on a new connection and 1.6 on one
+kept open. My guess of (c) past 2 was wrong; (b) under was right, and the reason is
+not the one I gave.**
+
+| by the client's clock | QEMU | r64m | QEMU / r64m |
+|---|---|---|---|
+| (a) the container's start to the first answer | 3.48 s | 1.54 s | 2.26 |
+| (b) a request on a new connection | 17.4 ms | 15.1 ms | 1.15 |
+| (c) a request on a connection kept open | 4.74 ms | 2.92 ms | 1.62 |
+
+The client's own time is in both columns, so the servers' CPU time was read too
+(each process's user and system time from `/proc`, one launch, in ticks of 10 ms):
+
+| CPU time for a request | QEMU | r64m | QEMU / r64m |
+|---|---|---|---|
+| (b) nginx's worker (the handshake) | 11.3 ms | 11.6 ms | 0.97 |
+| (b) uvicorn | 4.8 ms | 3.0 ms | 1.6 |
+| (c) nginx's worker | 0.35 ms | 0.25 ms | 1.4 |
+| (c) uvicorn | 3.5 ms | 2.1 ms | 1.7 |
+
+System time is a few percent of each: the time is the guest's code, not calls.
+
+What the card asked for under 2, and one step it did not name:
+
+- **OpenSSL's extensions are not the reason** (the added step: both sides run again
+  with `OPENSSL_ia32cap` set so that OpenSSL takes only its plain paths; if QEMU's
+  handshake had slowed much, its lead there would be the extensions). QEMU's
+  worker: 12.1 ms a handshake against 11.3 with them; r64m's as before. So r64m is
+  no faster than QEMU on the same plain code.
+- **The handshake's time is spent leaving blocks.** `--profile` on a single nginx
+  process over a thousand handshakes: 19% of the samples in generated code, about
+  62% in the interpreter, the rest going in and out. `--jit-why` says what the
+  interpreter is given: 1.7% of the instructions, and of those INC and DEC of a
+  register (FFh /0 /1: not translated at all), the conditional jump after each
+  (interpreted too, since nothing begins a block there), MUL, MOV and SHR with a
+  67h prefix (OpenSSL's hand-written code pads with it), then ADC, SBB, XCHG,
+  PMOVMSKB, MOVLPD, LOCK XADD, PREFETCH. They are the loops of the multi-word
+  arithmetic: INC and DEC keep the carry, which is why hand-written code uses
+  them and why no compiler's output among the primitives did. Each one costs
+  about 30 ns (out, the flags settled, one instruction, in again).
+- **uvicorn**: 70% in generated code. What leaves: LEAVE (C9h: 9.7 million times in
+  2,000 requests, more than everything else together), PMOVMSKB, the conditional
+  jumps after them, REP STOS and REP MOVS, LOCK CMPXCHG, XCHG, INC/DEC, PUSH of
+  an operand.
+
+A mistake of mine on the way, kept: the first profile had `--jit-stats` on, whose
+clock read at every entry of a block was itself 41% of the samples (the clock is
+slow in this VM). The numbers above are from runs without it.
+
+Next (R043): these instructions translated, the commonest first, and the same
+three measures again.
