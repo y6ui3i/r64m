@@ -3065,3 +3065,35 @@ had been said.
 It is the first position-independent program with no interpreter that r64m loads,
 and the first built by Rust; its start (the library's handler for a fault on the
 stack, on another stack; `poll` on its three descriptors) asked for nothing new.
+
+## R039: the look as one instruction on a register (2026-11-25)
+
+R037's look (a load of the thread's word and a branch, at the start of every block a
+cycle passes through) costs code that is all branches 3 to 7%.
+
+The card, written before the run.
+
+- **Hypothesis**: the look can be one instruction with no load: a test of the top bit
+  of x27 (the count of instructions, which never comes near it) and a branch. The
+  host's handler, which is handed the interrupted thread's registers, sets that bit
+  when what it interrupted is generated code; the way in seeds it from the thread's
+  word, and a signal that arrives while the way in is between seeding it and
+  jumping is given the bit by the handler too (the handler knows that stretch). The
+  word stays for everything that is not generated code. With this the five
+  primitives R037 slowed (p_if 1.07, p_bignum 1.055, p_ternary 1.04, p_switch 1.04,
+  p_funcptr 1.03 of R036's time) are within 2% of R036's build, and every signal
+  case is as before.
+- **What is changed from before** (R038): the way in; the host's handler; the look's
+  one instruction; the count read without its top bit. Nothing of what is
+  delivered or how.
+- **Next move for each result**:
+  - Within 2% and the signal cases right twenty times of twenty → done; the goal's
+    own programs next
+  - Still slower by more → the cost is not the look's instructions but that a block
+    has a way out more at its end, or where the code falls: the two builds' code for
+    p_if is compared again before anything else
+  - A signal case fails or hangs → the stretch the handler does not know is found
+    (a signal lost between two places is a hang, not a wrong answer)
+- **Cut-off**: all tests on both hosts; the guest's signal program and the container
+  cases with signals twenty times with `--jit`; the primitives raced against R036's
+  and R037's builds, three at once, least of three.
