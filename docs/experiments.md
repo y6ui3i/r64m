@@ -2121,3 +2121,50 @@ The card, written before the run.
     is guessed at minutes) → said; the race is the JIT's anyway
 - **Cut-off**: one C file compiled and linked in the three ways, and a second file
   that is not trivial (a few hundred lines with floating point) the same.
+
+The result (this Mac's Docker VM, the x86-64 Alpine 3.22.8 container with GCC 14.2;
+what is right is what hal made and printed with the same image's contents).
+
+**As guessed, and with nothing met: GCC compiled the first time it was tried, and
+what it makes is byte for byte the real machine's.**
+
+Nothing was changed in r64m for this step: no instruction was lacking in `cc1`, `as`,
+`collect2` or `ld`, and no call was unknown.
+
+| made under r64m | MD5 | hal's |
+|---|---|---|
+| `gcc -O2 -c h.c` | aa5ffb9a19610afd34b034d8dd385322 | the same |
+| `gcc -O2 h.c -o h` | 38b2bef03df1db4b08dd7ece61f8276e | the same |
+| `gcc -O2 -c big.c` | c3b65411dceaae2f2887a27dc9b411b0 | the same |
+| `gcc -O2 big.c -o big -lm` | 85dd6a0f2a2b0c28d539c3e043b2653e | the same |
+| `gcc -O0 -g big.c -o big0 -lm` | 7ba7966e95679e9cc155267997410ebd | the same |
+
+`big.c` is 140 lines written for this: structures, bodies moved by one another's
+gravity, `qsort`, 8 by 8 matrices, `sin`, `cos`, `exp`, `log`, `pow`, `atan2`, text
+cut into words, `malloc` and `realloc`, `printf` of doubles in four forms. The three
+programs made were run under r64m and print what they print on hal, to the last
+digit. All of it the same by the interpreter, with `--jit` and with `--jit-check`.
+
+Compiling hello is 95 million instructions in three programs (`cc1` 89.9 million,
+`as` 3.5, the driver 1.2). The five builds and three runs together took 9.8 s with
+`--jit`, 33.2 s by the interpreter and 173 s with every block checked (one run each,
+with Docker's own start; not a race: that is step 4).
+
+Six cases are kept in `tests/container/gcc.txt` with hal's output: an object file's
+sum, a linked hello's sum and its run, a program with the mathematics library built
+with `-O0 -g` (its sum, its output, its exit code), two files compiled and put
+together through `ar`, the compiler's version, the preprocessor. With R025's and
+R026's: 42 cases, 126 of 126 in the three ways.
+
+A mistake in the test, found by these cases failing: the cases that make files are
+run one at a time, and which those are was told by "/tmp/" in the command; the new
+ones say `cd /tmp`. Five failed with two ways at once in one directory. Told by
+"/tmp" now.
+
+`big.c` is not kept: the repository takes no C (ADR 0012), and whether a C file that
+is only what a compiler under test is given counts is the owner's to say. The kept
+cases write their few lines of C from the shell.
+
+102 unit tests on macOS and in the Linux container (`mremap`'s there too now); the
+62 programs in the four JIT modes on both; the 116 of the primitives and the 39
+traces on macOS.

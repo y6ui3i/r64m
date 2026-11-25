@@ -1,0 +1,26 @@
+# Commands given to the shell of an x86-64 Alpine container with GCC 14.2 and what
+# the real machine printed for each (hal; Alpine 3.22.8; 2026-11-25): the same form as
+# shell.txt. The sums are of what the compiler made: an object file, a linked
+# program, one built with -O0 -g against the mathematics library, and two files put
+# together through an archive: ADR 0017's third step.
+$$ cd /tmp && printf '#include <stdio.h>\nint main(void) { puts("Hello, world"); return 0; }\n' > r64m-h.c && gcc -O2 -c r64m-h.c -o r64m-h.o && md5sum < r64m-h.o; rm -f r64m-h.c r64m-h.o
+a9d69a469aab9cb0deb1a43a79853977  -
+? 0
+$$ cd /tmp && printf '#include <stdio.h>\nint main(void) { puts("Hello, world"); return 0; }\n' > r64m-h.c && gcc -O2 r64m-h.c -o r64m-h && md5sum < r64m-h && ./r64m-h; rm -f r64m-h.c r64m-h
+bff9eb7872d33d9ae0a3fb610605e6fd  -
+Hello, world
+? 0
+$$ cd /tmp && printf '#include <math.h>\n#include <stdio.h>\nint main(int n, char **v) { double s = 0; for (int i = 1; i < 2000; i++) s += sqrt(i) / (n + i) + sin(i); printf("%%.12f %%e\\n", s, exp(-s)); return (int)s %% 100; }\n' > r64m-m.c && gcc -O0 -g r64m-m.c -o r64m-m -lm && md5sum < r64m-m && ./r64m-m; echo $?; rm -f r64m-m.c r64m-m
+b8593c1eb2f3eebf8b7c23c118a5ab8c  -
+86.942417407601 1.743363e-38
+86
+? 0
+$$ cd /tmp && printf 'int twice(int x) { return 2 * x; }\n' > r64m-a.c && printf 'int twice(int); int main(void) { return twice(21); }\n' > r64m-b.c && gcc -O1 -c r64m-a.c r64m-b.c && ar rc r64m-l.a r64m-a.o && gcc r64m-b.o r64m-l.a -o r64m-ab && ./r64m-ab; echo $?; rm -f r64m-a.c r64m-b.c r64m-a.o r64m-b.o r64m-l.a r64m-ab
+42
+? 0
+$$ gcc --version | head -1
+gcc (Alpine 14.2.0) 14.2.0
+? 0
+$$ echo 'int x = sizeof(long) * 8 + __LINE__;' | gcc -E -P - | tail -1
+int x = sizeof(long) * 8 + 1;
+? 0

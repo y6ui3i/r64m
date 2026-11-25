@@ -67,7 +67,7 @@ fn r64m() -> PathBuf {
 static FILES: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn run(case: &Case, way: &[&str]) -> Result<(), Failed> {
-    let _one = case.command.iter().any(|a| a.contains("/tmp/")).then(|| FILES.lock().unwrap_or_else(|e| e.into_inner()));
+    let _one = case.command.iter().any(|a| a.contains("/tmp")).then(|| FILES.lock().unwrap_or_else(|e| e.into_inner()));
     let out = Command::new(r64m()).args(way).args(&case.command).output().map_err(|e| format!("r64m: {e}"))?;
     if out.stdout == case.output && out.status.code() == Some(case.code) {
         return Ok(());
@@ -89,7 +89,7 @@ fn main() {
     // Only where the programs are.
     let here = cfg!(target_os = "linux") && Path::new("/lib/ld-musl-x86_64.so.1").exists();
     let mut trials = Vec::new();
-    for (file, text) in [("busybox", include_str!("container/busybox.txt")), ("shell", include_str!("container/shell.txt"))] {
+    for (file, text) in [("busybox", include_str!("container/busybox.txt")), ("shell", include_str!("container/shell.txt")), ("gcc", include_str!("container/gcc.txt"))] {
         for case in cases(text) {
             let case = std::sync::Arc::new(case);
             for (way, options) in WAYS {
