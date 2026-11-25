@@ -28,6 +28,22 @@ fn environment() -> Vec<Vec<u8>> {
         .collect()
 }
 
+/// The program a file that begins with "#!" names on its first line, and the one
+/// argument that may follow it.
+fn shebang(img: &[u8]) -> Option<(String, Option<String>)> {
+    let line = img.strip_prefix(b"#!")?;
+    let line = String::from_utf8_lossy(line.split(|&b| b == b'\n').next()?).into_owned();
+    let line = line.trim();
+    let (program, rest) = match line.split_once([' ', '\t']) {
+        Some((program, rest)) => (program, rest.trim()),
+        None => (line, ""),
+    };
+    if program.is_empty() {
+        return None;
+    }
+    Some((program.to_string(), (!rest.is_empty()).then(|| rest.to_string())))
+}
+
 fn fail(what: std::fmt::Arguments) -> ! {
     eprintln!("r64m: {what}");
     std::process::exit(2)
@@ -73,6 +89,9 @@ impl SeenXmm {
 
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // The options as they were given, for a program that starts another (`execve`
+    // is r64m started again with them, ADR 0017).
+    let own_options: Vec<String> = args.iter().take_while(|a| a.starts_with("--") && *a != "--argv0").cloned().collect();
     // The options, in any order, before the program.
     let mut option = |name: &str| {
         let found = args.iter().take_while(|a| a.starts_with("--")).position(|a| a == name);
@@ -91,6 +110,13 @@ fn main() {
     if trace {
         args.remove(0);
     }
+    // The name the program is given for itself, if it is not to be its path: as
+    // `execve` hands it on.
+    let mut argv0 = None;
+    if args.first().is_some_and(|a| a == "--argv0") && args.len() >= 2 {
+        args.remove(0);
+        argv0 = Some(args.remove(0));
+    }
     let mut seen = SeenXmm { mxcsr: 0x1f80, xmm: [0; 32] };
     let mut mem = mem::Mem::reserve()
         .unwrap_or_else(|e| fail(format_args!("the host gave no address space for the guest: {e}")));
@@ -105,7 +131,20 @@ fn main() {
         return;
     };
 
-    let img = std::fs::read(path).unwrap_or_else(|e| fail(format_args!("{path}: {e}")));
+    let mut img = std::fs::read(path).unwrap_or_else(|e| fail(format_args!("{path}: {e}")));
+    // A file that begins with "#!" names the program that is to run it: that one is
+    // loaded, with its one argument if it has one, and then the file's own name.
+    let mut args = args.clone();
+    for _ in 0..4 {
+        let Some((program, argument)) = shebang(&img) else { break };
+        if let Some(argument) = argument {
+            args.insert(0, argument);
+        }
+        args.insert(0, program);
+        argv0 = None;
+        img = std::fs::read(&args[0]).unwrap_or_else(|e| fail(format_args!("{}: {e}", args[0])));
+    }
+    let path = &args[0].clone();
     let mut loaded = elf::load(&mut mem, &img).unwrap_or_else(|e| fail(format_args!("{path}: {e}")));
     // A program that names an interpreter begins there (ADR 0017).
     let mut entry = loaded.entry;
@@ -114,7 +153,10 @@ fn main() {
         let img = std::fs::read(&name).unwrap_or_else(|e| fail(format_args!("{path}: its interpreter {name}: {e}")));
         entry = elf::load_interpreter(&mut mem, &img, &mut loaded).unwrap_or_else(|e| fail(format_args!("{name}: {e}")));
     }
-    let guest_args: Vec<&[u8]> = args.iter().map(|a| a.as_bytes()).collect();
+    let mut guest_args: Vec<&[u8]> = args.iter().map(|a| a.as_bytes()).collect();
+    if let Some(name) = &argv0 {
+        guest_args[0] = name.as_bytes();
+    }
     // The environment is r64m's own, but for a trace: the real CPU's traces were
     // taken with none, and the stack pointer is in every line.
     let own_env: Vec<Vec<u8>> = if trace { Vec::new() } else { environment() };
@@ -125,6 +167,9 @@ fn main() {
     let mut c = cpu::Cpu::new(entry, rsp);
     c.rep_whole = !trace;
     let mut system = sys::Sys::new(if trace { sys::Output::Nowhere } else { sys::Output::Host }, loaded.brk);
+    system.exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| "/proc/self/exe".to_string());
+    system.options = own_options;
+    system.program = std::fs::canonicalize(path).map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| path.clone());
     let mut lines = std::io::BufWriter::new(std::io::stdout().lock());
     if jit && trace {
         fail(format_args!("a trace is of the interpreter: not with --jit"));
@@ -214,7 +259,17 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::banner;
+    use super::{banner, shebang};
+
+    #[test]
+    fn the_program_a_script_names() {
+        assert_eq!(shebang(b"#!/bin/sh\necho hi\n"), Some(("/bin/sh".to_string(), None)));
+        // One argument, which is all the rest of the line as the kernel has it.
+        assert_eq!(shebang(b"#! /usr/bin/env  python3 -u \n"), Some(("/usr/bin/env".to_string(), Some("python3 -u".to_string()))));
+        assert_eq!(shebang(b"#!/bin/busybox sh"), Some(("/bin/busybox".to_string(), Some("sh".to_string()))));
+        assert_eq!(shebang(b"\x7fELF"), None);
+        assert_eq!(shebang(b"#!\n"), None);
+    }
 
     #[test]
     fn the_banner_names_the_version() {

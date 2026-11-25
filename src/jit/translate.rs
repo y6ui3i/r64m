@@ -487,6 +487,12 @@ struct Scan<'a> {
     /// end a block, which this reading must have the same.
     block: u64,
     goes_on: bool,
+    /// The flags must be written whole inside the block itself: where each block is
+    /// compared with the interpreter at its end (`--jit-check`), flags that are dead
+    /// only by what a later block does are still compared. (Found by busybox's MD5,
+    /// R026: a rotation was the 64th instruction of a block, and the addition that
+    /// writes its flags over the first of the next.)
+    within: bool,
 }
 
 impl Scan<'_> {
@@ -509,6 +515,9 @@ impl Scan<'_> {
             let next = at.wrapping_add(ins.len as u64);
             self.span = (self.span.0.min(at), self.span.1.max(next));
             let inside = room > 0;
+            if self.within && !inside {
+                return false;
+            }
             room = room.saturating_sub(1);
             match flags_of(&ins) {
                 Flags::All => return true,
@@ -672,7 +681,7 @@ impl Emit<'_> {
     /// Are the flags dead from `at` on (`Scan::dead`)? What is read to say so becomes
     /// part of what the block rests on, and must lie within a few pages of it.
     fn dead(&mut self, at: u64, host: Option<HostFlags>, room: usize) -> bool {
-        let mut scan = Scan { m: self.m, budget: 48, span: (at, at), asked: false, block: self.rip, goes_on: !self.exact };
+        let mut scan = Scan { m: self.m, budget: 48, span: (at, at), asked: false, block: self.rip, goes_on: !self.exact, within: self.exact };
         if !scan.dead(at, host, room, 2) {
             return false;
         }

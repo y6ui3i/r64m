@@ -11,6 +11,9 @@
 //!
 //! A call that is not known is answered ENOSYS and named once on the standard error.
 
+#[cfg(target_os = "linux")]
+mod linux;
+
 use crate::cpu::{Cpu, RAX, RDI, RDX, RSI};
 use crate::elf::INTERP_AT;
 #[cfg(target_os = "linux")]
@@ -25,6 +28,7 @@ const EBADF: u64 = 9;
 const ENOMEM: u64 = 12;
 const EFAULT: u64 = 14;
 const EINVAL: u64 = 22;
+#[cfg(target_os = "linux")]
 const ENOTTY: u64 = 25;
 const ENOSYS: u64 = 38;
 
@@ -64,6 +68,12 @@ pub struct Sys {
     blocked: u64,
     /// The calls that were named as not known.
     named: BTreeSet<u64>,
+    /// For `execve`, which is r64m started again: where r64m itself is, and the
+    /// options it was given. And the program's own path, which is what a program
+    /// that asks who it is must be told.
+    pub exe: String,
+    pub options: Vec<String>,
+    pub program: String,
     /// The guest's pages whose mapping or protection a call has just changed: blocks
     /// made from them are to be forgotten before the program goes on (ADR 0016).
     pub changed: Option<(u64, u64)>,
@@ -74,7 +84,24 @@ impl Sys {
     pub fn new(out: Output, brk: u64) -> Sys {
         // A gap under the interpreter, as much as a stack: nothing of the two meets.
         let mmap_top = INTERP_AT - (256 << 20);
-        Sys { out, brk, brk_start: brk, mmap_top, clear_tid: 0, actions: [[0; 4]; 65], blocked: 0, named: BTreeSet::new(), changed: None }
+        #[allow(unused_mut)]
+        let mut s = Sys {
+            out,
+            brk,
+            brk_start: brk,
+            mmap_top,
+            clear_tid: 0,
+            actions: [[0; 4]; 65],
+            blocked: 0,
+            named: BTreeSet::new(),
+            exe: String::new(),
+            options: Vec::new(),
+            program: String::new(),
+            changed: None,
+        };
+        #[cfg(target_os = "linux")]
+        linux::inherited(&mut s);
+        s
     }
 
     fn change(&mut self, start: u64, end: u64) {
@@ -106,22 +133,23 @@ pub fn call(c: &mut Cpu, m: &mut Mem, s: &mut Sys) -> Option<i32> {
         12 => Ok(brk(m, s, a)),
         13 => sigaction(m, s, a, b, d, e),
         14 => sigprocmask(m, s, a, b, d, e),
-        16 => ioctl(m, a, b, d),
         20 => writev(m, s, a, b, d),
+        25 => mremap(m, s, a, b, d, e),
         60 | 231 => return Some((a & 0xff) as i32),
         158 => arch_prctl(c, m, a, b),
         218 => {
             s.clear_tid = a;
             Ok(unsafe { libc::getpid() } as u64)
         }
-        #[cfg(target_os = "linux")]
-        _ if let Some(result) = handed_on(number, a, b, d) => result,
-        _ => {
-            if s.named.insert(number) {
-                eprintln!("r64m: system call {number} is not known: answered ENOSYS");
+        _ => match handed_on(c, m, s, number, [a, b, d, e, f, g]) {
+            Some(result) => result,
+            None => {
+                if s.named.insert(number) {
+                    eprintln!("r64m: system call {number} is not known: answered ENOSYS");
+                }
+                Err(ENOSYS)
             }
-            Err(ENOSYS)
-        }
+        },
     };
     c.reg[RAX] = match result {
         Ok(v) => v,
@@ -238,6 +266,40 @@ fn mprotect(m: &mut Mem, s: &mut Sys, addr: u64, len: u64, prot: u64) -> Result<
     Ok(0)
 }
 
+/// `mremap`: a mapping made smaller where it is, or larger at a new place (if it may
+/// move) with what it held.
+fn mremap(m: &mut Mem, s: &mut Sys, old: u64, old_len: u64, new_len: u64, flags: u64) -> Result<u64, u64> {
+    const MAYMOVE: u64 = 1;
+    if old % PAGE != 0 || new_len == 0 || flags & !MAYMOVE != 0 {
+        return Err(EINVAL);
+    }
+    let (was, now) = (old_len.next_multiple_of(PAGE), new_len.next_multiple_of(PAGE));
+    if now <= was {
+        if now < was {
+            m.unmap(old + now, was - now).map_err(map_errno)?;
+            s.change(old + now, old + was);
+        }
+        return Ok(old);
+    }
+    if flags & MAYMOVE == 0 {
+        return Err(ENOMEM);
+    }
+    let Some(prot) = m.regions().iter().find(|r| r.start <= old && old < r.end).map(|r| r.prot & 7) else {
+        return Err(EFAULT);
+    };
+    let to = s.mmap_top.checked_sub(now).ok_or(ENOMEM)?;
+    m.map(to, now, crate::mem::R | crate::mem::W).map_err(map_errno)?;
+    s.mmap_top = to;
+    let mut held = vec![0u8; was as usize];
+    m.read_bytes(old, &mut held).map_err(|_| EFAULT)?;
+    m.write_bytes(to, &held).map_err(|_| EFAULT)?;
+    m.protect(to, now, prot).map_err(map_errno)?;
+    m.unmap(old, was).map_err(map_errno)?;
+    s.change(old, old + was);
+    s.change(to, to + now);
+    Ok(to)
+}
+
 // ---- the CPU ------------------------------------------------------------------------------------
 
 fn arch_prctl(c: &mut Cpu, m: &mut Mem, what: u64, value: u64) -> Result<u64, u64> {
@@ -253,10 +315,18 @@ fn arch_prctl(c: &mut Cpu, m: &mut Mem, what: u64, value: u64) -> Result<u64, u6
 
 // ---- handed to the host's kernel --------------------------------------------------------------
 
-/// The host's own error of the call just made.
 #[cfg(target_os = "linux")]
-fn errno() -> u64 {
-    std::io::Error::last_os_error().raw_os_error().unwrap_or(5) as u64
+use linux::errno;
+
+/// The calls handed to the host's kernel, where the host is Linux.
+#[cfg(target_os = "linux")]
+fn handed_on(c: &mut Cpu, m: &mut Mem, s: &mut Sys, number: u64, a: [u64; 6]) -> Option<Result<u64, u64>> {
+    linux::call(c, m, s, number, a)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn handed_on(_c: &mut Cpu, _m: &mut Mem, _s: &mut Sys, _number: u64, _a: [u64; 6]) -> Option<Result<u64, u64>> {
+    None
 }
 
 /// The host's address of `[at, at + len)` of the guest's memory, if the guest may do
@@ -328,25 +398,6 @@ fn writev(m: &Mem, s: &Sys, fd: u64, vector: u64, count: u64) -> Result<u64, u64
     Ok(total)
 }
 
-/// Of `ioctl` only what asks a terminal for its size: a C library asks it of the
-/// standard output to choose how to buffer.
-#[cfg(target_os = "linux")]
-fn ioctl(m: &Mem, fd: u64, request: u64, arg: u64) -> Result<u64, u64> {
-    const TIOCGWINSZ: u64 = 0x5413;
-    if request != TIOCGWINSZ {
-        return Err(ENOTTY);
-    }
-    let to = host(m, arg, 8, Access::Write)?;
-    match unsafe { libc::ioctl(fd as i32, TIOCGWINSZ as _, to) } {
-        n if n < 0 => Err(errno()),
-        n => Ok(n as u64),
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn ioctl(_m: &Mem, _fd: u64, _request: u64, _arg: u64) -> Result<u64, u64> {
-    Err(ENOTTY)
-}
 
 // ---- signals, as far as they go without being delivered ---------------------------------------
 
@@ -364,6 +415,8 @@ fn sigaction(m: &mut Mem, s: &mut Sys, signal: u64, new: u64, old: u64, size: u6
             *word = m.read_u64(new + 8 * i as u64).map_err(|_| EFAULT)?;
         }
         s.actions[signal as usize] = asked;
+        #[cfg(target_os = "linux")]
+        linux::disposition(signal, asked[0]);
     }
     if old != 0 {
         for (i, word) in was.iter().enumerate() {
@@ -418,49 +471,6 @@ fn block_on_host(blocked: u64) {
 
 #[cfg(not(target_os = "linux"))]
 fn block_on_host(_blocked: u64) {}
-
-// ---- handed on as they are -------------------------------------------------------------------
-
-/// The calls whose arguments are numbers that mean the same to both kernels: who the
-/// process is, and `fcntl` for a descriptor's own flags.
-#[cfg(target_os = "linux")]
-fn handed_on(number: u64, a: u64, b: u64, d: u64) -> Option<Result<u64, u64>> {
-    let done = |n: i64| if n < 0 { Err(errno()) } else { Ok(n as u64) };
-    Some(unsafe {
-        match number {
-            39 => done(libc::getpid() as i64),
-            102 => done(libc::getuid() as i64),
-            104 => done(libc::getgid() as i64),
-            105 => done(libc::setuid(a as u32) as i64),
-            106 => done(libc::setgid(a as u32) as i64),
-            107 => done(libc::geteuid() as i64),
-            108 => done(libc::getegid() as i64),
-            110 => done(libc::getppid() as i64),
-            186 => done(libc::gettid() as i64),
-            72 => return Some(fcntl(a, b, d)),
-            _ => return None,
-        }
-    })
-}
-
-/// `fcntl` for copying a descriptor and for its flags. The flags of an open file
-/// (`F_GETFL`, `F_SETFL`) are numbered differently on the two kernels in four places.
-#[cfg(target_os = "linux")]
-fn fcntl(fd: u64, cmd: u64, arg: u64) -> Result<u64, u64> {
-    const F_GETFL: u64 = 3;
-    const F_SETFL: u64 = 4;
-    let arg = match cmd {
-        // F_DUPFD, F_GETFD, F_SETFD, F_DUPFD_CLOEXEC.
-        0 | 1 | 2 | 1030 | F_GETFL => arg,
-        F_SETFL => open_flags(arg, true),
-        _ => return Err(EINVAL),
-    };
-    match unsafe { libc::fcntl(fd as i32, cmd as i32, arg) } {
-        n if n < 0 => Err(errno()),
-        n if cmd == F_GETFL => Ok(open_flags(n as u64, false)),
-        n => Ok(n as u64),
-    }
-}
 
 /// The flags of `open` from x86-64's numbers to arm64's (`to_host`) or back. Four
 /// differ: O_DIRECT, O_LARGEFILE, O_DIRECTORY and O_NOFOLLOW are 4000h, 8000h, 10000h
@@ -543,6 +553,26 @@ mod tests {
         assert_eq!(ask(&mut c, &mut m, &mut s, 9, &[0x10_0800, 4096, 3, 0x32, u64::MAX, 0]), EINVAL.wrapping_neg());
         assert_eq!(ask(&mut c, &mut m, &mut s, 9, &[0, 4096, 8, 0x22, u64::MAX, 0]), EINVAL.wrapping_neg());
         assert_eq!(ask(&mut c, &mut m, &mut s, 10, &[0x10_0000, 4096, 3]), ENOMEM.wrapping_neg());
+    }
+
+    #[test]
+    fn mremap_shrinks_in_place_and_grows_by_moving() {
+        let (mut c, mut m, mut s) = guest();
+        let at = ask(&mut c, &mut m, &mut s, 9, &[0, 3 * 4096, 3, 0x22, u64::MAX, 0]);
+        m.write_u64(at, 0x1111).unwrap();
+        m.write_u64(at + 4096, 0x2222).unwrap();
+        // Smaller: where it is, the rest gone.
+        assert_eq!(ask(&mut c, &mut m, &mut s, 25, &[at, 3 * 4096, 2 * 4096, 0]), at);
+        assert!(m.read_u64(at + 2 * 4096).is_err());
+        // Larger, not allowed to move: refused. Allowed: somewhere else, with what it
+        // held, and the old place gone.
+        assert_eq!(ask(&mut c, &mut m, &mut s, 25, &[at, 2 * 4096, 5 * 4096, 0]), ENOMEM.wrapping_neg());
+        let to = ask(&mut c, &mut m, &mut s, 25, &[at, 2 * 4096, 5 * 4096, 1]);
+        assert!(to != at && to % 4096 == 0);
+        assert_eq!((m.read_u64(to), m.read_u64(to + 4096), m.read_u64(to + 4 * 4096)), (Ok(0x1111), Ok(0x2222), Ok(0)));
+        m.write_u64(to + 4 * 4096, 1).unwrap();
+        assert!(m.read_u64(at).is_err());
+        assert_eq!(ask(&mut c, &mut m, &mut s, 25, &[at + 1, 4096, 8192, 1]), EINVAL.wrapping_neg());
     }
 
     #[test]

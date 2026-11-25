@@ -2693,4 +2693,20 @@ mod tests {
         both(&mut jit, &mut m, CODE + 4094, &|c| c.reg[RBX] = 1);
         assert!(m.is_code(CODE + 4096) && jit.holds.len() == 2);
     }
+    #[test]
+    fn a_rotation_at_a_blocks_end_is_checked_as_the_interpreter_has_it() {
+        // 63 times mov eax, eax; then ror edi, 9 as the 64th instruction, which is the
+        // most a block holds; then add edx, ebx, which writes the flags the rotation
+        // changed, and syscall. With every block checked the rotation's flags are
+        // compared at its block's end, so it may not be in that block; without, it is,
+        // and nothing reads them.
+        let mut code = [0x89u8, 0xc0].repeat(63);
+        code.extend([0xc1, 0xcf, 0x09, 0x01, 0xda, 0x0f, 0x05]);
+        let (c, _) = checked(&code, &[], &|c| {
+            c.reg[crate::cpu::RDI] = 0x8000_0101;
+            c.reg[RBX] = 1;
+        });
+        assert_eq!((c.reg[crate::cpu::RDI], c.reg[RDX], c.steps), (0x80c0_0000, 1, 66));
+        assert_eq!((shape(&code, true).0, shape(&code, false).0), (63, 64));
+    }
 }

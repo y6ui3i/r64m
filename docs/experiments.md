@@ -2039,3 +2039,56 @@ The card, written before the run.
 - **Cut-off**: the cases chosen before the run (files read and listed, files
   written and removed, the shell with a loop, a pipe of three programs, a command's
   exit code, a script with `#!`), in the container.
+
+The result (this Mac's Docker VM, the x86-64 Alpine 3.22.8 container with GCC; what
+is right is what hal printed for the same commands in the same image's contents).
+
+**As guessed, and with no call left unknown: every case as the real machine has it
+the first time the whole was run, in the interpreter and with `--jit`. `--jit-check`
+found one thing, which was the check's own.**
+
+Twenty-four commands given to busybox's shell: a file read (`cat`, `sed`, `wc`,
+`md5sum`, `od` of `/dev/zero`), directories listed, a file written, read back and
+removed, a directory made, entered and removed, loops, `&&` and `||`, a command's
+exit code, a command substitution, pipes of two and of three programs, `awk`, a
+script with `#!` made and run, a shell in a shell, `uname -m` (x86_64, by r64m's
+answer), `readlink /proc/self/exe` (the program, not r64m). All 24 give hal's output
+and exit code by the interpreter, with `--jit`, with `--jit-check`, and with
+`--jit-check --jit-now`. With R025's twelve: 36 cases, 108 of 108 in
+`tests/container.rs` (three ways each).
+
+**What `--jit-check` found.** `md5sum` stopped with "the block of 64 instructions at
+55555E7B54h: RFLAGS 286h -> 287h". MD5's rounds are a long straight run, and the 64th
+instruction of a block (the most a block holds) was `ror edx, 11`. A rotation is
+translated only where its flags are written over before anything reads them, and
+that was found true by reading on: the next instruction but one is an `add`. But the
+`add` is in the next block, and the check compares the flags at each block's end. So
+the result was right (with `--jit` the sum is hal's) and the check cried out for
+flags nothing reads. Under the check a rotation's flags must now be written over
+inside its own block, or the rotation is the interpreter's; a test holds it (a block
+of 63 moves, a rotation, an addition). The primitives never had a rotation at a
+block's 64th place.
+
+What was built: a table of 130 or so of x86-64's calls, each made arm64's: the same
+call where there is one, the form that takes a directory where arm64 has only that
+(`open`, `stat`, `lstat`, `access`, `readlink`, `unlink`, `rename`, `mkdir`, `rmdir`,
+`chmod`, `chown`, `link`, `symlink`, `pipe`, `dup2`, `poll`, `getrlimit`, `time`);
+`stat`'s structure written over from the host's; lists of pieces (`readv`) made the
+host's; `uname` with the machine said to be x86_64; `/proc/self/exe` answered with
+the program; `fork`, `vfork` and `clone` without shared memory as the host's `fork`
+(for `vfork` the parent waits at a pipe that the kernel closes when the child starts
+a program); `execve` as r64m started again with its own options and `--argv0`, after
+the checks the kernel would make (there, runnable, a file, an ELF or a `#!`); a `#!`
+line read by r64m; a signal that is to be ignored or left alone made so on the host,
+and what the process was given (ignored and blocked signals) read at the start;
+`mremap`.
+
+101 unit tests on macOS and in the Linux container (the rotation, the `#!` line,
+`mremap`); the 62 programs in the four JIT modes on both; the 116 of the primitives
+and the 39 traces on macOS.
+
+Not shown: the calls of the table that no case reaches (the cases reach those a
+shell and its tools use; the rest are there by their kind and are met, or not, by
+GCC next); `stat`'s structure has no test of its own beyond `ls -l` and `wc -c`
+being right; `vfork`'s wait (busybox's shell forks); two cases at once in one
+directory (the test runs those that make files one at a time).
