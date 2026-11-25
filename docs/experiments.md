@@ -3142,3 +3142,32 @@ can read; for 1 to 4% of the tightest loops it is not begun. QEMU looks at the s
 of every block too.
 
 Not measured: NetHack's build with the look (its code is not tight loops).
+
+## R040: TLS with what is at hand, before the goal's own programs (2026-11-26)
+
+The goal (ADR 0011) needs nginx and FastAPI, which are downloads the owner is asked
+for. One part of it needs nothing new: the image `python:3.13-slim` has OpenSSL 3, and
+OpenSSL chooses its code by CPUID. So far only `hashlib.sha256` has been through it.
+
+The card, written before the run.
+
+- **Hypothesis**: with what r64m's CPUID says now (SSE2, no AES-NI, no PCLMULQDQ, no
+  SSSE3, no AVX), OpenSSL takes its plain paths and a TLS 1.3 handshake completes: a
+  key and a self-signed certificate made by `openssl req` (RSA 2048 and P-256), a
+  Python `ssl` server and client in one process over loopback, `Hello, world` back,
+  with the cipher the real machine would also agree to when it is told the same
+  CPUID (OPENSSL_ia32cap). What stops, if anything, is an instruction on a plain
+  path not yet written (MMX is the known one), not a system call.
+- **What is changed from before** (R039): nothing in r64m; the programs are new.
+- **Next move for each result**:
+  - It completes, with `--jit` and without → the cases go into `python.txt` (their
+    expected lines from hal when it can be reached; until then marked as not yet
+    held to the real machine) and the next step is the goal's programs
+  - An instruction is missing → it is written, held to the real CPU by a trace
+    (hal), and the run repeated
+  - A system call is refused → it is added as the others were
+  - It completes but is slow (a handshake over a second) → the time is recorded and
+    which CPUID bits would change it listed; nothing is switched on in this
+    experiment
+- **Cut-off**: the handshake and one request, plain and `--jit`, in the Linux
+  container; no timing race.
