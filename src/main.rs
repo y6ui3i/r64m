@@ -8,6 +8,7 @@ mod jit;
 // Some of it waits for the calls that map and unmap.
 #[allow(dead_code)]
 mod mem;
+mod profile;
 mod sys;
 
 use std::io::Write;
@@ -92,6 +93,9 @@ fn main() {
     // The options as they were given, for a program that starts another (`execve`
     // is r64m started again with them, ADR 0017).
     let own_options: Vec<String> = args.iter().take_while(|a| a.starts_with("--") && *a != "--argv0").cloned().collect();
+    // For measuring: how often an address is arrived at before its block is made.
+    let jit_hot = args.iter().take_while(|a| a.starts_with("--")).position(|a| a.starts_with("--jit-hot=")).map(|i| args.remove(i));
+    let jit_hot: Option<u8> = jit_hot.and_then(|a| a["--jit-hot=".len()..].parse().ok());
     // The options, in any order, before the program.
     let mut option = |name: &str| {
         let found = args.iter().take_while(|a| a.starts_with("--")).position(|a| a == name);
@@ -100,6 +104,8 @@ fn main() {
     let count = option("--count");
     let jit_check = option("--jit-check");
     let jit_stats = option("--jit-stats");
+    // Where r64m's own time goes: a sampler (src/profile.rs).
+    let profile = option("--profile");
     // What the interpreter still ran, by instruction: for deciding what to translate.
     let jit_why = option("--jit-why");
     // For the tests: every block made the first time its address is arrived at.
@@ -127,7 +133,7 @@ fn main() {
             mem.size().trailing_zeros(),
             mem.host_page() / 1024
         );
-        println!("usage: r64m [--count] [--jit | --jit-check] [--jit-now] [--jit-stats] [--trace | --trace-xmm] program [arguments]");
+        println!("usage: r64m [--count] [--jit | --jit-check] [--jit-now] [--jit-stats] [--profile] [--trace | --trace-xmm] program [arguments]");
         return;
     };
 
@@ -177,7 +183,7 @@ fn main() {
     let mut blocks = if jit {
         // With the check every repetition is a step, as the check counts them.
         c.rep_whole = !jit_check;
-        let mut made = jit::run::Jit::new(jit_check, if jit_now { 1 } else { jit::run::HOT })
+        let mut made = jit::run::Jit::new(jit_check, if jit_now { 1 } else { jit_hot.unwrap_or(jit::run::HOT) })
             .unwrap_or_else(|e| fail(format_args!("no memory for generated code: {e}")));
         if jit_why {
             made.why = Some(Default::default());
@@ -187,6 +193,9 @@ fn main() {
     } else {
         None
     };
+    if profile {
+        profile::start().unwrap_or_else(|e| fail(format_args!("--profile: {e}")));
+    }
     let code = loop {
         let stepped = match &mut blocks {
             None => cpu::step(&mut c, &mut mem),
@@ -237,6 +246,9 @@ fn main() {
         }
     };
     lines.flush().ok();
+    if profile {
+        profile::report(jit::is_generated, main as *const () as usize);
+    }
     if count {
         eprintln!("r64m: {} instructions", c.steps);
     }

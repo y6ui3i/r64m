@@ -21,7 +21,7 @@
 
 use super::a64::{self, Cond, Fp, FpSize, Lane, Logic, Mem as Op, Shift, Size, V3, VLogic, VShift};
 use super::{BASE, CPU, KEPT_D8, LEFT_AT_END, LEFT_FOR_THE_INTERPRETER, OUT, RAN, REASON, TABLE, TABLE_BITS, XMM_LOADED};
-use crate::cpu::{Cpu, REC_ADC, REC_ADD, REC_ADD_BY_RESULT, REC_BSF, REC_BSR, REC_FLOAT, REC_IMUL, REC_LOGIC, REC_MUL, REC_SBB, REC_SHIFT, REC_SUB, REC_SUB_BY_RESULT};
+use crate::cpu::{Cpu, REC_ADC, REC_ADD, REC_ADD_BY_RESULT, REC_BSF, REC_BSR, REC_CARRY_GIVEN, REC_FLOAT, REC_IMUL, REC_KEEP, REC_LOGIC, REC_MUL, REC_SBB, REC_SHIFT, REC_SUB, REC_SUB_BY_RESULT};
 use crate::mem::Mem;
 use std::mem::offset_of;
 
@@ -115,7 +115,7 @@ struct Ins {
 fn is_sse(op: u16) -> bool {
     matches!(
         op,
-        0x110 | 0x111 | 0x128 | 0x129 | 0x12a | 0x12c | 0x12e | 0x12f | 0x151 | 0x154..=0x15a | 0x15c..=0x15f
+        0x110 | 0x111 | 0x116 | 0x128 | 0x129 | 0x12a | 0x12c | 0x12e | 0x12f | 0x151 | 0x154..=0x15a | 0x15c..=0x15f
             | 0x16e | 0x16f | 0x17e | 0x17f | 0x1d6 | 0x1db | 0x1df | 0x1eb | 0x1ef
     ) || is_packed(op)
 }
@@ -132,8 +132,9 @@ fn sse_with(op: u16, pre: u8) -> bool {
     match op {
         // The moves of 128 bits and of a low element; the scalar ones by F3h and F2h.
         0x110 | 0x111 => pre < 4,
-        // MOVAPS and MOVAPD, UCOMIS and COMIS, and the logic of the whole register.
-        0x128 | 0x129 | 0x12e | 0x12f | 0x154..=0x157 => pre < 2,
+        // MOVAPS and MOVAPD, UCOMIS and COMIS, and the logic of the whole register;
+        // MOVHPS and MOVHPD from memory, MOVLHPS between registers.
+        0x116 | 0x128 | 0x129 | 0x12e | 0x12f | 0x154..=0x157 => pre < 2,
         // MOVDQA and MOVDQU; MOVD and MOVQ out of a register (66h), MOVQ into one
         // (F3h).
         0x16f | 0x17f | 0x17e => pre == 1 || pre == 2,
@@ -313,6 +314,8 @@ fn read(bytes: &[u8], rip: u64) -> Option<Ins> {
             0x171 | 0x172 => matches!(ins.rm, Rm::Reg(_)) && matches!(ins.reg & 7, 2 | 4 | 6),
             // (Fields 3 and 7 of 73h move the whole register by bytes.)
             0x173 => matches!(ins.rm, Rm::Reg(_)) && matches!(ins.reg & 7, 2 | 3 | 6 | 7),
+            // (With 66h and a register it is no instruction.)
+            0x116 => pre == 0 || matches!(ins.rm, Rm::Mem { .. }),
             _ => true,
         };
         return (sse_with(op, pre) && shift_ok).then_some(ins);
@@ -915,6 +918,11 @@ impl Emit<'_> {
                     self.put(a64::fp_mem(if scalar { low } else { FpSize::Q }, false, reg, BASE, a));
                 }
             },
+            // Into the upper half, the lower kept: from memory, or another's lower.
+            0x116 => {
+                let b = self.fsrc(ins.rm, FpSize::D);
+                self.put(a64::ins_high(reg, b));
+            }
             // MOVD and MOVQ from a general register or memory: the rest is zero.
             0x16e => match ins.rm {
                 Rm::Reg(s) => self.put(a64::fmov_to_fp(wide, reg, s)),
@@ -1593,47 +1601,56 @@ pub fn translate(m: &Mem, rip: u64, exact: bool) -> Option<Built> {
             0x1c8..=0x1cf => e.put(a64::rev(wide, reg, reg)),
             0x1a3 | 0x1ab | 0x1b3 | 0x1bb | 0x1ba => {
                 // BT, BTS, BTR, BTC of a register: the carry is the bit, and the
-                // other flags are left, which the record cannot say. So, as for a
-                // rotation, only where they are written over before anything reads
-                // the record; a jump on the carry asks the host's flags.
+                // other flags are left. The host's flags are made to say the carry,
+                // for a jump on it; and unless the flags are written over before
+                // anything reads the record, the record is told that its carry was
+                // given since (R031: before, the instruction was the interpreter's
+                // wherever that could not be shown, and `cc1` is full of them).
                 let Rm::Reg(d) = ins.rm else { unreachable!() };
                 let by_constant = ins.op == 0x1ba;
                 let what = if by_constant { field & 3 } else { (ins.op >> 3 & 3) as u8 };
-                if !e.dead(next, Some(HostFlags::Bit), room) {
-                    not_here = true;
+                let dead = !e.exact && e.dead(next, Some(HostFlags::Bit), room);
+                // The bit, alone, in T0; and for the three that change it, a one at
+                // its place in T1.
+                if by_constant {
+                    let n = ins.imm as u32 & (bits - 1);
+                    e.put(a64::ubfx(T0, d, n, 1));
+                    if what != 0 {
+                        e.constant(T1, 1 << n);
+                    }
                 } else {
-                    // The bit, alone, in T0; and for the three that change it, a
-                    // one at its place in T1.
-                    if by_constant {
-                        let n = ins.imm as u32 & (bits - 1);
-                        e.put(a64::ubfx(T0, d, n, 1));
-                        if what != 0 {
-                            e.constant(T1, 1 << n);
-                        }
-                    } else {
-                        // (A shift by a register takes its count by the width.)
-                        e.put(a64::shift_reg(wide, Shift::Lsr, T0, d, reg));
-                        e.put(a64::ubfx(T0, T0, 0, 1));
-                        if what != 0 {
-                            e.put(a64::movz(true, T1, 1, 0));
-                            e.put(a64::shift_reg(wide, Shift::Lsl, T1, T1, reg));
-                        }
+                    // (A shift by a register takes its count by the width.)
+                    e.put(a64::shift_reg(wide, Shift::Lsr, T0, d, reg));
+                    e.put(a64::ubfx(T0, T0, 0, 1));
+                    if what != 0 {
+                        e.put(a64::movz(true, T1, 1, 0));
+                        e.put(a64::shift_reg(wide, Shift::Lsl, T1, T1, reg));
                     }
-                    // Nothing less the bit: a borrow, the host's carry clear, where
-                    // the bit is set.
-                    e.put(a64::arith(true, true, true, a64::ZR, a64::ZR, T0, 0));
-                    match what {
-                        0 => {}
-                        // Set; cleared (set, then turned over); turned over.
-                        1 => e.put(a64::logic(wide, Logic::Orr, d, d, T1)),
-                        2 => {
-                            e.put(a64::logic(wide, Logic::Orr, d, d, T1));
-                            e.put(a64::logic(wide, Logic::Eor, d, d, T1));
-                        }
-                        _ => e.put(a64::logic(wide, Logic::Eor, d, d, T1)),
-                    }
-                    e.flags = Some(HostFlags::Bit);
                 }
+                if !dead {
+                    // No record is "the flags as RFLAGS has them"; then, above the
+                    // kind, "the carry was given" and the bit.
+                    e.put(a64::arith_imm(true, true, true, a64::ZR, REC_KIND, 0, false));
+                    e.put(a64::movz(true, T2, (REC_KEEP << 8) as u16, 0));
+                    e.put(a64::csel(true, REC_KIND, T2, REC_KIND, Cond::Eq));
+                    e.put(a64::movz(true, T2, 1, 0));
+                    e.put(a64::bfi(REC_KIND, T2, REC_CARRY_GIVEN.trailing_zeros(), 1));
+                    e.put(a64::bfi(REC_KIND, T0, REC_CARRY_GIVEN.trailing_zeros() + 1, 1));
+                }
+                // Nothing less the bit: a borrow, the host's carry clear, where the
+                // bit is set.
+                e.put(a64::arith(true, true, true, a64::ZR, a64::ZR, T0, 0));
+                match what {
+                    0 => {}
+                    // Set; cleared (set, then turned over); turned over.
+                    1 => e.put(a64::logic(wide, Logic::Orr, d, d, T1)),
+                    2 => {
+                        e.put(a64::logic(wide, Logic::Orr, d, d, T1));
+                        e.put(a64::logic(wide, Logic::Eor, d, d, T1));
+                    }
+                    _ => e.put(a64::logic(wide, Logic::Eor, d, d, T1)),
+                }
+                e.flags = Some(HostFlags::Bit);
             }
             0xc1 | 0xd1 | 0xd3 => {
                 let Rm::Reg(d) = ins.rm else { unreachable!() };

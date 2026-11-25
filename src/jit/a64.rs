@@ -391,6 +391,12 @@ pub fn ins_low(double: bool, rd: u8, rn: u8) -> u32 {
     (if double { 0x6e08_0400 } else { 0x6e04_0400 }) | r(rn) << 5 | r(rd)
 }
 
+/// The low 64-bit element of a vector register to another's upper one, the lower
+/// half of that one kept.
+pub fn ins_high(rd: u8, rn: u8) -> u32 {
+    0x6e18_0400 | r(rn) << 5 | r(rd)
+}
+
 /// The logic of all 128 bits of two vector registers. `Bic` is `rn` and not `rm`.
 #[derive(Clone, Copy)]
 pub enum VLogic {
@@ -755,6 +761,8 @@ mod tests {
             (vshift(VShift::Shl, Lane::S, 1, 1, 24), 0x4f385421, "shl v1.4s, v1.4s, #24"),
             (vshift(VShift::Shl, Lane::D, 1, 1, 63), 0x4f7f5421, "shl v1.2d, v1.2d, #63"),
             (vshift(VShift::Shl, Lane::H, 1, 1, 1), 0x4f115421, "shl v1.8h, v1.8h, #1"),
+            (ins_high(1, 17), 0x6e180621, "mov v1.d[1], v17.d[0]"),
+            (ins_high(9, 2), 0x6e180449, "mov v9.d[1], v2.d[0]"),
             (ext(1, 1, 16, 3), 0x6e101821, "ext v1.16b, v1.16b, v16.16b, #3"),
             (ext(9, 16, 9, 12), 0x6e096209, "ext v9.16b, v16.16b, v9.16b, #12"),
             (stp_d(8, 9, 31, 96), 0x6d0627e8, "stp d8, d9, [sp, #96]"),
@@ -767,7 +775,7 @@ mod tests {
         for (ours, theirs, name) in cases {
             assert_eq!(ours, theirs, "{name}: {ours:08x}, the assembler {theirs:08x}");
         }
-        assert_eq!(cases.len(), 235);
+        assert_eq!(cases.len(), 237);
     }
 
     #[test]

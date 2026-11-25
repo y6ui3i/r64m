@@ -10,9 +10,11 @@ use crate::mem::{Access, Mem, PAGE};
 use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
 
-/// A block is made when its first address has been arrived at this often (g64m's
-/// number; to be measured here), unless another number is asked for.
-pub const HOT: u8 = 16;
+/// A block is made when its first address has been arrived at this often, unless
+/// another number is asked for. Measured in R031 on `cc1`: making a block costs
+/// about what interpreting it twenty times does, so g64m's 16 waited too long; 1 to
+/// 4 are alike on a long compilation and 1 is worse on a short one.
+pub const HOT: u8 = 4;
 /// A host page whose blocks have been forgotten this often for a write to it is not
 /// translated from again: it holds data that changes beside its code.
 const GIVEN_UP: u8 = 8;
@@ -226,13 +228,15 @@ impl Jit {
                             _ => 1,
                         };
                         if heat < self.hot {
-                            self.know(c.rip);
-                            self.places.insert(c.rip, Place::Heat(heat));
+                            if self.places.insert(c.rip, Place::Heat(heat)).is_none() {
+                                self.know(c.rip);
+                            }
                         } else if self.timed_make(c.rip, m) {
                             continue;
                         } else {
-                            self.know(c.rip);
-                            self.places.insert(c.rip, Place::StoodIn);
+                            if self.places.insert(c.rip, Place::StoodIn).is_none() {
+                                self.know(c.rip);
+                            }
                             stands_in = true;
                         }
                     }
@@ -416,8 +420,9 @@ impl Jit {
                 *self.holds.entry(page).or_insert(0) += 1;
             }
         }
-        self.know(rip);
-        self.places.insert(rip, Place::Block(self.blocks.len()));
+        if self.places.insert(rip, Place::Block(self.blocks.len())).is_none() {
+            self.know(rip);
+        }
         self.blocks.push(Block { code, starts, pages, guest: (from, to), guarded, incoming: Vec::new() });
         self.stats.blocks += 1;
         true
@@ -2522,6 +2527,8 @@ mod tests {
             &[0x66, 0x0f, 0xdb, 0xca], &[0x66, 0x0f, 0xdf, 0xca], &[0x66, 0x0f, 0xeb, 0xca], &[0x66, 0x0f, 0xef, 0xca],
             &[0x0f, 0x54, 0x0e], &[0x0f, 0x55, 0x0e], &[0x66, 0x0f, 0xdf, 0x0e], &[0x66, 0x0f, 0xef, 0x0e],
             &[0x0f, 0x57, 0xc9], &[0x0f, 0x55, 0xc9], &[0x66, 0x0f, 0xef, 0xc9],
+            // Into the upper half: movlhps xmm1, xmm2; movhps and movhpd xmm1, [rsi].
+            &[0x0f, 0x16, 0xca], &[0x0f, 0x16, 0x0e], &[0x66, 0x0f, 0x16, 0x0e], &[0x45, 0x0f, 0x16, 0xc1],
             // The upper eight: xorps xmm8, xmm9; addsd xmm8, xmm9; movsd xmm15, [rsi];
             // movaps xmm9, xmm1; movq r9, xmm10; movd xmm11, r9d; movsd [rsi + 8], xmm14
             &[0x45, 0x0f, 0x57, 0xc1], &[0xf2, 0x45, 0x0f, 0x58, 0xc1], &[0xf2, 0x44, 0x0f, 0x10, 0x3e],
@@ -2829,13 +2836,24 @@ mod tests {
             assert_eq!(jit.stats.in_blocks as usize, values.iter().map(|&(a, b)| if carry_of(t, a, b) { 3 } else { 4 }).sum::<usize>());
         }
         // Where the other flags are read after it (every condition, and nothing
-        // writes them again), it is the interpreter's, and right.
-        let list: Vec<&[u8]> = tests.iter().step_by(5).map(|t| &t[..]).collect();
+        // writes them again), the record says that the carry was given since: of
+        // the flags as they stood, and of a comparison's before it (cmp ecx, edx).
+        let alone: Vec<&[u8]> = tests.iter().step_by(5).map(|t| &t[..]).collect();
+        let after: Vec<Vec<u8>> = tests.iter().step_by(5).map(|t| [&[0x39, 0xd1][..], t].concat()).collect();
+        let after: Vec<&[u8]> = after.iter().map(|t| &t[..]).collect();
         for &(a, b) in &values[..4] {
-            under_every_condition(&list, &[], &|c| {
-                (c.reg[RAX], c.reg[RBX]) = (a, b);
-                c.rflags |= 0x8c4;
-            });
+            for (i, list) in [&alone, &after].into_iter().enumerate() {
+                for (x, y) in [(1u64, 2u64), (2, 1), (5, 5), (0x8000_0000, 1)] {
+                    under_every_condition(list, &[], &|c| {
+                        (c.reg[RAX], c.reg[RBX], c.reg[crate::cpu::RCX], c.reg[RDX]) = (a, b, x, y);
+                        c.rflags |= 0x8c4;
+                    });
+                }
+                // And it is in a block, with the compare if there is one.
+                for t in list.iter() {
+                    assert_eq!(shape(&[t, &pick(4)[..]].concat(), true).0, 1 + i, "{t:02x?}");
+                }
+            }
         }
         // Not read: of memory, and the rest of the group.
         for code in [&[0x0fu8, 0xa3, 0x1e][..], &[0x0f, 0xba, 0x26, 1], &[0x0f, 0xba, 0xc0, 1]] {

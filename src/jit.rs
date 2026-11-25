@@ -159,6 +159,14 @@ pub unsafe extern "C" fn enter(cpu: *mut Cpu, code: *const u8, base: *mut u8, ta
 /// with eight places some of them found none left, on Linux, on 2026-11-25.)
 static PIECES: [[AtomicUsize; 2]; 64] = [const { [const { AtomicUsize::new(0) }; 2] }; 64];
 
+/// Is this address of the host's in generated code? (For the profile.)
+pub fn is_generated(at: usize) -> bool {
+    PIECES.iter().any(|piece| {
+        let start = piece[0].load(Ordering::Acquire);
+        start != 0 && at >= start && at < piece[1].load(Ordering::Acquire)
+    })
+}
+
 /// One piece of memory that can be written and run, filled from its start.
 pub struct Code {
     base: *mut u32,
@@ -342,11 +350,7 @@ unsafe fn saved<'a>(context: *mut libc::c_void) -> (&'a mut [u64; 31], &'a mut u
 extern "C" fn on_fault(signal: libc::c_int, _info: *mut libc::siginfo_t, context: *mut libc::c_void) {
     let (regs, pc) = unsafe { saved(context) };
     let at = *pc as usize;
-    let ours = PIECES.iter().any(|piece| {
-        let start = piece[0].load(Ordering::Acquire);
-        start != 0 && at >= start && at < piece[1].load(Ordering::Acquire)
-    });
-    if !ours {
+    if !is_generated(at) {
         unsafe { libc::signal(signal, libc::SIG_DFL) };
         return;
     }

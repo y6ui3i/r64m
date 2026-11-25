@@ -320,6 +320,14 @@ pub const REC_SBB: u64 = 9;
 /// BSF and BSR: the operand that was scanned.
 pub const REC_BSF: u64 = 0x20;
 pub const REC_BSR: u64 = 0x21;
+/// The flags as RFLAGS holds them: for a record that only says what was done to them
+/// since (`REC_CARRY_GIVEN`) when there was no record before.
+pub const REC_KEEP: u64 = 0x30;
+/// Above the kind: the carry is not what the record's kind makes it but was given
+/// since by an instruction that changes the carry alone (a bit test), and is set if
+/// `REC_CARRY_SET` is. The other flags are the record's still.
+pub const REC_CARRY_GIVEN: u64 = 1 << 24;
+pub const REC_CARRY_SET: u64 = 1 << 25;
 /// UCOMIS and COMIS: the two operands' bits, singles (width 32) or doubles.
 pub const REC_FLOAT: u64 = 0x0a;
 
@@ -333,6 +341,7 @@ pub fn settle(c: &mut Cpu) {
     let w = (kind & 0xff) as u32;
     let carry = kind >> 16 & 1 != 0;
     let f = match kind >> 8 & 0xff {
+        REC_KEEP => c.rflags & ARITH,
         REC_ADD => alu_flags(0, a, b, w, false).1,
         REC_SUB => alu_flags(5, a, b, w, false).1,
         REC_ADD_BY_RESULT => alu_flags(0, a.wrapping_sub(b), b, w, false).1,
@@ -383,6 +392,11 @@ pub fn settle(c: &mut Cpu) {
             shift_op((shift - REC_SHIFT) as u8, a, b, w, false, &mut f);
             f & ARITH
         }
+    };
+    let f = match kind & (REC_CARRY_GIVEN | REC_CARRY_SET) {
+        0 | REC_CARRY_SET => f,
+        REC_CARRY_GIVEN => f & !CF,
+        _ => f | CF,
     };
     c.rflags = c.rflags & !ARITH | f;
     c.flag_rec[0] = 0;
