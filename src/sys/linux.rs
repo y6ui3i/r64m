@@ -135,8 +135,8 @@ fn vector(m: &Mem, number: c_long, fd: u64, list: u64, count: u64, offset: u64) 
 fn ioctl(m: &Mem, fd: u64, request: u64, arg: u64) -> Result<u64, u64> {
     match request {
         // TCGETS, TCSETS, TCSETSW, TCSETSF, TIOCGPGRP, TIOCSPGRP, TIOCGWINSZ,
-        // TIOCSWINSZ, FIONREAD, FIONBIO.
-        0x5401..=0x5404 | 0x540f | 0x5410 | 0x5413 | 0x5414 | 0x541b | 0x5421 => raw(libc::SYS_ioctl, [fd, request, p(m, arg)?, 0, 0, 0]),
+        // TIOCSWINSZ, FIONREAD, FIONBIO, FIOASYNC.
+        0x5401..=0x5404 | 0x540f | 0x5410 | 0x5413 | 0x5414 | 0x541b | 0x5421 | 0x5452 => raw(libc::SYS_ioctl, [fd, request, p(m, arg)?, 0, 0, 0]),
         // FIONCLEX, FIOCLEX.
         0x5450 | 0x5451 => raw(libc::SYS_ioctl, [fd, request, 0, 0, 0, 0]),
         _ => Err(super::ENOTTY),
@@ -150,8 +150,8 @@ fn fcntl(m: &Mem, fd: u64, cmd: u64, arg: u64) -> Result<u64, u64> {
     const F_GETFL: u64 = 3;
     const F_SETFL: u64 = 4;
     let arg = match cmd {
-        // F_DUPFD, F_GETFD, F_SETFD, F_DUPFD_CLOEXEC, F_GETFL.
-        0 | 1 | 2 | 1030 | F_GETFL => arg,
+        // F_DUPFD, F_GETFD, F_SETFD, F_DUPFD_CLOEXEC, F_GETFL; F_SETOWN, F_GETOWN.
+        0 | 1 | 2 | 1030 | F_GETFL | 8 | 9 => arg,
         F_SETFL => open_flags(arg, true),
         // F_GETLK, F_SETLK, F_SETLKW: a structure that is the same on both.
         5..=7 => p(m, arg)?,
@@ -500,6 +500,7 @@ pub fn call(c: &mut Cpu, m: &mut Mem, s: &mut Sys, n: u64, a: [u64; 6]) -> Optio
         72 => fcntl(m, a[0], a[1], a[2]),
         73 => same(m, libc::SYS_flock, 0),
         74 => same(m, libc::SYS_fsync, 0),
+        221 => same(m, libc::SYS_fadvise64, 0),
         75 => same(m, libc::SYS_fdatasync, 0),
         76 => p(m, a[0]).and_then(|path| raw(libc::SYS_truncate, [path, a[1], 0, 0, 0, 0])),
         77 => same(m, libc::SYS_ftruncate, 0),

@@ -3228,3 +3228,57 @@ The card, written before the run.
     it is) → stop and ask
 - **Cut-off**: the first complete request, or a stop that needs a decision. No
   timing in this experiment beyond noting it.
+
+The result (the Linux container on the Mac, every x86-64 program run by r64m with
+`--jit`; nginx 1.26.3, FastAPI 0.165.0, uvicorn 0.54.0, Python 3.13.18; the downloads
+were 13.2 MB from Debian and the PyPI wheels, and the image is 153 MB, 35 MB more
+than the one it is built on).
+
+**The goal's request completes: nginx takes it over TLS, passes it to FastAPI, and
+`Hello, world` comes back with status 200.** One thing stopped it, of the first kind
+the card guessed:
+
+- `ioctl(FIOASYNC)`, which nginx's master makes on the pair of sockets it keeps with
+  a worker, was refused, so no worker started. It is handed on now, with
+  `fcntl(F_SETOWN/F_GETOWN)` (the next call nginx makes there) and `fadvise64`
+  (asked for and answered ENOSYS before, harmlessly).
+
+Nothing else: no structure laid out differently, no signal lost, no instruction
+missing. `clone3`, `set_robust_list` and `rseq` are answered ENOSYS as before and
+the programs go on without them.
+
+What was seen, in the card's order:
+
+- One request from a Python client inside the container that checks the
+  certificate: `200 nginx/1.26.3 Hello, world`.
+- A hundred, each a new connection and handshake: all 200, 2.0 s with the client's
+  own start.
+- From outside the container (ADR 0011's self-check): `curl` on the Mac through a
+  published port, with the certificate given: status 200, the certificate verified,
+  `Hello, world`; 14 ms a request after the first (21 ms). A path that is not there
+  is FastAPI's 404 through nginx.
+- nginx and uvicorn end when told to (SIGTERM), and the shell that waits for them
+  goes on.
+
+The case is `tests/container/goal.txt`, one command that does all of it with twenty
+requests: it passes interpreted, with `--jit` and with `--jit-check` (six minutes for
+the three; nearly all of it is the two slow ways starting Python). The other
+container cases are as before (GCC 144, Python 72, redis 39), and the tests on macOS.
+**Not yet held to the real machine**: hal was out of reach, and the expected lines are
+what r64m and user-mode QEMU both printed. (A first form of the case hung, and not
+by r64m: it waited for nginx's master by `kill -0`, and in the test's container the
+daemon's parent is the test program, which never collects it. It waits for the pid
+file now.)
+
+Not done, and owed:
+
+- the case and R040's two held to hal;
+- the time of a request beside QEMU's, which is the next experiment (the aim is
+  twice QEMU on real work in a container), and with it what CPUID should say for
+  OpenSSL;
+- the image as Docker would run it, with r64m registered for x86-64 programs
+  (`binfmt_misc`) and not named on the command line: the owner's word is needed,
+  since it changes the whole Docker VM;
+- ADR 0011 says the images are the ordinary ones, unchanged: this one is
+  `python:3.13-slim` with nginx added. The official nginx image beside a Python
+  one, as two containers, has not been tried.

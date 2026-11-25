@@ -136,7 +136,10 @@ real CPU does.
    `guest/`, R038); blocks that a cycle passes through look for one as they begin, in
    one instruction (R039), which costs the tightest loops 1 to 4%. TLS 1.3 between a
    Python server and client, with keys `openssl` made, completes (R040; not yet
-   held to the real machine). Next: the goal's own programs, nginx and FastAPI.
+   held to the real machine). **The goal's request completes** (R041): nginx takes
+   it over TLS and passes it to FastAPI, `Hello, world` comes back, to a client in the
+   container and to `curl` outside it. Next: its time beside QEMU's, and the same
+   held to the real machine.
 
 One case is owed: the x87's square root when what is left over equals the root (the
 rounding there is not touched by any of g64m's cases; found by breaking it on purpose).
