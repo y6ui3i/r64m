@@ -2359,3 +2359,40 @@ The card, written before the run.
 - **Cut-off**: three builds each, one at a time and in turn (QEMU, r64m, QEMU, ...),
   the least and the middle of each given; then one pair at once. Each build's files
   compared with hal's. If one build is over 20 minutes, one of each and not three.
+
+The result (MacBook Air, Apple M1; OrbStack's VM with 8 cores given, arm64 Linux 7.2,
+4 KB pages; the x86-64 Alpine 3.22.8 container of R028; QEMU is OrbStack's
+`qemu-x86_64` 9.2.2 as the kernel's handler; `make all` with one job; the seconds are
+`make`'s own, by the container's clock to the second).
+
+**As guessed, and by more than guessed: r64m builds NetHack in 0.45 of QEMU's time,
+2.2 times as fast, in every pair.**
+
+| `make all`, in turn | 1 | 2 | 3 | least | middle |
+|---|---|---|---|---|---|
+| QEMU 9.2.2, user mode | 590 s | 592 s | 594 s | 590 s | 592 s |
+| r64m `--jit` | 266 s | 270 s | 272 s | 266 s | 270 s |
+| QEMU / r64m | 2.22 | 2.19 | 2.18 | 2.22 | 2.19 |
+
+Both at once, one pair: r64m 292 s, QEMU 624 s (2.14; QEMU had the machine to itself
+for its second half, so this pair says only that neither was much slowed by the
+other).
+
+Every one of the eight builds made the 284 files with hal's sums but for the three
+that hold the time of the build. So the two do the same work, and QEMU does it right.
+
+Beside them, from R029 and R028, one run each: Rosetta 168 s; hal, the real machine
+(an i7-3770K), 111 s. r64m takes 1.6 times Rosetta's time.
+
+One compilation alone (`cc1 -O2` on `apply.i`, once): QEMU 9.6 s, r64m 3.9 s, Rosetta
+2.0 s: r64m 2.4 times QEMU there. The whole build's ratio is a little less than one
+long compilation's: the short processes (the driver, `as`, the shell, `make` itself)
+are where r64m starts from nothing each time.
+
+So the aim (twice QEMU) is met on this, the first real work measured in a container.
+It is not met on ten of the 23 primitives (R023), and `p_ldbl` is behind QEMU.
+
+Not measured: `make -j`; a second run of Rosetta (the VM is now on QEMU: it is
+switched back by the owner); how much of r64m's 266 s is generated code and how much
+its own keeping, over the whole build (for one compilation it was 2.75 s of 4.9 s,
+R029).
