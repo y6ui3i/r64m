@@ -2330,3 +2330,32 @@ blocks.
 
 106 unit tests on macOS and 105 in the Linux container (the last was added after);
 the 62 programs in the four JIT modes on both; the 42 container cases in three ways.
+
+## R030: NetHack's build, r64m beside user-mode QEMU (2026-11-25)
+
+ADR 0017's fourth step, its second half. The owner switched the Docker VM (OrbStack)
+from Rosetta to QEMU for it: an x86-64 program in a container is now run by
+OrbStack's own `qemu-x86_64` 9.2.2, started by the kernel for every program (a
+`binfmt_misc` handler), as Docker does it anywhere without Rosetta. r64m is run as
+before, by its own name, and starts itself again for each program.
+
+The card, written before the run.
+
+- **Hypothesis**: on `make all` of NetHack 3.6.7 in the same container r64m with
+  `--jit` (256 s once, R029; Rosetta 168 s) is faster than QEMU. Guessed from the
+  primitives, where r64m is 1 to 8 times QEMU; but a build is a few hundred
+  processes that each translate from nothing, and there QEMU's translator, which is
+  quick to make code that is slow, may do better than on a long loop. So: guessed
+  faster, by less than on the primitives.
+- **What is changed from before** (R029): nothing of r64m. The yardstick is there.
+- **Next move for each result**:
+  - r64m faster in all three pairs → said, with by how much; then what is left of
+    one compilation (R029's list) is what makes it more
+  - Level (within 10%) or slower → where r64m's time goes in a short process is the
+    next card (blocks made and never run again, the 16 arrivals before a block is
+    made, the table), measured before anything is changed
+  - QEMU's build is not right (its files' sums not hal's) → said; the race is then
+    of builds that are not the same thing
+- **Cut-off**: three builds each, one at a time and in turn (QEMU, r64m, QEMU, ...),
+  the least and the middle of each given; then one pair at once. Each build's files
+  compared with hal's. If one build is over 20 minutes, one of each and not three.
