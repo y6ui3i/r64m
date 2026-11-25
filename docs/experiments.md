@@ -3171,3 +3171,27 @@ The card, written before the run.
     experiment
 - **Cut-off**: the handshake and one request, plain and `--jit`, in the Linux
   container; no timing race.
+
+The result (the Linux container on the Mac; the image `python:3.13-slim`, OpenSSL
+3.5.7).
+
+**It completes, with nothing added to r64m.** `openssl req` makes an RSA 2048 key and
+a P-256 key with their certificates; a Python `ssl` server and client in one process
+agree on TLS 1.3 with `TLS_AES_256_GCM_SHA384`, the certificate is verified, and
+`Hello, world` comes back. No instruction was missing and no system call that
+mattered was refused (`set_robust_list` and `rseq` are still answered ENOSYS, as
+before). The whole script (both keys, both handshakes) took 45 s interpreted and
+1.6 s with `--jit`, so the handshake is far under the card's second.
+
+Two cases are in `tests/container/python.txt` (72 of that file's cases pass now: the
+66 before and these two three ways). **They are not yet held to the real machine**:
+hal was out of reach (the VPN) on the day, and the expected line is what r64m and
+user-mode QEMU both printed. That is owed, and is said in the file.
+
+Not looked at: which paths OpenSSL took. r64m's CPUID says no AES-NI, PCLMULQDQ,
+SSSE3 or AVX, so AES-GCM here is the table code; what switching those on would be
+worth is a question for when a request's time is measured, and each instruction it
+brings must first be held to the real CPU.
+
+Next: the goal's own programs, nginx and FastAPI, which need downloads the owner is
+asked for.

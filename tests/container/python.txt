@@ -79,3 +79,12 @@ $$ python3 -c 'import signal, os, threading, time; got = []; signal.signal(signa
 $$ python3 -c 'import faulthandler, ctypes, subprocess, sys; r = subprocess.run([sys.executable, "-c", "import ctypes; ctypes.string_at(0)"]); print(r.returncode)'
 -11
 ? 0
+# TLS (R040): a key and a certificate of its own made by openssl, then a server and a
+# client in one process. Not yet held to the real machine (hal was out of reach on
+# 2026-11-26): the lines are what r64m and user-mode QEMU both printed.
+$$ openssl req -x509 -newkey rsa:2048 -nodes -keyout /tmp/tls-rsa.key -out /tmp/tls-rsa.crt -days 30 -subj /CN=localhost -addext subjectAltName=DNS:localhost 2>/dev/null && python3 -c 'import ssl,socket,threading as T; c=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); c.load_cert_chain("/tmp/tls-rsa.crt","/tmp/tls-rsa.key"); l=socket.create_server(("127.0.0.1",0)); f=lambda: (lambda s: (s.recv(99), s.sendall(b"Hello, world"), s.close()))(c.wrap_socket(l.accept()[0], server_side=True)); t=T.Thread(target=f); t.start(); s=ssl.create_default_context(cafile="/tmp/tls-rsa.crt").wrap_socket(socket.create_connection(l.getsockname()), server_hostname="localhost"); s.sendall(b"hi"); print(s.version(), s.cipher()[0], s.recv(99).decode()); t.join()'
+TLSv1.3 TLS_AES_256_GCM_SHA384 Hello, world
+? 0
+$$ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout /tmp/tls-ec.key -out /tmp/tls-ec.crt -days 30 -subj /CN=localhost -addext subjectAltName=DNS:localhost 2>/dev/null && python3 -c 'import ssl,socket,threading as T; c=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); c.load_cert_chain("/tmp/tls-ec.crt","/tmp/tls-ec.key"); l=socket.create_server(("127.0.0.1",0)); f=lambda: (lambda s: (s.recv(99), s.sendall(b"Hello, world"), s.close()))(c.wrap_socket(l.accept()[0], server_side=True)); t=T.Thread(target=f); t.start(); s=ssl.create_default_context(cafile="/tmp/tls-ec.crt").wrap_socket(socket.create_connection(l.getsockname()), server_hostname="localhost"); s.sendall(b"hi"); print(s.version(), s.cipher()[0], s.recv(99).decode()); t.join()'
+TLSv1.3 TLS_AES_256_GCM_SHA384 Hello, world
+? 0

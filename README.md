@@ -134,8 +134,9 @@ real CPU does.
    (R036). Signals are delivered to the guest's handlers, its own faults among
    them (R037; the cases a shell cannot make are a Rust program built for x86-64 Linux,
    `guest/`, R038); blocks that a cycle passes through look for one as they begin, in
-   one instruction (R039), which costs the tightest loops 1 to 4%. Next: the goal's
-   own programs.
+   one instruction (R039), which costs the tightest loops 1 to 4%. TLS 1.3 between a
+   Python server and client, with keys `openssl` made, completes (R040; not yet
+   held to the real machine). Next: the goal's own programs, nginx and FastAPI.
 
 One case is owed: the x87's square root when what is left over equals the root (the
 rounding there is not touched by any of g64m's cases; found by breaking it on purpose).
