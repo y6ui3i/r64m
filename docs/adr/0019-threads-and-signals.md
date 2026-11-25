@@ -1,8 +1,9 @@
 # 0019: A thread is the host's thread; a signal is the host's signal, delivered between blocks
 
 **Status**: accepted (2026-11-25, the owner: the three points, A, B and C, as proposed).
-Point D, on the order of memory between threads, was missed in the proposal, was
-added the same day when the work began, and is **proposed**: not yet the owner's.
+Point D, on the order of memory between threads, was missed in the proposal and added
+the same day when the work began; accepted then too (the owner: 「X86_64 に合わせて」:
+as x86-64 has it).
 
 ## Context
 
@@ -79,7 +80,7 @@ is x86-64's: each thread's registers, and the frame a handler is entered with.
    4. the goal: FastAPI behind nginx, over TLS. (What it needs fetched is asked for
       then.)
 
-4. **D (proposed): between threads, memory is ordered as x86 orders it.** x86
+4. **D: between threads, memory is ordered as x86 orders it.** x86
    promises more than arm64 does: a thread's stores reach the others in the order
    it made them, and its loads see them in order (TSO). A compiled x86-64 program
    counts on it wherever it shares memory without a LOCK: one thread writes a value
@@ -99,8 +100,7 @@ is x86-64's: each thread's registers, and the frame a handler is entered with.
      test of r64m's would show and a real server sooner or later would); the
      processor's own x86 order where the host has it (Apple's, and only if the
      kernel lets a process ask: to be looked at; a Raspberry Pi has none).
-   - Until this is decided, threads are built with plain loads and stores, and the
-     README says that programs with threads are not yet to be trusted.
+   - (Threads were built first with plain loads and stores, R033; ordered in R034.)
 
 ## Not yet
 

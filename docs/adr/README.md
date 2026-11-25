@@ -31,4 +31,4 @@ Each file has: **Status** (accepted, or replaced by which), **Context**, **Decis
 | [0016](0016-only-writable-code-is-guarded.md) | Only code the guest may write is guarded against writes |
 | [0017](0017-the-containers-way.md) | The container's way: a program's system calls are the host kernel's |
 | [0018](0018-one-thing-well.md) | r64m does one thing: on Arm, it behaves as x86-64; a machine may come of it by a fork |
-| [0019](0019-threads-and-signals.md) | A thread is the host's thread; a signal is the host's signal, delivered between blocks (its point D, memory order, proposed) |
+| [0019](0019-threads-and-signals.md) | A thread is the host's thread; a signal is the host's signal, delivered between blocks; memory ordered between threads as x86 orders it |

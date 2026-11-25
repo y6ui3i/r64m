@@ -2658,3 +2658,37 @@ threads as x86 does (ADR 0019, point D, proposed). The cases above pass because 
 share memory through locks, which are LOCK-prefixed and so atomic and ordered.
 
 109 unit tests and the 62 programs in the four JIT modes on both hosts.
+
+## R034: memory ordered between threads as x86 orders it (2026-11-25)
+
+ADR 0019's point D was accepted (「X86_64 に合わせて」).
+
+The card, written before the run.
+
+- **Hypothesis**: once a process has a second thread, its blocks can load with
+  `ldapr` and store with `stlr` (the host's load that sees what was released and
+  store that releases), and the interpreter the same, at a cost that is paid only
+  then: guessed at between a tenth and a half more time for a program with threads,
+  nothing for one without. The address of such an access must be in one register, so
+  a host register is freed for it (the way out's address moves to the thread's
+  state; every leaving for Rust then loads it), which every program pays for: guessed
+  not to show.
+- **What is changed from before** (R033): the encoder's two forms; x24 is the
+  address of an ordered access and no longer the way out; every load and store of
+  the guest's memory in a block goes through one place that writes it plain or
+  ordered; a thread's blocks are dropped and made anew, ordered, when the memory is
+  first shared; the interpreter's reads and writes of the guest's memory are ordered
+  when it is shared. An ordered access that the host refuses (not aligned, on a host
+  without the newer rule for that) leaves the block for the interpreter, as any
+  fault does.
+- **Next move for each result**:
+  - The tests pass, programs with one thread are within 1% and those with threads
+    cost what was guessed → sockets and `epoll` (0019's order)
+  - A program with one thread is slower by more than 1% → the way out's address goes
+    back to a register and another is freed (the count of instructions: it is
+    written to memory at each leaving anyway)
+  - Threads cost more than half again → the processor's own x86 order is looked at
+    where the host has it, a card of its own
+- **Cut-off**: all tests on both hosts; the primitives raced against R033's build
+  (three at once, least of three); the Python cases with threads timed plain and
+  ordered, five runs each.
