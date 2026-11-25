@@ -3097,3 +3097,48 @@ The card, written before the run.
 - **Cut-off**: all tests on both hosts; the guest's signal program and the container
   cases with signals twenty times with `--jit`; the primitives raced against R036's
   and R037's builds, three at once, least of three.
+
+The result (the primitives on macOS, three at once, least of three, against R036's
+build; the signal cases in the Linux containers).
+
+**The look is one instruction and every signal case is as before. Three of the five
+slowed primitives are within 2 to 3% now; two are where they were, and the reason is
+read from the code: one instruction more in a loop of twenty is that much.**
+
+| now / R036's build | R037 (a load and a branch) | R039 (a test of a bit) |
+|---|---|---|
+| p_if | 1.070 | 1.03 |
+| p_switch | 1.039 | 1.014 |
+| p_funcptr | 1.030 | 1.017 |
+| p_bignum | 1.054 | 1.045 |
+| p_ternary | 1.042 | 1.043 |
+| the other seventeen | | 0.95 to 1.03, as before |
+
+For p_ternary the two builds' blocks were compared word for word: past the look they
+are the same instructions (but for the distance of the jump back, which now goes to
+the look). Its loops are 16 to 28 host instructions, and the look is one more: 4%.
+So this is what a look in every round of a loop costs where the loop is short, and
+no cheaper look than one instruction that is not taken is to be had; p_if had two
+and went from 7% to 3% by losing one. Narrowing which blocks look did nothing in
+R037 for the same reason: the hot blocks are the loops.
+
+What was built: a block's look is `tbnz x27, #63` (x27 counts instructions and
+never comes near its top bit). The way in clears the count and then sets the bit
+from the thread's word; the host's handler, handed the interrupted thread's
+registers, sets the bit itself if the thread was in generated code or in the four
+instructions of the way in after the clearing (found once, by reading the way in's
+own code for the two instructions that bound them), and sets the word always. The
+count is read without its top bit.
+
+Right as before: the guest's signal program thirty runs of thirty with `--jit` and 3
+of 3 ways; the container cases 66, 144 and 39 in their images; 111 unit tests plain
+and ordered and the 62 programs on both hosts.
+
+Not done, and what it would be: a loop that looked for nothing would need the host's
+handler to change the code the thread is in so that it leaves at the block's end
+(each thread's blocks are its own, so it could). That is a rewrite of jumps from
+inside a signal's handler, with a list of every block's ways out that the handler
+can read; for 1 to 4% of the tightest loops it is not begun. QEMU looks at the start
+of every block too.
+
+Not measured: NetHack's build with the look (its code is not tight loops).

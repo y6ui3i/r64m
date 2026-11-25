@@ -1534,9 +1534,10 @@ pub fn translate_as(m: &Mem, rip: u64, exact: bool, ordered: bool) -> Option<Bui
     // one with a jump or a call to an address not after itself, a return, or a jump
     // through an operand. Whatever goes round for ever goes through one of those.
     let mut cycle = false;
-    e.bails.push((1, rip, 0));
-    e.put(a64::mem_imm(Size::W, Op::Load, T0, CPU, offset_of!(Cpu, kick) as u32));
-    e.put(a64::cbz(false, true, T0, 0));
+    // The look is one instruction: the count's top bit, which the way in sets from
+    // the thread's word and the host's handler sets in a thread it interrupts here.
+    e.bails.push((0, rip, 0));
+    e.put(a64::tbnz_top(RAN, 0));
     loop {
         let (code, have) = m.code_at(at);
         let bytes = unsafe { std::slice::from_raw_parts(code, have) };
@@ -2095,18 +2096,20 @@ pub fn translate_as(m: &Mem, rip: u64, exact: bool, ordered: bool) -> Option<Bui
     // as some hundredths of the time of code that is all blocks, R037).
     let skip = if cycle { 0 } else { 1 };
     for (jump, at, n) in std::mem::take(&mut e.bails).into_iter().skip(skip) {
-        // The distance goes into bits 5 to 23 of the B.cond.
+        // The distance goes into bits 5 to 23 of the B.cond (5 to 18 of the look's
+        // test of a bit, which is never further than that reaches).
+        debug_assert!(e.w.len() - jump < 1 << 13);
         e.w[jump] |= ((e.w.len() - jump) as u32 & 0x7_ffff) << 5;
         e.bail_out(at, n);
     }
-    // The look is taken out of a block no cycle passes through: the two instructions
-    // at its start, with everything after them two places earlier. (What jumps
-    // within the block jumps by a distance, which is the same.)
+    // The look is taken out of a block no cycle passes through: the instruction at
+    // its start, with everything after it one place earlier. (What jumps within the
+    // block jumps by a distance, which is the same.)
     let mut words = e.w;
     if !cycle {
-        words.drain(..2);
+        words.remove(0);
         for start in &mut starts {
-            start.0 -= 2;
+            start.0 -= 1;
         }
     }
     // A block that uses the XMM registers loads them first. What was written for it

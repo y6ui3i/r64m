@@ -39,7 +39,13 @@ thread_local! {
 
 /// The host's handler: the signal is noted for this thread, and its blocks are told
 /// to leave. Nothing else is done here.
-extern "C" fn arrived(signal: libc::c_int, info: *mut libc::siginfo_t, _context: *mut libc::c_void) {
+extern "C" fn arrived(signal: libc::c_int, info: *mut libc::siginfo_t, context: *mut libc::c_void) {
+    // A thread that was running generated code, or was about to, is told by the top
+    // bit of its count of instructions, which its blocks test (R039).
+    let registers = unsafe { &mut (*(context as *mut libc::ucontext_t)).uc_mcontext };
+    if crate::jit::runs_blocks(registers.pc as usize) {
+        registers.regs[27] |= 1 << 63;
+    }
     WAITING.with(|w| {
         if (1..=64).contains(&signal) {
             if !info.is_null() {

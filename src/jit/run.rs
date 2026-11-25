@@ -356,8 +356,10 @@ impl Jit {
             self.stats.running += start.elapsed().as_nanos() as u64;
         }
         // What the blocks that were run to their ends ran.
-        c.steps += c.ran;
-        self.stats.in_blocks += c.ran;
+        // (Without the count's top bit, which says that a signal waits.)
+        let ran = c.ran & !(1 << 63);
+        c.steps += ran;
+        self.stats.in_blocks += ran;
         self.stats.entered += 1;
         if reason == LEFT_FOR_THE_INTERPRETER {
             // RIP is on the instruction; what ran before it is counted.
@@ -1755,10 +1757,10 @@ mod tests {
         // is carried by the ADD (one more): eleven fewer than with every record
         // written and every way a way out.
         assert_eq!(words(true) - words(false), 11);
-        // The loop is: the look for a signal (two), add, cmp, the count, the jump
-        // back to the look.
+        // The loop is: the look for a signal, add, cmp, the count, the jump back to
+        // the look.
         let built = translate(&m, CODE, false).unwrap();
-        assert_eq!(built.words[5], a64::b_cond(a64::Cond::Ne, -5));
+        assert_eq!(built.words[4], a64::b_cond(a64::Cond::Ne, -4));
     }
 
     #[test]
@@ -2958,9 +2960,9 @@ mod tests {
     }
     #[test]
     fn only_a_block_that_a_cycle_passes_through_looks_for_a_signal() {
-        // The look: a load of the thread's word and a branch if it is set.
-        let look = a64::mem_imm(a64::Size::W, a64::Mem::Load, 16, CPU, offset_of!(Cpu, kick) as u32);
-        let begins = |code: &[u8]| translate(&guest(code, &[]), CODE, false).unwrap().words[0];
+        // The look: a branch if the top bit of the count is set (wherever to).
+        let look = a64::tbnz_top(27, 0);
+        let begins = |code: &[u8]| translate(&guest(code, &[]), CODE, false).unwrap().words[0] & !(0x3fff << 5);
         // A straight run, and a jump forward: no look.
         assert_ne!(begins(&[0x83, 0xc2, 0x01, 0x0f, 0x05]), look);
         assert_ne!(begins(&[0x83, 0xc2, 0x01, 0xeb, 0x02, 0x90, 0x90, 0x0f, 0x05]), look);

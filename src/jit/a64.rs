@@ -278,6 +278,12 @@ pub fn adr(rd: u8, bytes: i32) -> u32 {
     0x1000_0000 | (bytes as u32 & 3) << 29 | (bytes as u32 >> 2 & 0x7_ffff) << 5 | r(rd)
 }
 
+/// A jump by `words` if the top bit of a 64-bit register is set.
+pub fn tbnz_top(rt: u8, words: i32) -> u32 {
+    debug_assert!((-(1 << 13)..1 << 13).contains(&words));
+    0xb7f8_0000 | (words as u32 & 0x3fff) << 5 | r(rt)
+}
+
 pub fn br(rn: u8) -> u32 {
     0xd61f_0000 | r(rn) << 5
 }
@@ -783,6 +789,8 @@ mod tests {
             (vshift(VShift::Shl, Lane::D, 1, 1, 63), 0x4f7f5421, "shl v1.2d, v1.2d, #63"),
             (vshift(VShift::Shl, Lane::H, 1, 1, 1), 0x4f115421, "shl v1.8h, v1.8h, #1"),
             // (Apple clang, -march=armv8.4-a.)
+            (tbnz_top(27, 2), 0xb7f8005b, "tbnz x27, #63, .+8"),
+            (tbnz_top(27, 100), 0xb7f80c9b, "tbnz x27, #63, .+400"),
             (ldapr(Size::B, 3, 24), 0x38bfc303, "ldaprb w3, [x24]"),
             (ldapr(Size::H, 3, 24), 0x78bfc303, "ldaprh w3, [x24]"),
             (ldapr(Size::W, 3, 24), 0xb8bfc303, "ldapr w3, [x24]"),
@@ -808,7 +816,7 @@ mod tests {
         for (ours, theirs, name) in cases {
             assert_eq!(ours, theirs, "{name}: {ours:08x}, the assembler {theirs:08x}");
         }
-        assert_eq!(cases.len(), 248);
+        assert_eq!(cases.len(), 250);
     }
 
     #[test]

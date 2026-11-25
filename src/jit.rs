@@ -16,7 +16,7 @@
 //! | x21 to x23 | the record of the flags |
 //! | x24 | the address of the way out; in blocks with ordered accesses (ADR 0019, point D) the host's address of each, the way out's being in the `Cpu` too |
 //! | x25, x26 | scratch that the way in saves |
-//! | x27 | how many instructions the blocks run to their ends have run |
+//! | x27 | how many instructions the blocks run to their ends have run; its top bit, that a signal waits for the thread |
 //! | x28 | the address of the table of blocks (`TABLE_BITS`) |
 //! | v0 to v15 | the guest's sixteen XMM registers (ADR 0015), once a block that uses them has loaded them (`XMM_LOADED`) |
 //! | v16 to v31 | scratch |
@@ -106,7 +106,13 @@ pub unsafe extern "C" fn enter(cpu: *mut Cpu, code: *const u8, base: *mut u8, ta
         "ldp x12, x13, [x19, #{reg} + 96]",
         "ldp x14, x15, [x19, #{reg} + 112]",
         "str xzr, [sp, #{loaded}]",
+        // The count of instructions, with its top bit saying that a signal waits
+        // (which every block that a cycle passes through tests, R039). From here to
+        // the jump the host's handler gives the bit to a signal that arrives, and
+        // one that arrived before is in the thread's word, which is 0 or 1.
         "mov x27, #0",
+        "ldr w16, [x19, #{kick}]",
+        "orr x27, x27, x16, lsl #63",
         "br x17",
         // The way out.
         "2:",
@@ -152,6 +158,7 @@ pub unsafe extern "C" fn enter(cpu: *mut Cpu, code: *const u8, base: *mut u8, ta
         ran = const offset_of!(Cpu, ran),
         xmm = const offset_of!(Cpu, xmm),
         out = const offset_of!(Cpu, way_out),
+        kick = const offset_of!(Cpu, kick),
         loaded = const XMM_LOADED,
         kept = const KEPT_D8,
     )
@@ -165,6 +172,31 @@ pub unsafe extern "C" fn enter(cpu: *mut Cpu, code: *const u8, base: *mut u8, ta
 /// with eight places some of them found none left, on Linux, on 2026-11-25. And
 /// every thread of the guest's has a piece of its own, ADR 0019.)
 static PIECES: [[AtomicUsize; 2]; 1024] = [const { [const { AtomicUsize::new(0) }; 2] }; 1024];
+
+/// The stretch of the way in from where the count is cleared to the jump into
+/// generated code: its first address and the one after its last. Found once, by
+/// reading the way in's own instructions (the two that bound it are there once).
+static WINDOW: [AtomicUsize; 2] = [const { AtomicUsize::new(0) }; 2];
+
+fn find_window() {
+    const CLEARS_THE_COUNT: u32 = 0xd280_001b; // mov x27, #0
+    const JUMPS_IN: u32 = 0xd61f_0220; // br x17
+    let code = enter as *const u32;
+    let word = |i: usize| unsafe { code.add(i).read() };
+    let clears = (0..96).find(|&i| word(i) == CLEARS_THE_COUNT).expect("the way in clears the count");
+    let jumps = (clears..clears + 8).find(|&i| word(i) == JUMPS_IN).expect("and jumps soon after");
+    WINDOW[0].store(code as usize + 4 * (clears + 1), Ordering::Release);
+    WINDOW[1].store(code as usize + 4 * (jumps + 1), Ordering::Release);
+}
+
+/// Was a thread interrupted at this address running generated code, or about to (in
+/// the way in, past the clearing of the count)? Then a signal for it is told to it
+/// by the top bit of its x27, which the interrupter can set; anywhere else by the
+/// thread's word alone.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn runs_blocks(at: usize) -> bool {
+    is_generated(at) || (at >= WINDOW[0].load(Ordering::Acquire) && at < WINDOW[1].load(Ordering::Acquire))
+}
 
 /// Is this address of the host's in generated code? (For the profile.)
 pub fn is_generated(at: usize) -> bool {
@@ -319,6 +351,7 @@ unsafe fn told(start: *mut u8, len: usize) {
 fn handle_faults() -> io::Result<()> {
     static DONE: std::sync::OnceLock<Result<(), i32>> = std::sync::OnceLock::new();
     let done = DONE.get_or_init(|| {
+        find_window();
         for signal in [libc::SIGSEGV, libc::SIGBUS] {
             let mut act: libc::sigaction = unsafe { std::mem::zeroed() };
             act.sa_sigaction = on_fault as *const () as usize;
@@ -393,6 +426,29 @@ mod tests {
     fn run(code: &mut Code, words: &[u32], c: &mut Cpu, m: &Mem) -> u64 {
         let at = code.append(words).expect("room for the block");
         unsafe { enter(c, at, m.base(), std::ptr::null()) }
+    }
+
+    #[test]
+    fn the_way_in_tells_a_block_that_a_signal_waits() {
+        let m = Mem::reserve().unwrap();
+        let mut code = Code::new(1 << 16).unwrap();
+        // A block that begins with the look: left with 9 if the count's top bit is
+        // set, else it counts three instructions and is left with 7.
+        let mut block = vec![a64::tbnz_top(RAN, 5)];
+        block.push(a64::arith_imm(true, false, false, RAN, RAN, 3, false));
+        block.extend(leave(7));
+        block.extend(leave(9));
+        let mut c = cpu();
+        assert_eq!((run(&mut code, &block, &mut c, &m), c.ran), (7, 3));
+        c.kick = 1;
+        assert_eq!((run(&mut code, &block, &mut c, &m), c.ran & !(1 << 63), c.ran >> 63), (9, 0, 1));
+        // The stretch of the way in that the host's handler knows is in the way in,
+        // and is the four instructions from the count's clearing to the jump.
+        let (begin, end) = (WINDOW[0].load(Ordering::Acquire), WINDOW[1].load(Ordering::Acquire));
+        assert_eq!(end - begin, 12);
+        let way_in = enter as *const () as usize;
+        assert!(begin > way_in && end < way_in + 400);
+        assert!(runs_blocks(begin) && runs_blocks(end - 4) && !runs_blocks(end) && !runs_blocks(way_in));
     }
 
     #[test]

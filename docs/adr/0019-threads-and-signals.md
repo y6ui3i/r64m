@@ -107,8 +107,10 @@ is x86-64's: each thread's registers, and the frame a handler is entered with.
 
 ## Not yet
 
-- (As built, R037.) The look costs short blocks 3 to 7%, and looking only where a
-  cycle passes did not lessen it; a cheaper look is owed. A signal that arrives
+- (As built, R037 and R039.) The look is one instruction, a test of the top bit of
+  the count of instructions, which the host's handler sets in a thread it
+  interrupts in generated code. It costs a loop of twenty instructions one more: 1
+  to 4% of the tightest. A signal that arrives
   between the look at a call's start and the kernel taking the call waits out the
   call: a few instructions wide, owed.
 
