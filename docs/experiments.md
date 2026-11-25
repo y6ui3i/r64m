@@ -2881,3 +2881,35 @@ shell's cases said they need `/etc/alpine-release`, which redis's image has too 
 another version in it. They need the image with GCC.
 
 109 unit tests and the 62 programs in the four JIT modes on both hosts.
+
+## R037: signals delivered (2026-11-25)
+
+ADR 0019's third step (its point B).
+
+The card, written before the run.
+
+- **Hypothesis**: with the host's handler noting a signal for the thread it came to,
+  generated code leaving at the next block's start, and the guest's handler entered
+  with Linux's frame for x86-64 and left by `rt_sigreturn`, these are as on the real
+  machine: a C program that counts a timer's signals and one that catches its own
+  fault and goes on past it (compiled by the container's GCC); the shell's `trap`
+  and `kill`; Python's `signal.alarm` with a handler, a `KeyboardInterrupt` from a
+  signal sent to itself, and a child's end noticed. A call that a signal cuts short
+  is started again where the guest asked for that, and answers EINTR where it did
+  not.
+  The look at each block's start (a load and a branch) is guessed to cost the
+  primitives under 2%; p_loop, whose loop is six instructions, the most.
+- **What is changed from before** (R036): `rt_sigaction` gives the host's signal
+  r64m's handler; a block begins with the look; `rt_sigreturn`, `sigaltstack`,
+  `rt_sigsuspend`, `pause`; a fault of the guest's own is a signal for it, or ends
+  the process as that signal does.
+- **Next move for each result**:
+  - The cases are as hal's and the look costs under 2% → the goal's own programs
+    (nginx, FastAPI): what must be fetched is asked for
+  - The look costs more → only blocks that a cycle must pass through look (those
+    with a jump backward, a return, or a jump through an operand), and it is
+    measured again
+  - A case differs → the frame is compared word for word with one the real machine
+    makes (a handler that prints its own frame, run on hal)
+- **Cut-off**: the cases chosen here, three ways each; the primitives raced against
+  R036's build, three at once, least of three.
