@@ -2093,3 +2093,31 @@ shell and its tools use; the rest are there by their kind and are met, or not, b
 GCC next); `stat`'s structure has no test of its own beyond `ls -l` and `wc -c`
 being right; `vfork`'s wait (busybox's shell forks); two cases at once in one
 directory (the test runs those that make files one at a time).
+
+## R027: GCC compiling and linking one file (2026-11-25)
+
+ADR 0017's third step.
+
+The card, written before the run.
+
+- **Hypothesis**: the container's GCC 14.2 compiles and links a C file under r64m,
+  and what it makes is byte for byte what it makes on the real machine: the object
+  file of `gcc -O2 -c` and the linked program have hal's MD5 sums, and the program
+  runs. R024 counted 33 different calls for this, all in R026's table but `sysinfo`
+  and `getrusage`'s like, which are there by their kind and not yet reached. `cc1` is
+  25 MB of compiled C++ that r64m has never run: an instruction r64m lacks is the
+  likeliest thing to be met, and the interpreter says which (`not written yet`).
+- **What is changed from before** (R026): nothing until something is met.
+- **Next move for each result**:
+  - The sums are hal's in the three ways → step 4's ground: NetHack's sources in the
+    container and its build by `make` under r64m, first for being right (the sums
+    of its object files), then timed beside user-mode QEMU and Rosetta
+  - An instruction r64m lacks → written in the interpreter with a case of its own
+    (its flags and results from the real CPU, by hal), before going on
+  - A call not known or a structure that differs → added by its kind; named here
+  - The sums differ → the first object that differs is found (`cc1`'s assembly
+    output, then `as`'s), and `--jit-check` says whether a block is wrong
+  - Right by the interpreter and too slow to be used (`cc1` under the interpreter
+    is guessed at minutes) → said; the race is the JIT's anyway
+- **Cut-off**: one C file compiled and linked in the three ways, and a second file
+  that is not trivial (a few hundred lines with floating point) the same.
