@@ -124,8 +124,10 @@ real CPU does.
    (`tests/container.rs`). NetHack 3.6.7 is built there by `make` under r64m, every
    file as the real machine makes it, 2.2 times as fast as user-mode QEMU 9.2.2
    (R030: 266 s for 590 s, three builds each; Rosetta 168 s), and 2.9 times since
-   R031 (203 s). `--profile` shows where r64m's own time goes. Next: threads, signals
-   delivered and sockets, for the goal's programs.
+   R031 (203 s). `--profile` shows where r64m's own time goes. Python 3.13 runs,
+   and its threads (R033): a guest thread is a host thread
+   ([0019](docs/adr/0019-threads-and-signals.md)). Next: memory ordered between
+   threads as x86 orders it; sockets and `epoll`; signals delivered.
 
 One case is owed: the x87's square root when what is left over equals the root (the
 rounding there is not touched by any of g64m's cases; found by breaking it on purpose).
