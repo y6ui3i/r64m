@@ -3,7 +3,9 @@
 # glibc, not musl) and what the real machine printed for each (hal; the image
 # python:3.13-slim; 2026-11-25): the same form as shell.txt. Arithmetic, a hash, text;
 # threads started and joined, a pool of threads, a lock taken 160,000 times by eight
-# threads; a child process; an exit code. ADR 0019's first step.
+# threads; a child process; an exit code (ADR 0019's first step). Then sockets: a pair,
+# TCP between two threads, Python's HTTP server and a client, epoll through a selector,
+# asyncio's server and client, select on a pipe, a datagram (its second step).
 $$ python3 -c 'print("Hello, world")'
 Hello, world
 ? 0
@@ -32,3 +34,27 @@ child
 ? 0
 $$ python3 -c 'import sys; sys.exit(3)'
 ? 3
+$$ python3 -c 'import socket; a, b = socket.socketpair(); a.sendall(b"ping"); print(b.recv(4)); b.sendall(b"pong"); print(a.recv(4))'
+b'ping'
+b'pong'
+? 0
+$$ python3 -c 'import socket, threading; s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(("127.0.0.1", 0)); s.listen(); port = s.getsockname()[1]; t = threading.Thread(target=lambda: (lambda c: (c.sendall(c.recv(100).upper()), c.close()))(s.accept()[0])); t.start(); c = socket.create_connection(("127.0.0.1", port)); c.sendall(b"hello over tcp"); print(c.recv(100)); t.join()'
+b'HELLO OVER TCP'
+? 0
+$$ python3 -c 'import http.server, threading, urllib.request; H = type("H", (http.server.BaseHTTPRequestHandler,), {"do_GET": lambda self: (self.send_response(200), self.end_headers(), self.wfile.write(b"Hello, world\n")), "log_message": lambda *a: None}); srv = http.server.HTTPServer(("127.0.0.1", 0), H); t = threading.Thread(target=srv.handle_request); t.start(); print(urllib.request.urlopen("http://127.0.0.1:%d/" % srv.server_port).read().decode(), end=""); t.join()'
+Hello, world
+? 0
+$$ python3 -c 'import selectors, socket; sel = selectors.DefaultSelector(); a, b = socket.socketpair(); sel.register(b, selectors.EVENT_READ, "b"); print(type(sel).__name__, sel.select(0)); a.send(b"x"); print([(k.data, e) for k, e in sel.select(1)])'
+EpollSelector []
+[('b', 1)]
+? 0
+$$ printf '%s\n' 'import asyncio' 'async def handle(r, w):' '    w.write((await r.readline()).upper()); await w.drain(); w.close()' 'async def main():' '    srv = await asyncio.start_server(handle, "127.0.0.1", 0); port = srv.sockets[0].getsockname()[1]' '    r, w = await asyncio.open_connection("127.0.0.1", port); w.write(b"async hello\n"); print(await r.readline()); w.close(); srv.close(); await srv.wait_closed()' 'asyncio.run(main())' | python3
+b'ASYNC HELLO\n'
+? 0
+$$ python3 -c 'import select, os; r, w = os.pipe(); print(select.select([r], [], [], 0)); os.write(w, b"z"); print(select.select([r], [], [], 1)[0] == [r], os.read(r, 1))'
+([], [], [])
+True b'z'
+? 0
+$$ python3 -c 'import socket; s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.bind(("127.0.0.1", 0)); c = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); c.sendto(b"datagram", s.getsockname()); d, addr = s.recvfrom(100); print(d, addr[0])'
+b'datagram' 127.0.0.1
+? 0

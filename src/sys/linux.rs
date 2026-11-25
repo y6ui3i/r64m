@@ -173,6 +173,98 @@ fn readlink(m: &mut Mem, s: &Sys, dir: u64, path: u64, to: u64, len: u64) -> Res
     raw(libc::SYS_readlinkat, [dir, p(m, path)?, buf(m, to, len)?, len, 0, 0])
 }
 
+// ---- sockets and waiting ----------------------------------------------------------------------
+
+/// `sendmsg` and `recvmsg`: the header holds pointers of the guest's (to an address,
+/// to a list of pieces, to control data), so one of the host's is made beside it,
+/// and what the kernel writes into the header is written back.
+fn message(m: &mut Mem, number: c_long, fd: u64, header: u64, flags: u64) -> Result<u64, u64> {
+    let word = |m: &Mem, at: u64| m.read_u64(header + at).map_err(|_| EFAULT);
+    let (name, name_len) = (word(m, 0)?, word(m, 8)? & 0xffff_ffff);
+    let (list, count) = (word(m, 16)?, word(m, 24)?);
+    let (control, control_len) = (word(m, 32)?, word(m, 40)?);
+    if count > 1024 {
+        return Err(EINVAL);
+    }
+    let mut pieces = Vec::with_capacity(count as usize);
+    for i in 0..count {
+        let at = m.read_u64(list + 16 * i).map_err(|_| EFAULT)?;
+        let len = m.read_u64(list + 16 * i + 8).map_err(|_| EFAULT)?;
+        pieces.push([buf(m, at, len)?, len]);
+    }
+    // The kernel's own layout: seven words, two of them 32 bits wide.
+    let mut host = [buf(m, name, name_len)?, name_len, pieces.as_ptr() as u64, count, buf(m, control, control_len)?, control_len, 0];
+    let done = raw(number, [fd, host.as_mut_ptr() as u64, flags, 0, 0, 0])?;
+    if number == libc::SYS_recvmsg {
+        m.write_u32(header + 8, host[1] as u32).map_err(|_| EFAULT)?;
+        m.write_u64(header + 40, host[5]).map_err(|_| EFAULT)?;
+        m.write_u32(header + 48, host[6] as u32).map_err(|_| EFAULT)?;
+    }
+    Ok(done)
+}
+
+/// `epoll_ctl`: the event is 12 bytes on x86-64 (the kinds, then the word given
+/// back, with nothing between) and 16 on arm64.
+fn epoll_ctl(m: &Mem, epoll: u64, op: u64, fd: u64, event: u64) -> Result<u64, u64> {
+    let mut host = [0u64; 2];
+    if event != 0 {
+        host = [m.read_u32(event).map_err(|_| EFAULT)? as u64, m.read_u64(event + 4).map_err(|_| EFAULT)?];
+    }
+    raw(libc::SYS_epoll_ctl, [epoll, op, fd, if event == 0 { 0 } else { host.as_ptr() as u64 }, 0, 0])
+}
+
+/// `epoll_wait` and `epoll_pwait`: the events the kernel gives are written to the
+/// guest in its 12 bytes each.
+fn epoll_wait(m: &mut Mem, epoll: u64, events: u64, most: u64, timeout: u64, mask: u64, mask_size: u64) -> Result<u64, u64> {
+    if most == 0 || most > 1 << 16 {
+        return Err(EINVAL);
+    }
+    let mut host = vec![[0u64; 2]; most as usize];
+    let n = raw(libc::SYS_epoll_pwait, [epoll, host.as_mut_ptr() as u64, most, timeout, p(m, mask)?, mask_size])?;
+    for (i, event) in host.iter().take(n as usize).enumerate() {
+        let at = events + 12 * i as u64;
+        m.write_u32(at, event[0] as u32).map_err(|_| EFAULT)?;
+        m.write_u64(at + 4, event[1]).map_err(|_| EFAULT)?;
+    }
+    Ok(n)
+}
+
+/// `select` with its time in microseconds, by the newer call with nanoseconds; the
+/// time left is written back as Linux writes it.
+fn select(m: &mut Mem, a: [u64; 6]) -> Result<u64, u64> {
+    let mut time = [0u64; 2];
+    if a[4] != 0 {
+        time = [m.read_u64(a[4]).map_err(|_| EFAULT)?, m.read_u64(a[4] + 8).map_err(|_| EFAULT)?.wrapping_mul(1000)];
+    }
+    let wait = if a[4] == 0 { 0 } else { time.as_mut_ptr() as u64 };
+    let done = raw(libc::SYS_pselect6, [a[0], p(m, a[1])?, p(m, a[2])?, p(m, a[3])?, wait, 0])?;
+    if a[4] != 0 {
+        m.write_u64(a[4], time[0]).map_err(|_| EFAULT)?;
+        m.write_u64(a[4] + 8, time[1] / 1000).map_err(|_| EFAULT)?;
+    }
+    Ok(done)
+}
+
+/// `pselect6`: its last argument points at a pointer of the guest's (the signals to
+/// block meanwhile) and a size.
+fn pselect(m: &Mem, a: [u64; 6]) -> Result<u64, u64> {
+    let mut mask = [0u64; 2];
+    if a[5] != 0 {
+        mask = [p(m, m.read_u64(a[5]).map_err(|_| EFAULT)?)?, m.read_u64(a[5] + 8).map_err(|_| EFAULT)?];
+    }
+    let mask = if a[5] == 0 { 0 } else { mask.as_ptr() as u64 };
+    raw(libc::SYS_pselect6, [a[0], p(m, a[1])?, p(m, a[2])?, p(m, a[3])?, p(m, a[4])?, mask])
+}
+
+/// `alarm`, which arm64 does not have: the real-time timer set once, in seconds;
+/// what was left of the one before is the answer.
+fn alarm(seconds: u64) -> Result<u64, u64> {
+    let new = [0u64, 0, seconds, 0];
+    let mut old = [0u64; 4];
+    raw(libc::SYS_setitimer, [0, new.as_ptr() as u64, old.as_mut_ptr() as u64, 0, 0, 0])?;
+    Ok(old[2] + (old[3] != 0) as u64)
+}
+
 // ---- processes ---------------------------------------------------------------------------------
 
 const CLONE_VM: u64 = 0x100;
@@ -451,6 +543,45 @@ pub fn call(c: &mut Cpu, m: &mut Mem, s: &mut Sys, n: u64, a: [u64; 6]) -> Optio
         439 => same(m, libc::SYS_faccessat2, 0b10),
         16 => ioctl(m, a[0], a[1], a[2]),
         271 => same(m, libc::SYS_ppoll, 0b1101),
+
+        // ---- sockets, and waiting for several things at once
+        23 => select(m, a),
+        41 => same(m, libc::SYS_socket, 0),
+        42 => same(m, libc::SYS_connect, 0b10),
+        43 => same(m, libc::SYS_accept, 0b110),
+        44 => buf(m, a[1], a[2]).and_then(|from| p(m, a[4]).and_then(|to| raw(libc::SYS_sendto, [a[0], from, a[2], a[3], to, a[5]]))),
+        45 => same(m, libc::SYS_recvfrom, 0b11_0010),
+        46 => message(m, libc::SYS_sendmsg, a[0], a[1], a[2]),
+        47 => message(m, libc::SYS_recvmsg, a[0], a[1], a[2]),
+        48 => same(m, libc::SYS_shutdown, 0),
+        49 => same(m, libc::SYS_bind, 0b10),
+        50 => same(m, libc::SYS_listen, 0),
+        51 => same(m, libc::SYS_getsockname, 0b110),
+        52 => same(m, libc::SYS_getpeername, 0b110),
+        53 => same(m, libc::SYS_socketpair, 0b1000),
+        54 => same(m, libc::SYS_setsockopt, 0b1000),
+        55 => same(m, libc::SYS_getsockopt, 0b1_1000),
+        213 => raw(libc::SYS_epoll_create1, [0; 6]),
+        232 => epoll_wait(m, a[0], a[1], a[2], a[3], 0, 8),
+        233 => epoll_ctl(m, a[0], a[1], a[2], a[3]),
+        270 => pselect(m, a),
+        281 => epoll_wait(m, a[0], a[1], a[2], a[3], a[4], a[5]),
+        283 => same(m, libc::SYS_timerfd_create, 0),
+        284 => raw(libc::SYS_eventfd2, [a[0], 0, 0, 0, 0, 0]),
+        286 => same(m, libc::SYS_timerfd_settime, 0b1100),
+        287 => same(m, libc::SYS_timerfd_gettime, 0b10),
+        288 => same(m, libc::SYS_accept4, 0b110),
+        290 => same(m, libc::SYS_eventfd2, 0),
+        291 => same(m, libc::SYS_epoll_create1, 0),
+
+        // ---- timers, and the few things a process sets about itself
+        36 => same(m, libc::SYS_getitimer, 0b10),
+        37 => alarm(a[0]),
+        38 => same(m, libc::SYS_setitimer, 0b110),
+        // prctl: the thread's name (a pointer), and the settings that are numbers.
+        157 if matches!(a[0], 15 | 16) => same(m, libc::SYS_prctl, 0b10),
+        157 if matches!(a[0], 1 | 3 | 4 | 38 | 39) => same(m, libc::SYS_prctl, 0),
+        324 => same(m, libc::SYS_membarrier, 0),
 
         // ---- time, and what the machine is
         35 => same(m, libc::SYS_nanosleep, 0b11),

@@ -2837,3 +2837,47 @@ The card, written before the run.
     step's first case
   - A call or a structure not foreseen → added by its kind and named in the result
 - **Cut-off**: the cases chosen here, in the two images, three ways each.
+
+The result (this Mac's Docker VM; the Python and redis images from hal; what is right
+is what hal printed).
+
+**As guessed, and redis did not stop for its signal: every case as the real machine
+has it, in the three ways.**
+
+Seven Python programs with sockets (kept in `tests/container/python.txt`): a pair of
+sockets; TCP between two threads, with an option set and the port read back;
+Python's HTTP server answering `Hello, world` to a client in the same process; `epoll`
+through a selector, empty and then ready; `asyncio`'s server and client; `select` on a
+pipe; a datagram. And one session with redis 8 (`tests/container/redis.txt`): the
+server started as a daemon, asked until it answers, `SET` and `GET`, `INCRBY` and
+`INCR`, a list, `SHUTDOWN`, no answer after.
+
+| in its image, three ways each | cases | right |
+|---|---|---|
+| Python on Debian | 16 | 48 of 48 (and 48 of 48 with the processor's order refused) |
+| redis on Alpine (with busybox's own) | 13 | 39 of 39 |
+| Alpine with GCC | 42 | 126 of 126 |
+
+What was built, all in the table of calls: the socket calls as they stand (`socket`,
+`connect`, `accept`, `accept4`, `bind`, `listen`, `sendto`, `recvfrom`, the names and
+the options, `shutdown`, `socketpair`); `sendmsg` and `recvmsg` with a header of the
+host's made beside the guest's, since it holds three pointers; `epoll_ctl` and
+`epoll_wait`/`epoll_pwait` with the event written over (12 bytes for 16);
+`epoll_create`, `eventfd`, `select` and `alarm` by the newer calls arm64 has;
+`pselect6` with the pointer inside its last argument; the timers (`setitimer`,
+`timerfd`); `prctl` for a thread's name and four settings that are numbers;
+`membarrier`.
+
+Nothing was met that was not foreseen. No instruction was lacking in redis or in
+Python's networking.
+
+redis's timer signal did not end it: its handler is recorded and not called, the
+kernel's own action for that signal while no handler of the host's is set would be to
+end the process, and it did not come to that in this session (the timer is for a
+watchdog that is off by default). It is still 0019's third step's to deliver.
+
+A mistake in the tests' data, found by running the cases in a third image: the
+shell's cases said they need `/etc/alpine-release`, which redis's image has too with
+another version in it. They need the image with GCC.
+
+109 unit tests and the 62 programs in the four JIT modes on both hosts.

@@ -92,6 +92,7 @@ fn main() {
         ("shell", include_str!("container/shell.txt")),
         ("gcc", include_str!("container/gcc.txt")),
         ("python", include_str!("container/python.txt")),
+        ("redis", include_str!("container/redis.txt")),
     ];
     for (file, text) in files {
         // Only where the file's programs are.

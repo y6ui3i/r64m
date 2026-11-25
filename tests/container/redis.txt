@@ -1,0 +1,18 @@
+#! needs /usr/local/bin/redis-server
+# One session with redis 8 in its x86-64 Alpine image, given to the shell, and what the
+# real machine printed (hal; the image redis:alpine; 2026-11-25): the server started as
+# a daemon, asked until it answers, a value stored and read, a number added to, a list,
+# the server told to stop, and no answer after. A server with threads, sockets and
+# epoll: ADR 0019's second step.
+$$ redis-server --save "" --port 6399 --daemonize yes --logfile /tmp/redis.log > /dev/null; for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do redis-cli -p 6399 ping 2>/dev/null | grep -q PONG && break; sleep 0.2; done; redis-cli -p 6399 ping; redis-cli -p 6399 set greeting "Hello, world"; redis-cli -p 6399 get greeting; redis-cli -p 6399 incrby n 41; redis-cli -p 6399 incr n; redis-cli -p 6399 rpush l a b c; redis-cli -p 6399 lrange l 0 -1; redis-cli -p 6399 shutdown nosave; sleep 0.3; redis-cli -p 6399 ping 2>&1 | cut -c1-24
+PONG
+OK
+Hello, world
+41
+42
+3
+a
+b
+c
+Could not connect to Red
+? 0
