@@ -2083,8 +2083,9 @@ line read by r64m; a signal that is to be ignored or left alone made so on the h
 and what the process was given (ignored and blocked signals) read at the start;
 `mremap`.
 
-101 unit tests on macOS and in the Linux container (the rotation, the `#!` line,
-`mremap`); the 62 programs in the four JIT modes on both; the 116 of the primitives
+102 unit tests on macOS (new: the rotation, the `#!` line, `mremap`), and 101 in the
+Linux container, where they were run before the test of `mremap` was added; the 62
+programs in the four JIT modes on both; the 116 of the primitives
 and the 39 traces on macOS.
 
 Not shown: the calls of the table that no case reaches (the cases reach those a
