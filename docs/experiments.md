@@ -2999,3 +2999,33 @@ thread when it interrupts generated code (the kernel hands it the registers); a 
 then tests that bit and branches. The count of instructions (x27) has room for it.
 
 Not measured: NetHack's build and the container cases' time with the look.
+
+## R038: the guest's test programs in Rust (2026-11-25)
+
+The cases a shell or Python cannot make (a handler that changes its own frame, a
+handler on another stack, a fault stepped over) were tried with a C program that was
+not kept: the repository takes no C (ADR 0012). The owner chose that such programs be
+written in Rust and built for x86-64 Linux (2026-11-25), which needs Rust's library
+for that target fetched (`rustup target add x86_64-unknown-linux-musl`).
+
+The card, written before the run.
+
+- **Hypothesis**: a Rust program built for `x86_64-unknown-linux-musl` (statically
+  linked, position-independent, with no interpreter) does R037's cases and a few
+  more (floating point's state across a handler; a handler that asks to be entered
+  once only), prints the same lines on hal, where it runs as it is, and under r64m
+  by the interpreter, with `--jit` and with `--jit-check`. It is also the first
+  program r64m loads that is position-independent with no interpreter, and the
+  first built by Rust: its start-up (the library's own handler for a fault on the
+  stack, on another stack) is guessed to ask for nothing r64m lacks.
+- **What is changed from before** (R037): a second crate in the repository, `guest`,
+  built only for x86-64 Linux and only by the tests' preparation; a test that runs
+  its programs under r64m against what hal printed. Nothing of r64m unless something
+  is met.
+- **Next move for each result**:
+  - As hal's in the three ways → the cases are the repository's; then the look made
+    cheaper, or the goal, as the owner chooses
+  - A line differs → it is a case R037's C program did not have, and is the finding
+  - The program does not start → the loader or a call is looked at first
+- **Cut-off**: the one program, on hal and under r64m in the three ways, twenty runs
+  with `--jit`.
