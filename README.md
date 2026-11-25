@@ -109,8 +109,9 @@ real CPU does.
    `fork`, `execve` (r64m started again) and `wait4`; busybox's shell with pipes,
    loops and scripts, and GCC compiling and linking (R027: what it makes is byte for
    byte the real machine's), held to what the real machine prints
-   (`tests/container.rs`). Next: NetHack built in the container, beside user-mode
-   QEMU.
+   (`tests/container.rs`). NetHack 3.6.7 is built there by `make` under r64m, every
+   file as the real machine makes it, in 1.5 times Rosetta's time (R029, one run
+   each). Next: the race proper, with user-mode QEMU.
 
 One case is owed: the x87's square root when what is left over equals the root (the
 rounding there is not touched by any of g64m's cases; found by breaking it on purpose).

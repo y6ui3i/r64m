@@ -2274,3 +2274,59 @@ The card, written before the run.
   - Not a tenth → the table says what else; added if it is of the same kind
 - **Cut-off**: `cc1` on `apply.i` once with `--jit-stats` and once with `--jit-why`,
   after every test passes on both hosts and the 42 cases in the container.
+
+The result (this Mac's Docker VM; `cc1 -O2` on `apply.i` as in R028; then the whole
+build, once each).
+
+**The instructions were as guessed and were not where the time was. The time was in
+r64m's own keeping, and that was mine: R025's.**
+
+| `cc1 -O2 apply.i`, r64m `--jit` | entered | blocks | in blocks | time |
+|---|---|---|---|---|
+| R028 | 92.1 million | 168,160 (emptied once) | 97.4% | 47 s |
+| with the instructions translated | 14.0 million | 99,756 | 99.2% | 48 s |
+| and a change of mapping elsewhere costing nothing | 14.0 million | 99,756 | 99.2% | 4.9 s |
+
+Rosetta: 2.0 s. The assembly `cc1` writes is the same each time.
+
+1. **The instructions.** FS- and GS-relative operands, `bt`/`bts`/`btr`/`btc` of a
+   register (translated where only the carry is asked for before the flags are
+   written over, as a rotation is; a jump on the carry asks the host's flags),
+   `pslldq`/`psrldq`, and `xchg ax, ax`. Generated code was entered 6.6 times less
+   often, not ten, and the time did not move: the card's second line. So the time
+   was not in the leaving.
+2. **Where it was.** `--jit-stats` was given two clocks: 0.35 s making blocks, 4.4 s
+   in generated code (1,600 million instructions a second: as the primitives), of
+   48 s. The rest was `Jit::guest_changed`, built in R025 for ADR 0016's point 2:
+   after every call that maps, unmaps or protects memory it walked every place
+   known (hundreds of thousands) to find blocks made from the pages changed. `cc1`
+   maps memory many thousand times, nearly always for data. Now the pages anything
+   is known of are kept in an ordered set, and a change that touches none of them is
+   seen so at once. A test holds both sides (a change elsewhere keeps the block; the
+   code's page mapped anew drops it).
+   - What should have caught it: R025 and R026 ran programs of a few million
+     instructions and no time was looked at. A walk through everything, in a path
+     that every `mmap` takes, was written without a count of how often `mmap` is
+     called. R024 had the count (835 in one small compile).
+
+The whole build, `make all` of NetHack 3.6.7, once each:
+
+| | time | files that differ from hal's |
+|---|---|---|
+| hal (i7-3770K, the real machine) | 111 s | |
+| Rosetta (this Mac, the same container) | 168 s | the three that hold the time |
+| r64m `--jit`, R028 | 3,008 s | the same three |
+| r64m `--jit`, now | 256 s | the same three |
+
+r64m takes 1.52 times Rosetta's time for the build, and builds the same files. One
+run each: not yet a race (three runs, and at once, with QEMU, is the next card; QEMU
+needs the Docker VM switched from Rosetta by the owner).
+
+What is left in one compilation, by the last `--jit-why`: `bt` in the forms not
+translated (where the other flags are read, 4.9 million) with the `jnc` after it;
+`movhps` (0F 16); the string instructions with a repeat count; and 14 million
+entries. And of the 4.9 s, about 2 are neither generated code nor the making of
+blocks.
+
+106 unit tests on macOS and 105 in the Linux container (the last was added after);
+the 62 programs in the four JIT modes on both; the 42 container cases in three ways.
