@@ -3195,3 +3195,36 @@ brings must first be held to the real CPU.
 
 Next: the goal's own programs, nginx and FastAPI, which need downloads the owner is
 asked for.
+
+## R041: the goal's own programs: nginx over TLS to FastAPI (2026-11-26)
+
+The owner allowed the downloads: Debian's `nginx` and PyPI's `fastapi` and `uvicorn`,
+put on `python:3.13-slim` as a local image `r64m-goal:amd64`.
+
+The card, written before the run.
+
+- **Hypothesis**: in that image, with every x86-64 program run by r64m (`--jit`),
+  uvicorn serves a FastAPI app on 127.0.0.1:8000, nginx (a master and one worker)
+  listens with TLS on 8443 and passes to it, and a client gets status 200 and
+  `Hello, world` with the handshake complete. What stops on the way is of these
+  kinds, guessed in the order of likelihood: a system call not yet in the table
+  (nginx: `socketpair`, `setsid`, `rt_sigsuspend` in the master, `accept4`,
+  `epoll` with `EPOLLRDHUP`/`EPOLLET`, `sendfile`, `writev`, `eventfd`, `prctl`,
+  `setuid`/`setgid`, `pread`/`pwrite`; uvicorn: `epoll`, `getrandom`,
+  `socketpair`); a difference in a structure passed (as `epoll_event` was); a
+  signal between master and worker; an instruction (pydantic-core is Rust built
+  for x86-64-v1, but MMX is unwritten).
+- **What is changed from before** (R040): the programs. r64m only as each stop
+  asks.
+- **Next move for each result**:
+  - `Hello, world` comes back → the request is repeated 100 times, then with the
+    client outside the container (curl on the Mac through a published port, which
+    is ADR 0011's self-check); the case becomes a test; then the time of a request
+    beside QEMU's is the next experiment
+  - A stop of a kind above → fixed as its kind was before, each one noted here
+  - A hang → `--profile` and the system-call trace say where each process waits,
+    before anything is changed
+  - Something that needs a decision (a call that cannot be handed to the host as
+    it is) → stop and ask
+- **Cut-off**: the first complete request, or a stop that needs a decision. No
+  timing in this experiment beyond noting it.
