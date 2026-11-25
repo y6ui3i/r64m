@@ -14,7 +14,7 @@ Each file has: **Status** (accepted, or replaced by which), **Context**, **Decis
 | | |
 |---|---|
 | [0001](0001-a-rebuild-in-rust.md) | A rebuild in Rust, not a port of g64m's code |
-| [0002](0002-main-waits-for-a-version-that-works.md) | `main` is not updated until r64m does what g64m does |
+| [0002](0002-main-waits-for-a-version-that-works.md) | `main` is not updated until r64m does what g64m does (the bar changed by 0018) |
 | [0003](0003-64-bit-only.md) | 64-bit only: no 16-bit, no 32-bit, no BIOS |
 | [0004](0004-one-executable.md) | One executable |
 | [0005](0005-loaders-in-host-code.md) | A program and a kernel are loaded by host code |
@@ -30,3 +30,4 @@ Each file has: **Status** (accepted, or replaced by which), **Context**, **Decis
 | [0015](0015-sse-in-blocks.md) | SSE in blocks: the host's vector registers, the interpreter for what is not a number |
 | [0016](0016-only-writable-code-is-guarded.md) | Only code the guest may write is guarded against writes |
 | [0017](0017-the-containers-way.md) | The container's way: a program's system calls are the host kernel's |
+| [0018](0018-one-thing-well.md) | r64m does one thing: it runs an x86-64 program's instructions; it is not a machine |

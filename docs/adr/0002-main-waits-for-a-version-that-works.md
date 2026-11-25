@@ -1,6 +1,7 @@
 # 0002: `main` is not updated until r64m does what g64m does
 
-**Status**: accepted (2026-11-24, the owner)
+**Status**: accepted (2026-11-24, the owner); its bar changed by [0018](0018-one-thing-well.md)
+(2026-11-25): the container's goal (0011), not g64m's list
 
 ## Context
 
