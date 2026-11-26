@@ -4868,3 +4868,29 @@ The card, written before the run.
     runner (4 cores, another kernel) is the condition missing; the two tests are
     then run there alone by a workflow run asked for by hand, with a limit
 - **Cut-off**: 300 runs each way, 20 seconds a run at most.
+
+**Result (2026-11-27): not reproduced, and not explained. What the two tests
+depended on that is not theirs is taken away; whether that was the cause is not
+known.**
+
+- 300 runs of `mem::tests` with today's test in an arm64 Linux container (the
+  Mac's VM): none hangs. The whole file of unit tests, 12 runs on four cores:
+  none; each ends in 2 to 3 seconds. The count without today's test was not
+  made: with none in 300 there is nothing to compare.
+- What differs on the CI's runner and could not be made here: what the host does
+  with a process that dies of a fault. Here the kernel writes a file `core` or
+  nothing; with cores allowed, each run of the tests left one of 226 MB (the
+  child is a copy of the whole test process) and was no slower. An Ubuntu host
+  pipes the dying process to a program, and the kernel waits for it. That is a
+  guess at the cause, not a finding: the runner was not looked into.
+- The children of `host_refuses` died as the process they were copied from would
+  have: by r64m's handler of faults when another test had put it in place (it
+  says a line and steps aside), and then with a core taken if the host takes
+  one. Now the child sets the two signals to their default and says it is not to
+  be dumped, before the access: it ends by the kernel alone. With cores allowed,
+  no file is left any more.
+- The CI's job says how its runner takes a crash before the tests
+  (`core_pattern`, the limit): the next run shows whether the guess has a
+  footing.
+- If it happens again with this in: the card's last move (the tests run on the
+  runner by hand, with a limit and the processes listed).
