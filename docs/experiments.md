@@ -4626,3 +4626,42 @@ the address).
 Tests: 120 unit tests on macOS, 121 on Linux; 62 programs four ways; the
 container suites by the JIT, all. No unit test of the race itself: it needs two
 threads and the moment between them.
+
+## R056: the JVM hangs at its end, under load (2026-11-27)
+
+The owner: 「終了時の固まりを追う」. For ADR 0020's point 3. What R055 left: four
+JVMs at once (keytool making an RSA key), about 5 runs in 100 never end: the key
+is made and said so, every thread is asleep, no CPU time goes on. It was there
+before R055's fix (7 of 216). Nothing is known of where the threads wait: R055's
+round that asked met no hang in 40 runs, and its one caught hang was removed
+before it was asked.
+
+The card, written before the run.
+
+- **Hypothesis**: a wake is lost, and it is r64m's: a thread waits on a word in
+  the guest's memory (a join on a thread's id word, or a lock of the JVM's)
+  whose waking r64m does in the kernel's place or carries for the guest: the
+  clearing and waking at a thread's end (`thread_ends`, R051), or a signal the
+  JVM's end depends on. The other possibility is r64m's own end: a thread in
+  r64m's exit (`std::process::exit`) that waits on something of r64m's.
+- **What is changed from before** (R055): the asking is part of every run, not a
+  round of its own: a run that passes its 60 seconds is asked, before it is
+  removed, for each host thread's state and the call it waits in with its
+  arguments (`/proc/1/task/*/syscall`, `stat`), the guest's base, and its output
+  so far. Eight at once in place of four, to meet it sooner.
+- **Next move for each result**:
+  - Some thread waits in `futex` on an address inside the guest's memory → which
+    word (a thread's id word, or a lock), what it holds, and who should have
+    woken it: the path of that wake in r64m is read and a small guest program
+    made that takes it many times
+  - Some thread waits on an address of r64m's own, or is in `exit_group`'s way →
+    r64m's end: which lock, and who holds it
+  - Threads wait in other calls (a read, a wait for a signal) → what the JVM's
+    end waits for by that call, and whether r64m delivered it (`--calls` of the
+    last second)
+  - No hang in 96 runs → 0 of 96 where 5 in 100 was seen says eight at once
+    hides it (under 3 in 100 at 95%): back to four at once with the same asking,
+    48 runs, and no more waiting after that: the end of the JVM is read by its
+    calls instead
+- **Cut-off**: every run 60 seconds; 96 runs to capture, stopped at the second
+  hang caught; after a fix, one round of 96.
