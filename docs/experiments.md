@@ -3970,3 +3970,47 @@ The card, written before the run.
     down, with what flag or change it would take
 - **Cut-off**: the images and the goal by `docker run`; the entry removed, and
   QEMU seen to run x86-64 again.
+
+The result (OrbStack's VM on the Mac, arm64 Linux 7.2).
+
+**It is in QEMU's place: with one line written to the VM's `binfmt_misc`,
+`docker run --platform linux/amd64 IMAGE` runs the image under r64m, with no word
+of r64m in the command.** An entry made later is asked before `qemu-x86_64`, which
+was left as it is.
+
+Run that way, with what the real machine printed beside:
+
+| | by `docker run` alone |
+|---|---|
+| the six images of R047 and R048, each its case | as hal, all six |
+| the goal's case (uvicorn, nginx over TLS, twenty requests) | `200 nginx Hello, world`, 20 answered |
+| redis: set, get, shutdown | as before |
+| the official nginx by its own default command, a port published | answers `curl` on the Mac; `docker exec` runs a shell in it; `docker stop` ends it in 0.13 s |
+
+What r64m needed:
+
+- Started under the name `r64m-binfmt` it takes what the kernel gives in the
+  kernel's order (the program's path, the first argument the program was given,
+  the rest: flag P), uses the JIT, and says nothing of its own on the program's
+  standard error (`--quiet`: a call that is not known is answered and not named;
+  Node's, the JVM's and Go's output each had three to six such lines of r64m's
+  before).
+- For `execve` it starts itself by `/proc/self/exe`: the kernel holds r64m's file
+  open (flag F) and a container has no path to it.
+
+What is different from running r64m by name, and stays so:
+
+- `ps` in the container shows r64m's own command line for every process, the
+  program's after it.
+- A program whose file has set-user-ID is not given that user (QEMU's entry has
+  flag C for it; r64m's does not, and has not been tried with it). `su` as root to
+  another user works, which is what PostgreSQL's case does.
+- The entry is gone when the VM is started again, and r64m's file is held as it
+  was when registered: a new build is registered anew. (A scratch script does the
+  two; the tool for it in Rust is owed with the others: ADR 0012.)
+
+**Not done of the cut-off**: the entry was not taken away at the end, and QEMU was
+not seen to run x86-64 again afterwards. The entry is still registered as this is
+written (every x86-64 container of the VM runs under r64m until it is removed by
+`echo -1` to the entry, or the VM restarts). Whether it stays is the owner's to
+say.

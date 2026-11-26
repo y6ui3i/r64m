@@ -176,7 +176,18 @@ impl SeenXmm {
 }
 
 fn main() {
-    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().collect();
+    // Started by the kernel for an x86-64 program (registered with `binfmt_misc`
+    // under this name, with the flag that keeps the program's own first argument:
+    // R049): what follows is the program's path, the first argument it was given,
+    // and the rest. No option can be given this way, so this is the way with the
+    // JIT.
+    let by_kernel = std::path::Path::new(&args.remove(0)).file_name().is_some_and(|n| n == "r64m-binfmt");
+    if by_kernel && args.len() >= 2 {
+        let path = args.remove(0);
+        let name = args.remove(0);
+        args.splice(0..0, ["--jit".to_string(), "--quiet".to_string(), "--argv0".to_string(), name, path]);
+    }
     // The options as they were given, for a program that starts another (`execve`
     // is r64m started again with them, ADR 0017).
     let own_options: Vec<String> = args.iter().take_while(|a| a.starts_with("--") && *a != "--argv0").cloned().collect();
@@ -192,6 +203,9 @@ fn main() {
     let jit_check = option("--jit-check");
     let jit_stats = option("--jit-stats");
     // Each system call said as it is made and as it answers (src/sys.rs).
+    if option("--quiet") {
+        sys::QUIET.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     if option("--calls") {
         sys::SAY_CALLS.store(true, std::sync::atomic::Ordering::Relaxed);
     }
@@ -227,7 +241,7 @@ fn main() {
             mem.size().trailing_zeros(),
             mem.host_page() / 1024
         );
-        println!("usage: r64m [--count] [--jit | --jit-check] [--jit-now] [--jit-stats] [--calls] [--profile] [--trace | --trace-xmm] program [arguments]");
+        println!("usage: r64m [--count] [--jit | --jit-check] [--jit-now] [--jit-stats] [--calls] [--quiet] [--profile] [--trace | --trace-xmm] program [arguments]");
         return;
     };
 
@@ -267,7 +281,13 @@ fn main() {
     let mut c = cpu::Cpu::new(entry, rsp);
     c.rep_whole = !trace;
     let mut system = sys::Sys::new(if trace { sys::Output::Nowhere } else { sys::Output::Host }, loaded.brk);
-    system.exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| "/proc/self/exe".to_string());
+    // Itself, for `execve`: on Linux by the link the kernel keeps, which is r64m in
+    // whatever container this is; its path is that of another's files (R049).
+    system.exe = if cfg!(target_os = "linux") {
+        "/proc/self/exe".to_string()
+    } else {
+        std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| "/proc/self/exe".to_string())
+    };
     system.options = own_options;
     system.program = std::fs::canonicalize(path).map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| path.clone());
     let mut lines = std::io::BufWriter::new(std::io::stdout().lock());

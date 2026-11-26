@@ -244,6 +244,11 @@ fn map_errno(e: MapError) -> u64 {
     }
 }
 
+/// Whether r64m says nothing of its own on the program's standard error (`--quiet`;
+/// and so whenever it is started by the kernel, where its words would be taken for
+/// the program's): a call that is not known is then answered and not named.
+pub static QUIET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Whether each system call is said on standard error (`--calls`): a tool for finding
 /// what a program that stops or waits was doing.
 pub static SAY_CALLS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -312,7 +317,7 @@ pub fn call(c: &mut Cpu, m: &mut Mem, s: &mut Sys) -> Option<Exit> {
         _ => match handed_on(c, m, s, number, [a, b, d, e, f, g]) {
             Some(result) => result,
             None => {
-                if s.proc().named.insert(number) {
+                if s.proc().named.insert(number) && !QUIET.load(std::sync::atomic::Ordering::Relaxed) {
                     eprintln!("r64m: system call {number} is not known: answered ENOSYS");
                 }
                 Err(ENOSYS)
