@@ -19,14 +19,15 @@ whether it worked or not.
 
 ## `main` changes by pull request, merged by the owner
 
-The work is on the branch `port`: commits and pushes go there. `main` is what a
-visitor sees, and it is protected on GitHub (since 2026-11-27, when the repository was
-made public): no push straight to it, no forced push, no deletion; it changes only by a
-pull request on which the CI's job `linux` has passed. A pull request from `port` to
-`main` is opened when a step is committed and verified; merging it is the owner's to do
-or to say.
+Work is done on a branch of its own, cut from `main` and named by its kind
+(`fix/...`, `perf/...`, `feat/...`, `docs/...`), and reaches `main` by a pull request.
+`main` is protected on GitHub (since 2026-11-27, when the repository was made public):
+no push straight to it, no forced push, no deletion; a pull request is merged only when
+the CI's job `linux` has passed on it. A pull request is opened when a step is committed
+and verified; merging it is the owner's to do or to say. A branch whose pull request is
+merged is deleted.
 
 (Until 2026-11-26 `main` held the skeleton alone and waited for a version that works:
 [ADR 0002](docs/adr/0002-main-waits-for-a-version-that-works.md). What "works" came to
-mean is [ADR 0020](docs/adr/0020-what-done-means.md). It was brought up to `port` by the
-owner's word on 2026-11-26 and 2026-11-27, before the protection.)
+mean is [ADR 0020](docs/adr/0020-what-done-means.md). Until 2026-11-27 all work was on
+one branch, `port`; it was merged by the first pull request and is gone.)

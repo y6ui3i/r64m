@@ -15,7 +15,7 @@ command (`xtask/src/main.rs`), so what the CI runs can be run by hand:
 
 | when | where | what |
 |---|---|---|
-| a push to `port` or `main` (not one of documents only), every pull request | arm64 Linux | tests, guest, and the container cases by the JIT |
+| every pull request; a push to `main` (not one of documents only) | arm64 Linux | tests, guest, and the container cases by the JIT |
 | Saturdays 18:17 UTC, and by hand ("Run workflow") | arm64 Linux | the same with the container cases three ways (interpreter, JIT, JIT checked) |
 | | macOS (arm64) | `cargo xtask test` |
 

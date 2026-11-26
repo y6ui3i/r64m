@@ -11,7 +11,7 @@ name: CI
 
 on:
   push:
-    branches: [main, port]
+    branches: [main]
     paths-ignore: ["docs/**", "**.md", "LICENSE"]
   # Every pull request, one of documents only too: `main` takes a pull request
   # only when the job `linux` has passed on it, and a run that never starts never
