@@ -201,7 +201,7 @@ which is how the kernel's list is written.
 cargo xtask install      # builds r64m for arm64 Linux and registers it
 cargo xtask status       # what the kernel says of r64m's entry, and the other entries
 docker run --rm --platform linux/amd64 alpine cat /proc/self/cmdline | tr '\0' ' '
-                         # under r64m: "/proc/self/exe --jit --quiet ..."; under QEMU: "cat ..."
+                         # under r64m: "/r64m-binfmt /bin/cat cat ..."; under QEMU: "cat ..."
 ```
 
 From then on every x86-64 container of that kernel runs under r64m, with nothing
