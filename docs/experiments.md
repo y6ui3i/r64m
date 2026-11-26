@@ -3413,3 +3413,80 @@ The card, written before the run.
   - A test fails under `--jit-check` → that form is taken out until it is right
 - **Cut-off**: all tests on both hosts; the container cases; one launch for the
   CPU times, three for the client's clock.
+
+The result (the Mac, as R042: OrbStack's QEMU 9.2.2 beside r64m `--jit`).
+
+**The handshake is 2.7 times QEMU by the servers' CPU time and a request on a kept
+connection 2.06; by the client's clock the start is 2.67, a new connection 2.24, a
+kept one 1.63.** Both of the card's numbers are met as it stated them (CPU time);
+the kept connection by the client's clock is still under 2, with the client's own
+time and the port's in both sides of it.
+
+| CPU time for a request | QEMU | R042 | R043 | QEMU / R043 |
+|---|---|---|---|---|
+| nginx's worker, a new connection (the handshake) | 11.1 ms | 11.6 ms | 4.2 ms | 2.7 |
+| uvicorn, a new connection | 4.6 ms | 3.0 ms | 2.4 ms | 1.9 |
+| nginx's worker, a kept connection | 0.38 ms | 0.25 ms | 0.26 ms | 1.5 |
+| uvicorn, a kept connection | 3.80 ms | 2.1 ms | 1.84 ms | 2.06 |
+
+| by the client's clock (least of three launches) | QEMU | R043 | QEMU / R043 | R042's ratio |
+|---|---|---|---|---|
+| the container's start to the first answer | 3.90 s | 1.46 s | 2.67 | 2.26 |
+| a request on a new connection | 19.96 ms | 8.90 ms | 2.24 | 1.15 |
+| a request on a connection kept open | 4.56 ms | 2.79 ms | 1.63 | 1.62 |
+
+(QEMU's own times moved between the two days' runs, 17.4 to 20.0 ms for a new
+connection: the ratios are of runs side by side and are what is trusted.)
+
+What was built, in the order it was found to matter:
+
+1. **INC and DEC** (FFh /0 /1) of a register or memory, at 32 and 64 bits. The
+   record is an addition's or a subtraction's of one, with "the carry was given"
+   and the carry above the kind; the host's flags after it are a kind of their own
+   (`IncDec`: zero, sign and overflow are x86's, the carry is not), so a jump on
+   the carry after one is still the interpreter's.
+2. **A carry that the host's flags do not say** (for ADC, SBB, INC, DEC) is taken
+   from the record where the record says it was given, from RFLAGS where there is
+   no record, and from the two operands where the record is a 64-bit addition's;
+   with any other record the instruction is left to the interpreter from inside
+   the block.
+3. **After an instruction that a block left to the interpreter, the next address
+   is looked up again.** This was not on the card and was the larger half: the
+   first measurement after 1, 2, 4 and 5 gave 8.5 ms a handshake, not 5.6. What
+   was left: an ADC that begins a block after a long run of code was cut in two at
+   64 instructions, between an ADD and its ADC; and after each, the interpreter
+   went on to the next jump, which in OpenSSL's squaring is about sixty
+   instructions away (found by marking, in `--jit-why`, which interpreted
+   instruction began each run and what record it met; the marks are not kept in
+   the code). With this and the 64-bit addition's carry: 4.2 ms.
+4. **A 67h prefix** where the instruction has no memory operand.
+5. **LEAVE**, **PUSH of an operand** (FFh /6), **PREFETCH** and its neighbours.
+
+Not done of the card's list: XCHG of two registers, PMOVMSKB, MOVLPD (each a few
+hundred to two thousand a handshake now; they begin most of what is still
+interpreted, with XCHG of memory, LOCK XADD and LOCK CMPXCHG).
+
+**A fault of R037's found on the way, and not this experiment's**: under
+`--jit-check`, a shell in a loop without calls did not see a SIGTERM, and went round
+for ever. Two runs in a hundred with R042's build when four ran at once, none alone.
+The checker ran the interpreter on the thread's own `Cpu` and then wrote the copy it
+had kept over it, and with it the word the host's handler had set meanwhile. It runs
+on the copy now. A hundred runs of four at once with the fix: all end. (This is very
+likely the one run of 68 seconds noted and not explained in R037.) It was met
+because a suite hung while four ran at once; I first took it for this experiment's
+doing, and the old build beside the new one said otherwise.
+
+A mistake of mine, kept: the first build translated an INC whose flags are dead
+without leaving the host's flags as declared, and eleven of the 62 programs stopped
+at the translator's own check under `--jit` while every unit test passed: no unit
+test had an INC with nothing reading its flags. One does now.
+
+Tests: 116 unit tests plain and ordered on both hosts (five new); the 62 programs
+four ways; container cases GCC 144, Python 72, redis 39, the goal 3; the guest's
+signal program; prim 116 and trace 39 on macOS. The primitives against R039's
+build, three at once, least of three: all within 3% either way (three that showed 4
+to 5% slower in one round were 0.98 to 1.02 in two more).
+
+Still under 2 and next: a kept connection by the client's clock (what the client
+and the port cost is not measured: a floor is wanted, a native arm64 server of the
+same kind), uvicorn on a new connection (1.9), nginx's worker on a kept one (1.5).

@@ -926,25 +926,37 @@ impl Emit<'_> {
     /// The carry into T4 as a number, for an instruction that reads it where the
     /// host's flags do not say it. If the record says its carry was given (by INC, DEC
     /// or a bit test: the top of a loop whose carry came round through a DEC and a
-    /// jump), that; if there is no record, RFLAGS has it; with any other record the
-    /// instruction is the interpreter's. Nothing of the instruction is done yet when
-    /// this is asked.
+    /// jump), that; if there is no record, RFLAGS has it; if the record is of an
+    /// addition of 64 bits (a long run of code cut in two between an ADD and its
+    /// ADC), the two added again; with any other record the instruction is the
+    /// interpreter's. Nothing of the instruction is done yet when this is asked. The
+    /// host's flags are spent.
     fn given_carry(&mut self) {
         let given = REC_CARRY_GIVEN.trailing_zeros();
         self.put(a64::ubfx(T4, REC_KIND, given, 1));
         let to_given = self.w.len();
         self.put(a64::nop());
+        let to_none = self.w.len();
+        self.put(a64::nop());
+        self.put(a64::arith_imm(true, true, true, a64::ZR, REC_KIND, (REC_ADD << 8 | 64) as u32, false));
         let j = self.w.len();
-        self.put(a64::cbz(true, true, REC_KIND, 0));
+        self.put(a64::b_cond(Cond::Ne, 0));
         let (at, n) = self.now;
         self.bail(&[j], at, n);
+        self.put(a64::arith(true, false, true, a64::ZR, REC_A, REC_B, 0));
+        self.put(a64::cset(false, T4, Cond::Hs));
+        let over_one = self.w.len();
+        self.put(a64::nop());
+        self.w[to_none] = a64::cbz(true, false, REC_KIND, (self.w.len() - to_none) as i32);
         self.put(a64::mem_imm(Size::X, Op::Load, T4, CPU, offset_of!(Cpu, rflags) as u32));
         self.put(a64::ubfx(T4, T4, 0, 1));
-        let over = self.w.len();
+        let over_two = self.w.len();
         self.put(a64::nop());
         self.w[to_given] = a64::cbz(true, true, T4, (self.w.len() - to_given) as i32);
         self.put(a64::ubfx(T4, REC_KIND, given + 1, 1));
-        self.w[over] = a64::b((self.w.len() - over) as i32);
+        for over in [over_one, over_two] {
+            self.w[over] = a64::b((self.w.len() - over) as i32);
+        }
     }
 
     /// The carry into T4 as a number: as the host's flags say it, or as the record

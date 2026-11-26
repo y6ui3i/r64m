@@ -138,8 +138,10 @@ real CPU does.
    Python server and client, with keys `openssl` made, completes (R040; not yet
    held to the real machine). **The goal's request completes** (R041): nginx takes
    it over TLS and passes it to FastAPI, `Hello, world` comes back, to a client in the
-   container and to `curl` outside it. Next: its time beside QEMU's, and the same
-   held to the real machine.
+   container and to `curl` outside it. Beside QEMU (R042, R043): the start 2.7 times
+   as fast, a request on a new connection 2.2, on a kept one 1.6 by the client's
+   clock (2.06 by the server's CPU time). Next: the same held to the real machine,
+   and what is still under 2.
 
 One case is owed: the x87's square root when what is left over equals the root (the
 rounding there is not touched by any of g64m's cases; found by breaking it on purpose).

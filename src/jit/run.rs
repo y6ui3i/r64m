@@ -235,6 +235,12 @@ impl Jit {
             }
             // Is the interpreter about to run an instruction that no block begins with?
             let mut stands_in = false;
+            // Or one that a block left to it from inside (a case of it that is not
+            // translated, a fault)? After it the address is looked up again: what
+            // follows may be a long way from the next jump, and was the
+            // interpreter's all that way before (R043: sixty instructions for every
+            // ADC that could not be told its carry, in code written without jumps).
+            let mut left_inside = false;
             if arrived {
                 match self.places.get(&c.rip).copied() {
                     Some(Place::Block(id)) => {
@@ -250,7 +256,10 @@ impl Jit {
                             self.table[Self::place(c.rip)] = [c.rip, self.blocks[id].code as u64];
                         }
                         match self.run_block(id, c, m) {
-                            Ok(whole) => arrived = whole,
+                            Ok(whole) => {
+                                arrived = whole;
+                                left_inside = !whole;
+                            }
                             Err(differs) => return Event::Differs(differs),
                         }
                         // Left by a fault: the interpreter meets the instruction next,
@@ -297,7 +306,7 @@ impl Jit {
             // instruction is run again.
             let (regs, flags) = (c.reg, c.rflags);
             match cpu::step(c, m) {
-                Ok(Step::Next) => arrived = stands_in || c.rip < before || c.rip > before.wrapping_add(15),
+                Ok(Step::Next) => arrived = stands_in || left_inside || c.rip < before || c.rip > before.wrapping_add(15),
                 Ok(Step::Syscall) => return Event::Syscall,
                 // A store to a host page that holds translated code. If it is to the
                 // code (the guest's own page written has a block's instruction in it):
@@ -325,7 +334,7 @@ impl Jit {
                         }
                     }
                     match stepped {
-                        Ok(Step::Next) => arrived = stands_in || c.rip < before || c.rip > before.wrapping_add(15),
+                        Ok(Step::Next) => arrived = stands_in || left_inside || c.rip < before || c.rip > before.wrapping_add(15),
                         Ok(Step::Syscall) => return Event::Syscall,
                         Err(stop) => return Event::Stop(stop),
                     }
@@ -3134,5 +3143,30 @@ mod tests {
         c.reg[RBX] = 50;
         assert!(matches!(jit.run(&mut c, &mut m), Event::Syscall));
         assert_eq!(jit.stats.in_blocks, c.steps - 1);
+    }
+
+    #[test]
+    fn an_adc_takes_its_carry_from_the_block_before_and_what_is_left_goes_back_to_blocks() {
+        // add rax, rbx; jmp +0; adc rdx, 0; add esi, 1; syscall: the ADC begins a
+        // block and finds the addition's record. All of it is in blocks.
+        let wide = [0x48, 0x01, 0xd8, 0xeb, 0x00, 0x48, 0x83, 0xd2, 0x00, 0x83, 0xc6, 0x01, 0x0f, 0x05];
+        // The same with an addition of 32 bits, whose record the ADC is not told the
+        // carry by: it is the interpreter's, and the instruction after it is in a
+        // block again (before R043 the interpreter went on to the next jump).
+        let narrow = [0x01, 0xd8, 0xeb, 0x00, 0x48, 0x83, 0xd2, 0x00, 0x83, 0xc6, 0x01, 0x0f, 0x05];
+        for (code, interpreted) in [(&wide[..], 1), (&narrow[..], 2)] {
+            for (a, b) in [(u64::MAX, 1u64), (5, 6), (0xffff_ffff, 1), (1 << 63, 1 << 63)] {
+                let set = |c: &mut Cpu| (c.reg[RAX], c.reg[RBX], c.reg[RDX], c.reg[RSI]) = (a, b, 10, 0);
+                let (c, _) = checked(code, &[], &set);
+                let carry = if code.len() == wide.len() { a.checked_add(b).is_none() } else { (a as u32).checked_add(b as u32).is_none() };
+                assert_eq!((c.reg[RDX], c.reg[RSI]), (10 + carry as u64, 1));
+                let mut m = guest(code, &[]);
+                let mut jit = Jit::new(false, 1).unwrap();
+                let mut c = Cpu::new(CODE, DATA + 4096);
+                set(&mut c);
+                assert!(matches!(jit.run(&mut c, &mut m), Event::Syscall));
+                assert_eq!(jit.stats.in_blocks, c.steps - interpreted);
+            }
+        }
     }
 }
