@@ -3490,3 +3490,12 @@ to 5% slower in one round were 0.98 to 1.02 in two more).
 Still under 2 and next: a kept connection by the client's clock (what the client
 and the port cost is not measured: a floor is wanted, a native arm64 server of the
 same kind), uvicorn on a new connection (1.9), nginx's worker on a kept one (1.5).
+
+### R040 and R041 held to the real machine (2026-11-26, later the same day)
+
+Owed since both: the expected lines of the two TLS cases and of the goal's case were
+what r64m and QEMU agreed on. hal was reached, the image `r64m-goal:amd64` copied to it
+(`docker save`, 153 MB; `python:3.13-slim` was there already), and the cases' own
+command lines run there natively: `TLSv1.3 TLS_AES_256_GCM_SHA384 Hello, world` twice,
+and `200 nginx Hello, world`, `0`, `20`, exit code 0. **The same lines as the test
+data, which now says so.** A scratch folder `/tmp/r041-1126` is left on hal.

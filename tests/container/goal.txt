@@ -4,8 +4,8 @@
 # passing to it, twenty requests from a Python client that checks the certificate, the
 # two servers told to end, and how many requests uvicorn says it answered. The image is
 # python:3.13-slim with Debian's nginx and PyPI's fastapi and uvicorn added (R041).
-# Not yet held to the real machine (hal was out of reach on 2026-11-26): the lines are
-# what r64m and user-mode QEMU both printed.
+# The lines are what the real machine printed (hal, with the same image copied to it;
+# 2026-11-26).
 $$ mkdir -p /tmp/goal && cd /tmp/goal && printf '%s\n' 'from fastapi import FastAPI' 'from fastapi.responses import PlainTextResponse' 'app = FastAPI()' '@app.get("/", response_class=PlainTextResponse)' 'def hello():' '    return "Hello, world"' > app.py && printf '%s\n' 'worker_processes 1;' 'pid /tmp/goal/nginx.pid;' 'error_log /tmp/goal/error.log;' 'events { worker_connections 64; }' 'http { access_log off; server { listen 8443 ssl; ssl_certificate /tmp/goal/goal.crt; ssl_certificate_key /tmp/goal/goal.key;' 'location / { proxy_pass http://127.0.0.1:8000; } } }' > nginx.conf && openssl req -x509 -newkey rsa:2048 -nodes -keyout goal.key -out goal.crt -days 30 -subj /CN=localhost -addext subjectAltName=DNS:localhost 2>/dev/null && { python3 -m uvicorn app:app --host 127.0.0.1 --port 8000 > uvicorn.log 2>&1 & } && U=$! && nginx -c /tmp/goal/nginx.conf && N=$(cat nginx.pid) && i=0 && while [ $i -lt 600 ] && ! grep -q 'Uvicorn running' uvicorn.log; do sleep 1; i=$((i+1)); done; python3 -c 'import ssl, urllib.request as u; r = [u.urlopen("https://localhost:8443/", context=ssl.create_default_context(cafile="goal.crt"), timeout=60) for _ in range(20)][-1]; print(r.status, r.headers["Server"].split("/")[0], r.read().decode())'; echo $?; kill $N $U; wait $U; while [ -e nginx.pid ]; do sleep 1; done; grep -c 'GET / HTTP/1.0" 200 OK' uvicorn.log
 200 nginx Hello, world
 0
