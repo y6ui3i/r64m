@@ -4801,3 +4801,32 @@ does the two; the tool for it in Rust is owed"). `cargo xtask install`,
   r64m's; uninstall → it is the program's alone, QEMU runs it; install again →
   r64m's; the JVM's image by `docker run` answers its version. Not tried: Docker
   Desktop, a Linux host with no VM.
+
+### Before the repository is made public: what its history holds (2026-11-27)
+
+The owner: 「監査を進める」. Not an experiment: the look that comes before a
+repository of the owner's is made public. Every commit of every branch (162; `main`
+and `port`, no tags), as one text of all their changes, and what GitHub holds
+beside them.
+
+- Files that ever were: 72 paths, all source, tests, documents, three
+  Dockerfiles, the CI's file. None of the kinds that hold secrets (no `.env`,
+  key, certificate store, database, state file); no blob over 300 KB.
+- Searched for: access keys and tokens by their forms (AWS, GitHub, Slack,
+  Google, `sk-`, private key blocks, JWTs): none. The words password, secret,
+  token, credential, API key, bearer: one line, a case that reads `/etc/passwd`
+  in a container. The JVM's case gives `keytool` a store password, `changeit`,
+  for a store it makes and throws away.
+- Who and where: every commit is by the owner's GitHub no-reply address. No
+  e-mail address, no home directory's path, no address of a machine but
+  127.0.0.1, no hardware address. The owner's name is in LICENSE. `hal` is named
+  as the real machine many times, by that name only; one line says it was out
+  of reach "(the VPN)".
+- The ledger quotes the owner's words, in Japanese, where a card begins by them
+  (about seventy places). They are instructions about the work; the owner's to
+  say whether they stay.
+- GitHub: no pull request, no issue, no release, no wiki, no secret set for
+  Actions. The CI's past runs and their logs become readable with the
+  repository; they hold what the tests print.
+- `main` is 30 or so commits behind `port` (it has R050's state): what a visitor
+  sees first. Whether it is brought up before the change is the owner's word.
