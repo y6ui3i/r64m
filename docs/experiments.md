@@ -4782,3 +4782,22 @@ the fault without the fix and never with it; 96 JVM runs of eight at once after:
   container cases by the interpreter, the JIT and the JIT checked (264 runs of
   88 cases, the two new ones among them): all pass. (The three ways had not
   been run since before R055.)
+
+### R049's tool, in Rust (2026-11-27)
+
+The owner: 「もう公開してもいいかな？ … Docker に組み込む手順がないか」 and
+「戻し方も書こうか」. Not an experiment: what R049 left owed ("a scratch script
+does the two; the tool for it in Rust is owed"). `cargo xtask install`,
+`uninstall` and `status`, and the README's section for them.
+
+- The list is written by this same tool, built for arm64 Linux and started in a
+  container with every right, in an image made of r64m and the tool and nothing
+  else (`FROM scratch`): no shell, no image fetched. The list is mounted by the
+  kernel's call made by hand (xtask has no dependencies).
+- r64m's file is the image's own: the kernel holds it open (flag F) after the
+  container and its files are gone. (The scratch script copied it to a volume
+  first; that was not needed.)
+- Tried on the Mac (OrbStack): install → a container's own command line is
+  r64m's; uninstall → it is the program's alone, QEMU runs it; install again →
+  r64m's; the JVM's image by `docker run` answers its version. Not tried: Docker
+  Desktop, a Linux host with no VM.

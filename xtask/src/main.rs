@@ -7,6 +7,9 @@
 //!   cargo xtask container [--ways W] [--jobs N] [SUITE ...]
 //!                                      programs of x86-64 images, held to the real machine
 //!   cargo xtask ci [--ways W]          all of the above that this host can run
+//!   cargo xtask install                r64m made Docker's runner of x86-64 images here
+//!   cargo xtask uninstall              and taken away again
+//!   cargo xtask status                 whether it is, and what else is registered
 //!
 //! The same commands are what the CI runs (.github/workflows/ci.yml): what passes
 //! here passes there.
@@ -241,10 +244,110 @@ fn container(mut args: Vec<String>) -> bool {
     failed.is_empty()
 }
 
+// ---- Docker's runner of x86-64 images ---------------------------------------------
+//
+// The kernel that runs the containers (the VM's, with Docker on a Mac) starts a
+// program it cannot run itself by what is registered with `binfmt_misc`. `install`
+// registers r64m there for x86-64 programs (R049); an entry made later is asked
+// first, so QEMU's or Rosetta's, if there is one, is left as it is and comes back
+// to work when r64m's is removed. The list can only be written from inside that
+// kernel's world with every right: by a container started `--privileged`. The
+// container's image is made here of two files and nothing else: r64m, and this
+// program built for arm64 Linux, which does the writing.
+
+/// The image of the two files, and the entry's name in the kernel's list.
+const HELPER: &str = "r64m-install";
+const ENTRY: &str = "r64m";
+const BINFMT: &str = "/proc/sys/fs/binfmt_misc";
+
+/// The line that registers r64m: programs that begin as a 64-bit little-endian ELF
+/// file for x86-64, a program or a shared object (the mask passes over the
+/// system's own byte and the low bit of the type). Flag P: r64m is given the
+/// program's path and then the first argument the program was started with (it
+/// knows this order by its name, `r64m-binfmt`). Flag F: the kernel opens r64m's
+/// file now and holds it, so every container finds it whatever its own files are.
+const RULE: &str = r":r64m:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x3e\x00:\xff\xff\xff\xff\xff\xfe\xfe\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:/r64m-binfmt:PF";
+
+/// Builds r64m and this program for arm64 Linux and makes the image of them.
+fn helper() {
+    must(cargo().args(["build", "--release", "--target", LINUX]));
+    must(cargo().args(["build", "--release", "--manifest-path", "xtask/Cargo.toml", "--target", LINUX]));
+    let dir = root().join("target/install");
+    std::fs::create_dir_all(&dir).unwrap_or_else(|e| fail(format_args!("{}: {e}", dir.display())));
+    for (from, to) in [(root().join("target").join(LINUX).join("release/r64m"), "r64m-binfmt"), (root().join("xtask/target").join(LINUX).join("release/xtask"), "xtask")] {
+        std::fs::copy(&from, dir.join(to)).unwrap_or_else(|e| fail(format_args!("{}: {e}", from.display())));
+    }
+    std::fs::write(dir.join("Dockerfile"), "FROM scratch\nCOPY r64m-binfmt xtask /\nENTRYPOINT [\"/xtask\"]\n").unwrap_or_else(|e| fail(format_args!("{}: {e}", dir.display())));
+    must(Command::new("docker").args(["build", "--quiet", "--platform", "linux/arm64", "--tag", HELPER]).arg(&dir));
+}
+
+/// Runs this program in the image, with every right, for one of the three commands.
+fn in_the_kernels_world(command: &str) -> bool {
+    helper();
+    ran(Command::new("docker").args(["run", "--rm", "--privileged", "--platform", "linux/arm64", HELPER, command]))
+}
+
+/// The kernel's list, mounted if this container does not see it yet.
+fn list() -> PathBuf {
+    let dir = PathBuf::from(BINFMT);
+    if !dir.join("register").exists() && !(mount_the_list() && dir.join("register").exists()) {
+        fail(format_args!("{BINFMT} is not to be had: this must run in a container started with --privileged, on a kernel with binfmt_misc"));
+    }
+    dir
+}
+
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+fn mount_the_list() -> bool {
+    // mount("binfmt_misc", BINFMT, "binfmt_misc", 0, null): the kernel's call 40, made
+    // by hand: this crate has no dependencies.
+    let (source, kind) = (c"binfmt_misc", c"binfmt_misc");
+    let target = std::ffi::CString::new(BINFMT).expect("no zero in it");
+    let answer: i64;
+    unsafe {
+        std::arch::asm!("svc 0", in("x8") 40u64, inlateout("x0") source.as_ptr() as i64 => answer, in("x1") target.as_ptr(), in("x2") kind.as_ptr(), in("x3") 0u64, in("x4") 0u64, options(nostack));
+    }
+    answer == 0
+}
+
+#[cfg(not(all(target_os = "linux", target_arch = "aarch64")))]
+fn mount_the_list() -> bool {
+    false
+}
+
+fn write_to(file: &Path, what: &str) {
+    use std::io::Write;
+    let done = std::fs::OpenOptions::new().write(true).open(file).and_then(|mut f| f.write_all(what.as_bytes()));
+    done.unwrap_or_else(|e| fail(format_args!("{}: {e}", file.display())));
+}
+
+/// What the kernel says of r64m's entry and which others there are.
+fn say_the_list(dir: &Path) {
+    match std::fs::read_to_string(dir.join(ENTRY)) {
+        Ok(entry) => println!("r64m is registered:\n{}", entry.trim_end()),
+        Err(_) => println!("r64m is not registered"),
+    }
+    let mut others: Vec<String> = std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n != ENTRY && n != "register" && n != "status").collect();
+    others.sort();
+    println!("the other entries: {}", if others.is_empty() { "none".to_string() } else { others.join(", ") });
+}
+
+/// The three commands as the container runs them.
+fn in_the_container(command: &str) {
+    let dir = list();
+    let entry = dir.join(ENTRY);
+    if matches!(command, "registers" | "unregisters") && entry.exists() {
+        write_to(&entry, "-1");
+    }
+    if command == "registers" {
+        write_to(&dir.join("register"), RULE);
+    }
+    say_the_list(&dir);
+}
+
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
-        fail("test | guest | images | container | ci (see xtask/src/main.rs)");
+        fail("test | guest | images | container | ci | install | uninstall | status (see xtask/src/main.rs)");
     }
     let command = args.remove(0);
     let ok = match command.as_str() {
@@ -255,6 +358,13 @@ fn main() {
             true
         }
         "container" => container(args),
+        "install" => in_the_kernels_world("registers"),
+        "uninstall" => in_the_kernels_world("unregisters"),
+        "status" => in_the_kernels_world("says"),
+        "registers" | "unregisters" | "says" => {
+            in_the_container(&command);
+            true
+        }
         "ci" => {
             let ways = option(&mut args, "--ways").unwrap_or_else(|| "jit".to_string());
             // Each is run even if one before failed: one run says all that is wrong.

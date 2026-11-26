@@ -188,6 +188,50 @@ CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld \
     cargo build --release --target aarch64-unknown-linux-musl
 ```
 
+## Running x86-64 images with Docker
+
+On an arm64 machine Docker runs an x86-64 image by whatever the kernel of its
+containers has registered for x86-64 programs (`binfmt_misc`): QEMU, as a rule.
+r64m is put in that place by one command, and taken out by another. Needed: Docker
+(tried with OrbStack on a Mac; the kernel is the VM's), Rust with the target
+`aarch64-unknown-linux-musl`, and the right to start a container `--privileged`,
+which is how the kernel's list is written.
+
+```sh
+cargo xtask install      # builds r64m for arm64 Linux and registers it
+cargo xtask status       # what the kernel says of r64m's entry, and the other entries
+docker run --rm --platform linux/amd64 alpine cat /proc/self/cmdline | tr '\0' ' '
+                         # under r64m: "/proc/self/exe --jit --quiet ..."; under QEMU: "cat ..."
+```
+
+From then on every x86-64 container of that kernel runs under r64m, with nothing
+in the `docker` command that names it: `docker run --platform linux/amd64 IMAGE`.
+
+To put things back as they were:
+
+```sh
+cargo xtask uninstall    # removes r64m's entry; what was registered before runs again
+```
+
+What to know:
+
+- QEMU's entry (or Rosetta's) is not touched. The kernel asks the entry made last
+  first, so r64m's is asked while it is there, and the other answers again when it
+  is gone. Containers already running go on as they were started.
+- The entry does not outlive the kernel: after the VM (OrbStack, Docker Desktop) or
+  the machine is started again, x86-64 runs as before the install, and
+  `cargo xtask install` is run again.
+- The kernel holds r64m's file as it was when registered. After a new build,
+  `cargo xtask install` again.
+- `install` makes a small image, `r64m-install`, of two files and nothing else
+  (r64m and the tool that writes the entry); `docker rmi r64m-install` removes it,
+  after `uninstall`.
+- What is different from QEMU's entry: a program whose file is set-user-ID is not
+  given that user, and `ps` in a container shows r64m's own command line before
+  the program's.
+
+## Tests
+
 `cargo test` holds r64m's traces to the real CPU's. The cases and the traces are g64m's
 and are read from its checkout, beside this one or where `R64M_G64M` says; `nasm` builds
 the cases. Without the checkout those tests are shown as ignored.
