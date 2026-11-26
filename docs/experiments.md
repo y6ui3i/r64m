@@ -4014,3 +4014,40 @@ not seen to run x86-64 again afterwards. The entry is still registered as this i
 written (every x86-64 container of the VM runs under r64m until it is removed by
 `echo -1` to the entry, or the VM restarts). Whether it stays is the owner's to
 say.
+
+## R050: the goal in unchanged images, two containers on Docker's network (2026-11-26)
+
+For ADR 0020's points 1 and 3. The owner: 「登録したまま」 (R049's entry stays), and of
+the network: 「負荷を掛けて NW が足かせになるならそこも見直そうか」; of memory: 「メモリの問題も
+あるけど」.
+
+The card, written before the run.
+
+- **Hypothesis**: with r64m registered, the goal's request completes in the
+  ordinary images unchanged, each in a container of its own, by `docker run` alone:
+  `python:3.13-slim` installs FastAPI and uvicorn with its own `pip` and serves;
+  the official `nginx:alpine`, given a configuration and a certificate as files,
+  takes TLS and passes to the other by its name on a network Docker made. What is
+  new to r64m in that is little: a name looked up through Docker's resolver (UDP),
+  and `pip` (a long Python program, its own TLS to the outside). Under load from
+  several connections at once the two servers' time is the guest's code as before
+  (R042: system time a few percent), so the network is not what holds it back; and
+  each process of r64m holds tens of megabytes more than the program it runs,
+  most of it the tables each process has of its own (R024's note for M11).
+- **What is changed from before** (R049): nothing in r64m unless something stops.
+  The same downloads as were allowed for R041 (`fastapi`, `uvicorn` from PyPI),
+  made by the container itself this time.
+- **Next move for each result**:
+  - The request completes → the rate under load (1, 4 and 16 connections kept
+    open, from the Mac), each server process's user and system time, and its
+    resident memory beside the same program's on hal
+  - System time is a large share under load (a third or more) → what calls are
+    made for each request is counted with `--calls`, and how r64m hands each on
+    is looked at: that is the owner's "looked at again"
+  - Memory for a process is what the hypothesis says or more → which table holds
+    it is measured (the reservation is not resident; the tables are), and a card
+    for making them smaller follows; nothing is changed here
+  - Something stops → mended if small, as in R047
+- **Cut-off**: the request; one run of each load; the memory of each process
+  once. QEMU beside it is not measured here: the entry stays registered by the
+  owner's word, and QEMU cannot be chosen while it is.
