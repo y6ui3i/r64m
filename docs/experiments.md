@@ -4326,3 +4326,36 @@ says the thread and the top of the guest's stack.
 threads one after another in Python; 2,000 threads and a checked lock in C), run
 there in the same images as the suites give them, print what the cases expect and
 end with 0. The cases' notes now say so.
+
+## R053: a file's pages mapped, not copied (2026-11-26)
+
+The owner: 「作るか」, of the mapping of files. ADR 0020 sets no bar for memory;
+this is for what R050 and R051 measured: every process holds a copy of its own of
+each file it maps privately (a C library, Python's modules of C: 15 MB in
+uvicorn; an nginx worker holds 18.8 MB where the real machine's holds 6.6).
+
+The card, written before the run.
+
+- **Hypothesis**: a private mapping of a file can be the host's own (`MAP_PRIVATE`
+  of the guest's descriptor, put at the place in the guest's memory), as R048's
+  shared one is: the kernel then keeps one copy of the file's pages for all
+  processes and gives a process its own only of the pages it writes, as it does
+  for the same program on the real machine. The pages no longer count as the
+  process's own (anonymous) memory, a program's start reads less, and nothing a
+  program can see changes but what Linux itself does differently from a copy:
+  a page wholly past the file's end is a fault (SIGBUS), not zeroes.
+- **What is changed from before** (R052): `mmap` of a file without `MAP_SHARED`
+  goes the way of R048's shared mapping with the host's flag private, where the
+  host's page is 4 KB (Linux); elsewhere it is the copy it was. Then, if that
+  holds, the program's own file and its interpreter's, which r64m's loader reads
+  whole and copies (Node's is 130 MB).
+- **Next move for each result**:
+  - The suites pass three ways and uvicorn's own memory falls by about the 15 MB
+    → the loader's segments mapped the same way, measured on Node and on nginx's
+    workers
+  - A suite fails → what the case does with the mapping (a write through it, a
+    protection changed, code translated from it and then changed) is made a unit
+    test of `Mem`, and fixed there
+  - The memory does not fall (the pages are written anyway: relocations) → said
+    with the numbers, and the copy kept: nothing is changed for no gain
+- **Cut-off**: `mmap` and its measurement today; the loader only if the first holds.
