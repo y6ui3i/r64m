@@ -435,7 +435,10 @@ impl Jit {
             if let Some(what) = differs(&want, c, &written, m) {
                 let block = &self.blocks[id];
                 let (n, from) = (block.starts.len(), block.first);
-                return Err(format!("the block of {n} instructions at {from:#x}: {what}"));
+                // With the block's own bytes: what it is can then be read at once.
+                let (code, have) = m.code_at(from);
+                let bytes = unsafe { std::slice::from_raw_parts(code, have.min((block.guest.1 - from) as usize).min(48)) };
+                return Err(format!("the block of {n} instructions at {from:#x} ({bytes:02x?}): {what}"));
             }
         }
         Ok(true)
@@ -453,10 +456,22 @@ impl Jit {
         // ran here was noted and never looked for, and a guest in a loop without
         // calls went round for ever. About two runs in a hundred under load.)
         let mut alone = c.clone();
+        // The flags as the record says them: the pass through the block before may
+        // have been one that was not compared, and then nothing worked them out.
+        cpu::settle(&mut alone);
         m.log_writes();
         let mut whole = true;
         for _ in 0..n {
+            let (at, count) = (alone.rip, alone.reg[cpu::RCX]);
             if !matches!(cpu::step(&mut alone, m), Ok(Step::Next)) {
+                whole = false;
+                break;
+            }
+            // A repeated move or store that the interpreter does one element at a
+            // time (its two places overlap): it stays where it is and has counted
+            // RCX down by one. A block does all of it or leaves it (R054), and there
+            // may be millions to do: this pass through the block is not compared.
+            if alone.rip == at && alone.reg[cpu::RCX] != count {
                 whole = false;
                 break;
             }
@@ -3345,5 +3360,159 @@ mod tests {
         jit.guest_changed(CODE, CODE + 4096, &mut m);
         assert!(jit.pads.is_empty());
         assert_ne!(jit.table[Jit::place(CODE + 13)][0], CODE + 13);
+    }
+
+    #[test]
+    fn a_compare_and_swap_and_a_swap_with_memory_are_in_blocks() {
+        // [lock] cmpxchg [rsi], rbx / ebx; sete dl; jc +3; add edx, 4; syscall:
+        // equal and not, the accumulator below and above what memory holds.
+        let values = [0u64, 1, 5, 0x7fff_ffff, 0x8000_0000, 0xffff_ffff, 0x1_0000_0005, 1 << 63, u64::MAX];
+        let after = [0x0f, 0x94, 0xc2, 0x72, 0x03, 0x83, 0xc2, 0x04, 0x0f, 0x05];
+        for (form, bits) in [(&[0xf0, 0x48, 0x0f, 0xb1, 0x1e][..], 64), (&[0x48, 0x0f, 0xb1, 0x1e], 64), (&[0xf0, 0x0f, 0xb1, 0x1e], 32), (&[0x0f, 0xb1, 0x1e], 32)] {
+            let mask = if bits == 64 { u64::MAX } else { 0xffff_ffff };
+            for &held in &values {
+                for &expected in &values {
+                    let code = [form, &after[..]].concat();
+                    let (c, m) = checked(&code, &held.to_le_bytes(), &|c| {
+                        (c.reg[RAX], c.reg[RBX], c.reg[RSI], c.reg[RDX]) = (expected, 0x1234_5678_9abc_def0, DATA, 0);
+                    });
+                    let same = held & mask == expected & mask;
+                    let now = m.read_u64(DATA).unwrap();
+                    if same {
+                        assert_eq!((now & mask, now & !mask, c.reg[RAX]), (0x1234_5678_9abc_def0 & mask, held & !mask, expected));
+                    } else {
+                        assert_eq!((now, c.reg[RAX]), (held, if bits == 64 { held } else { held & mask }));
+                    }
+                    assert_eq!(c.reg[RDX] & 1, same as u64);
+                    // All of it in blocks: the interpreter ran the SYSCALL only.
+                    assert_eq!(c.steps, if c.reg[RDX] & 4 != 0 { 5 } else { 4 });
+                }
+            }
+        }
+        // xchg [rsi], rbx / ebx; add edx, 1; syscall: the flags are left, and a jump
+        // after it reads those of the comparison before.
+        //   cmp edx, 1; xchg ...; jb +3; add edx, 4; syscall
+        for (form, bits) in [(&[0x48, 0x87, 0x1e][..], 64), (&[0x87, 0x1e], 32), (&[0xf0, 0x48, 0x87, 0x1e], 64)] {
+            let mask = if bits == 64 { u64::MAX } else { 0xffff_ffff };
+            for &held in &values {
+                for below in [0u64, 2] {
+                    let code = [&[0x83, 0xfa, 0x01][..], form, &[0x72, 0x03, 0x83, 0xc2, 0x04, 0x0f, 0x05]].concat();
+                    let (c, m) = checked(&code, &held.to_le_bytes(), &|c| (c.reg[RBX], c.reg[RSI], c.reg[RDX]) = (0x1111_2222_3333_4444, DATA, below));
+                    let now = m.read_u64(DATA).unwrap();
+                    assert_eq!((now & mask, now & !mask, c.reg[RBX]), (0x1111_2222_3333_4444 & mask, held & !mask, held & mask));
+                    assert_eq!(c.reg[RDX], if below == 0 { 0 } else { 6 });
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_short_repeated_move_or_store_is_a_loop_in_its_block() {
+        use crate::cpu::{RCX, RDI};
+        let data: Vec<u8> = (0..4096u32).map(|i| (i * 7 + 1) as u8).collect();
+        // rep movsq, movsd, movsb, stosq, stosd, stosb; then add edx, 1; syscall.
+        let forms: [&[u8]; 6] = [&[0xf3, 0x48, 0xa5], &[0xf3, 0xa5], &[0xf3, 0xa4], &[0xf3, 0x48, 0xab], &[0xf3, 0xab], &[0xf3, 0xaa]];
+        for form in forms {
+            // None, one, a few, the most a block does, and what is the interpreter's;
+            // to a place apart, and one byte on (each element's store is read by
+            // the next but one's load).
+            for count in [0u64, 1, 2, 5, 63, 64, 65, 200] {
+                for to in [DATA + 2048, DATA + 1] {
+                    let code = [form, &[0x83, 0xc2, 0x01, 0x0f, 0x05][..]].concat();
+                    let set = |c: &mut Cpu| {
+                        (c.reg[RAX], c.reg[RCX], c.reg[RSI], c.reg[RDI], c.reg[RDX]) = (0x0102_0304_0506_0708, count, DATA, to, 0);
+                        // As a program is run: all of a repetition in one step.
+                        c.rep_whole = true;
+                    };
+                    // (Where the two places overlap the interpreter goes an element
+                    // at a time, and the checker passes such a block over: there
+                    // the whole run is held to the interpreter's, not each block.)
+                    let c = if to == DATA + 1 {
+                        both(&mut Jit::new(false, 1).unwrap(), &mut guest(&code, &data), CODE, &set)
+                    } else {
+                        checked(&code, &data, &set).0
+                    };
+                    // (RCX is the SYSCALL's by now.)
+                    let bytes: u64 = if form.contains(&0x48) { 8 } else if form[1] & 1 == 1 { 4 } else { 1 };
+                    assert_eq!((c.reg[RDI], c.reg[RDX]), (to + count * bytes, 1));
+                    // As the interpreter counts: one for each repetition, one for none.
+                    assert_eq!(c.steps, count.max(1) + 2);
+                }
+            }
+        }
+        // The flags of a comparison before it are read by a jump after it, and
+        // by what follows the jump (uvicorn's start met this):
+        //   cmp qword [rbx], 0; rep movsb; jne +7; mov edx, 1; jmp +5; mov edx, 2;
+        //   adc edx, 0; sete al; syscall
+        let code = [0x48, 0x83, 0x3b, 0x00, 0xf3, 0xa4, 0x75, 0x07, 0xba, 1, 0, 0, 0, 0xeb, 0x05, 0xba, 2, 0, 0, 0, 0x83, 0xd2, 0x00, 0x0f, 0x94, 0xc0, 0x0f, 0x05];
+        for count in [0u64, 3, 63, 64, 100] {
+            for (held, way) in [(0u64, 1u64), (5, 2)] {
+                let mut data = data.clone();
+                data[3000..3008].copy_from_slice(&held.to_le_bytes());
+                let (c, _) = checked(&code, &data, &|c| {
+                    (c.reg[RBX], c.reg[RCX], c.reg[RSI], c.reg[RDI], c.reg[RDX]) = (DATA + 3000, count, DATA, DATA + 2048, 0);
+                    c.rep_whole = true;
+                });
+                // (The comparison's carry is clear; SETE reads the ADC's flags.)
+                assert_eq!((c.reg[RDX], c.reg[RAX] & 1), (way, 0), "{count} repetitions, {held} compared");
+            }
+        }
+        // The same not checked block by block, where a record that nothing in the
+        // block reads is left out: with too many repetitions for the block the
+        // interpreter runs the jump, and must find the comparison's record.
+        //   cmp qword [rbx], 0; rep movsb; jne +5; add edx, 1; syscall; add edx, 2; syscall
+        // (Both ways write the flags over at once: nothing but the jump reads them.)
+        let code = [0x48, 0x83, 0x3b, 0x00, 0xf3, 0xa4, 0x75, 0x05, 0x83, 0xc2, 0x01, 0x0f, 0x05, 0x83, 0xc2, 0x02, 0x0f, 0x05];
+        for count in [3u64, 64, 100] {
+            for (held, way) in [(0u64, 1u64), (5, 2)] {
+                let mut data = data.clone();
+                data[3000..3008].copy_from_slice(&held.to_le_bytes());
+                let set = |c: &mut Cpu| {
+                    (c.reg[RBX], c.reg[RCX], c.reg[RSI], c.reg[RDI], c.reg[RDX]) = (DATA + 3000, count, DATA, DATA + 2048, 0);
+                    c.rep_whole = true;
+                };
+                let c = both(&mut Jit::new(false, 1).unwrap(), &mut guest(&code, &data), CODE, &set);
+                assert_eq!(c.reg[RDX], way, "{count} repetitions, {held} compared");
+            }
+        }
+        // Going down (std is the interpreter's, and so then is the move): as the
+        // interpreter has it.
+        //   std; rep movsb; add edx, 1; syscall
+        let (c, _) = checked(&[0xfd, 0xf3, 0xa4, 0x83, 0xc2, 0x01, 0x0f, 0x05], &data, &|c| {
+            (c.reg[RCX], c.reg[RSI], c.reg[RDI], c.reg[RDX]) = (5, DATA + 100, DATA + 200, 0);
+            c.rep_whole = true;
+        });
+        assert_eq!((c.reg[RSI], c.reg[RDX]), (DATA + 95, 1));
+        // A fault part of the way: what was done stays done, the registers say how
+        // far, and the count of instructions is the interpreter's. (Where the
+        // host's page is the guest's: on a larger one the host lets generated code
+        // store past the guest's page, as it does for every store.)
+        if guest(&[0x90], &[]).host_page() != 4096 {
+            return;
+        }
+        //   add edx, 1; rep stosq (to the last 24 bytes of the page and beyond)
+        let code = [0x83, 0xc2, 0x01, 0xf3, 0x48, 0xab, 0x0f, 0x05];
+        let set = |c: &mut Cpu| {
+            (c.reg[RAX], c.reg[RCX], c.reg[RDI], c.reg[RDX]) = (9, 10, DATA + 4096 - 24, 0);
+            c.rep_whole = true;
+        };
+        let mut alone = Cpu::new(CODE, DATA + 4096);
+        set(&mut alone);
+        let mut m = guest(&code, &data);
+        let stopped = loop {
+            match cpu::step(&mut alone, &mut m) {
+                Ok(_) => {}
+                Err(stop) => break stop,
+            }
+        };
+        let mut m = guest(&code, &data);
+        let mut jit = Jit::new(false, 1).unwrap();
+        let mut c = Cpu::new(CODE, DATA + 4096);
+        set(&mut c);
+        let Event::Stop(stop) = jit.run(&mut c, &mut m) else { panic!("no fault") };
+        assert_eq!(format!("{stop:?}"), format!("{stopped:?}"));
+        assert_eq!((c.reg[RCX], c.reg[RDI], c.rip, c.steps), (alone.reg[RCX], alone.reg[RDI], alone.rip, alone.steps));
+        assert_eq!((c.reg[RCX], m.read_u64(DATA + 4096 - 8)), (7, Ok(9)));
+        assert!(jit.stats.faults >= 1);
     }
 }

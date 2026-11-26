@@ -27,6 +27,9 @@ use std::mem::offset_of;
 
 /// The most instructions in one block.
 const MOST: usize = 64;
+/// A REP MOVS or REP STOS of this many elements or more is the interpreter's (a
+/// power of two).
+const MOST_REPEATS: u64 = 64;
 
 // Scratch, and the record of the flags.
 const T0: u8 = 16;
@@ -188,10 +191,14 @@ fn read(bytes: &[u8], rip: u64) -> Option<Ins> {
     // 67h (addresses of 32 bits) is read where there is no address for it to change:
     // hand-written code pads with it (R043).
     let mut p67 = false;
+    // LOCK is read before the one instruction that is translated as one act whether
+    // it has it or not (CMPXCHG of memory), and before XCHG, which is one without.
+    let mut lock = false;
     let mut seg = 0;
     let mut b = next(1)? as u8;
     loop {
         match b {
+            0xf0 => lock = true,
             0x66 => p66 = true,
             0xf3 => f3 = true,
             0xf2 => f2 = true,
@@ -210,7 +217,7 @@ fn read(bytes: &[u8], rip: u64) -> Option<Ins> {
     }
     let mut op = if b == 0x0f { 0x100 | next(1)? as u16 } else { b as u16 };
     // The opcodes that are their neighbour with 8-bit operands.
-    let byte = matches!(op, 0x00..=0x3f | 0x80 | 0x84 | 0x88 | 0x8a | 0xa8 | 0xc0 | 0xc6 | 0xd0 | 0xf6) && op & 1 == 0;
+    let byte = matches!(op, 0x00..=0x3f | 0x80 | 0x84 | 0x88 | 0x8a | 0xa4 | 0xa8 | 0xaa | 0xc0 | 0xc6 | 0xd0 | 0xf6) && op & 1 == 0;
     if byte {
         op |= 1;
     }
@@ -247,7 +254,10 @@ fn read(bytes: &[u8], rip: u64) -> Option<Ins> {
         0x01 | 0x03 | 0x09 | 0x0b | 0x21 | 0x23 | 0x29 | 0x2b | 0x31 | 0x33 | 0x39 | 0x3b => (true, 0),
         0x11 | 0x13 | 0x19 | 0x1b => (true, 0),
         0x1c8..=0x1cf => (false, 0),
-        0x63 | 0x85 | 0x89 | 0x8b | 0x8d | 0xd1 | 0xd3 | 0xf7 | 0xff => (true, 0),
+        0x63 | 0x85 | 0x87 | 0x89 | 0x8b | 0x8d | 0xd1 | 0xd3 | 0xf7 | 0xff => (true, 0),
+        // CMPXCHG; MOVS and STOS (with a count: see below).
+        0x1b1 => (true, 0),
+        0xa5 | 0xab => (false, 0),
         0x11e | 0x11f | 0x1b6 | 0x1b7 | 0x1bc | 0x1bd | 0x1be | 0x1bf => (true, 0),
         // BT, BTS, BTR, BTC by a register; by a constant (a group).
         0x1a3 | 0x1ab | 0x1b3 | 0x1bb => (true, 0),
@@ -356,18 +366,28 @@ fn read(bytes: &[u8], rip: u64) -> Option<Ins> {
     let field = ins.reg & 7;
     let register = matches!(ins.rm, Rm::Reg(_));
     // An operand of 8 or 16 bits is translated for the arithmetic and the moves only.
-    let small_ok = matches!(op, 0x01..=0x3b | 0x81 | 0x83 | 0x85 | 0x89 | 0x8b | 0xc1 | 0xc7 | 0xd1 | 0xf7 | 0x11e | 0x11f | 0x190..=0x19f | 0x90);
+    let small_ok = matches!(op, 0x01..=0x3b | 0x81 | 0x83 | 0x85 | 0x89 | 0x8b | 0xc1 | 0xc7 | 0xd1 | 0xf7 | 0x11e | 0x11f | 0x190..=0x19f | 0x90)
+        // MOVS and STOS of bytes.
+        || matches!(op, 0xa5 | 0xab) && size == 8;
     let small = size < 32;
     // ADC and SBB are translated at 32 and 64 bits.
     let with_carry = matches!(op, 0x11 | 0x13 | 0x19 | 0x1b) || matches!(op, 0x81 | 0x83) && matches!(field, 2 | 3);
     // F3h is REP RET before a return, part of ENDBR64 before the hint 0F 1Eh, and
     // nothing before BSF and BSR on a CPU without TZCNT and LZCNT.
-    let f3_ok = matches!(op, 0xc3 | 0x11e | 0x1bc | 0x1bd);
+    // And the count of MOVS and STOS.
+    let f3_ok = matches!(op, 0xc3 | 0x11e | 0x1bc | 0x1bd | 0xa5 | 0xab);
     // What is in the list above by its opcode but is not translated in this form.
     let refused = (small && !small_ok)
         || (small && with_carry)
         || (f3 && !f3_ok)
+        || (lock && !matches!(op, 0x1b1 | 0x87))
         || match op {
+            // MOVS and STOS with a count only (R054), addresses of 64 bits, the
+            // source in no segment.
+            0xa5 | 0xab => !f3 || p67 || seg != 0,
+            // XCHG and CMPXCHG of memory, at 32 and 64 bits (R054): each is one act
+            // of the host's.
+            0x87 | 0x1b1 => register || small,
             // XCHG with R8.
             0x90 => rex & 1 != 0,
             // The one field of C7h that is MOV.
@@ -421,7 +441,7 @@ fn flags_of(ins: &Ins) -> Flags {
         0xff if field == 6 => Flags::Kept,
         // UCOMIS and COMIS.
         0x12e | 0x12f => Flags::All,
-        0x01..=0x3b | 0x81 | 0x83 | 0x85 | 0x1bc | 0x1bd | 0x69 | 0x6b | 0x1af => Flags::All,
+        0x01..=0x3b | 0x81 | 0x83 | 0x85 | 0x1bc | 0x1bd | 0x69 | 0x6b | 0x1af | 0x1b1 => Flags::All,
         // TEST, NEG, MUL and IMUL write them; NOT, DIV and IDIV leave them.
         0xf7 if matches!(field, 0 | 3 | 4 | 5) => Flags::All,
         // A shift by a constant that is not zero; by CL it may be by nothing.
@@ -440,7 +460,7 @@ fn host_flags_of(ins: &Ins) -> Option<HostFlags> {
     let field = ins.reg & 7;
     match ins.op {
         0x01 | 0x03 | 0x11 | 0x13 => Some(HostFlags::Add),
-        0x19 | 0x1b | 0x29 | 0x2b | 0x39 | 0x3b => Some(HostFlags::Sub),
+        0x19 | 0x1b | 0x29 | 0x2b | 0x39 | 0x3b | 0x1b1 => Some(HostFlags::Sub),
         0x09 | 0x0b | 0x21 | 0x23 | 0x31 | 0x33 | 0x85 => Some(HostFlags::Logic),
         0x81 | 0x83 => Some(match field {
             0 | 2 => HostFlags::Add,
@@ -581,7 +601,13 @@ impl Scan<'_> {
                     // A shift by CL or a rotation leaves the host's flags no longer
                     // what a jump would ask (and a rotation may end the block); so
                     // does a division, which tests its operands with them.
-                    if matches!(ins.op, 0xc1 | 0xd1 | 0xd3 | 0xf7 | 0x1a3 | 0x1ab | 0x1b3 | 0x1bb | 0x1ba) || sse_spends_flags(ins.op) {
+                    // And a repeated move or store may leave the block for the
+                    // interpreter (too many, or going down: R054), which then runs
+                    // what follows with the record: a jump after it is not taken
+                    // to be answered by the host's flags, though in the block it
+                    // is. (Found by uvicorn's start: a comparison, a long REP MOVSB,
+                    // and the jump on the comparison.)
+                    if matches!(ins.op, 0xc1 | 0xd1 | 0xd3 | 0xf7 | 0x1a3 | 0x1ab | 0x1b3 | 0x1bb | 0x1ba | 0xa5 | 0xab) || sse_spends_flags(ins.op) {
                         host = None;
                     }
                     at = next;
@@ -982,6 +1008,87 @@ impl Emit<'_> {
             Some(Jump::Always) => self.put(a64::movz(false, T4, 1, 0)),
             Some(Jump::Never) => self.put(a64::movz(false, T4, 0, 0)),
             None => self.given_carry(),
+        }
+    }
+
+    /// The host's address of a memory operand, in T1: for the host's instructions
+    /// that take an address in one register (its atomics).
+    fn host_address(&mut self, rm: Rm) {
+        let Rm::Mem { base, index, disp } = rm else { unreachable!("an operand in memory") };
+        let at = self.address(base, index, disp);
+        self.put(a64::arith(true, false, false, T1, BASE, at, 0));
+    }
+
+    /// CMPXCHG of memory and a register (R054), with LOCK or without: the host's
+    /// compare-and-swap, one act. What memory held is compared with the A register,
+    /// which is given it if they differ; the flags are the comparison's. A fault is
+    /// at the one host instruction that touches memory, with nothing changed.
+    fn compare_and_swap(&mut self, wide: bool, src: u8, dst: Rm) {
+        self.host_address(dst);
+        self.put(a64::mov(true, T2, 0));
+        self.put(a64::casal(wide, T2, src, T1));
+        self.record(REC_SUB, if wide { 64 } else { 32 }, 0, Some(T2));
+        self.put(a64::arith(wide, true, true, a64::ZR, 0, T2, 0));
+        // (Of 32 bits what memory held has nothing above them; the register is
+        // left whole where they were equal, as x86 leaves it.)
+        self.put(a64::csel(true, 0, 0, T2, Cond::Eq));
+        self.flags = Some(HostFlags::Sub);
+    }
+
+    /// XCHG of memory and a register (R054): the host's swap, one act, as x86's is
+    /// with or without LOCK. The flags are left.
+    fn swap(&mut self, wide: bool, reg: u8, dst: Rm) {
+        self.host_address(dst);
+        self.put(a64::swpal(wide, reg, T2, T1));
+        self.put(a64::mov(wide, reg, T2));
+    }
+
+    /// REP MOVS or REP STOS of `bits` (R054), going up, of fewer than `MOST_REPEATS`
+    /// elements: a loop of the host's. With the direction flag set, more to do, or
+    /// begun already by the interpreter, it is the interpreter's, which does a long one at once as the host's own
+    /// copy. Each element is done whole before the registers say so, and the
+    /// count of instructions run goes on by one for each repetition after the
+    /// first, as the interpreter counts them: a fault part of the way leaves all as
+    /// x86 would. The host's flags are not touched.
+    fn repeat(&mut self, moves: bool, bits: u32, at: u64, n: usize) {
+        const RSI: u8 = 6;
+        const RDI: u8 = 7;
+        let direction = offset_of!(Cpu, rflags) as u32;
+        self.put(a64::mem_imm(Size::X, Op::Load, T0, CPU, direction));
+        self.put(a64::ubfx(T4, T0, 10, 1));
+        let down = self.w.len();
+        self.put(a64::cbz(true, true, T4, 0));
+        // (RF: the interpreter began this very instruction and was left part of
+        // the way, which it marks so; it clears the mark when it has done the rest.)
+        self.put(a64::ubfx(T4, T0, 16, 1));
+        let begun = self.w.len();
+        self.put(a64::cbz(true, true, T4, 0));
+        self.put(a64::lsr(true, T0, RCX, MOST_REPEATS.trailing_zeros()));
+        let many = self.w.len();
+        self.put(a64::cbz(true, true, T0, 0));
+        self.bail(&[down, begun, many], at, n);
+        let none = self.w.len();
+        self.put(a64::nop());
+        let top = self.w.len();
+        let element = size(bits);
+        let from = if moves {
+            self.mem(element, Op::Load, T2, RSI);
+            T2
+        } else {
+            0
+        };
+        self.mem(element, Op::Store, from, RDI);
+        if moves {
+            self.put(a64::arith_imm(true, false, false, RSI, RSI, bits / 8, false));
+        }
+        self.put(a64::arith_imm(true, false, false, RDI, RDI, bits / 8, false));
+        self.put(a64::arith_imm(true, true, false, RCX, RCX, 1, false));
+        let last = self.w.len();
+        self.put(a64::nop());
+        self.put(a64::arith_imm(true, false, false, RAN, RAN, 1, false));
+        self.put(a64::b(top as i32 - self.w.len() as i32));
+        for from in [none, last] {
+            self.w[from] = a64::cbz(true, false, RCX, (self.w.len() - from) as i32);
         }
     }
 
@@ -2234,6 +2341,9 @@ pub fn translate_as(m: &Mem, rip: u64, exact: bool, ordered: bool) -> Option<Bui
                 }
                 ended = true;
             }
+            0x1b1 => e.compare_and_swap(wide, reg, ins.rm),
+            0x87 => e.swap(wide, reg, ins.rm),
+            0xa5 | 0xab => e.repeat(ins.op == 0xa5, bits, at, starts.len() - 1),
             op if is_sse(op) => {
                 sse = true;
                 e.sse(&ins, at, starts.len() - 1);

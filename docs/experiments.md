@@ -4449,3 +4449,101 @@ The card, written before the run.
     its count) is built, the largest first, and the request measured after each
 - **Cut-off**: the division of the time today; no more than three changes built on
   it before the race is asked for.
+
+**Result (2026-11-26): the hypothesis was wrong; by the card's third branch three
+things were built, and a kept request is 13.5% shorter by the client's clock
+against the build before (the card needed 8%). The race with QEMU is not run yet.
+Beside it: the JVM fails one run in six when four run at once, in the builds
+before this one too; not understood.**
+
+Where the time is (2,000 kept requests, each thread's time from the kernel; r64m
+alone on the machine, not beside QEMU as in R046):
+
+| | ms a request |
+|---|---|
+| the client's clock | 1.61 to 1.73 |
+| uvicorn's loop (one thread), on a CPU | 1.13 to 1.20, of which system 0.05 |
+| uvicorn's pool's thread | 0.05 |
+| nginx's worker | 0.14 |
+| the rest (the client, the port, waiting for a CPU 0.17) | 0.30 |
+
+Nothing waits that need not: it is uvicorn's own thread in generated code. (R046's
+1.95 was with QEMU's servers on the same machine at the same moment.) A request is
+1.38 million of the guest's instructions; generated code was gone into 1,505 times
+and the interpreter ran 1,050 instructions for it: REP STOS 185, REP MOVS 158,
+LOCK CMPXCHG 108, XCHG with memory 150, and conditional jumps 320, most of them
+after one of those.
+
+Built:
+
+- **CMPXCHG of memory** at 32 and 64 bits, with LOCK or without: the host's
+  compare-and-swap (CASAL), then the comparison's flags and the A register.
+- **XCHG with memory** at 32 and 64 bits: the host's swap (SWPAL).
+- **REP MOVS and REP STOS** going up, of fewer than 64 elements: a loop in the
+  block that does not touch the host's flags; with more, with the direction flag
+  set, or begun already by the interpreter, it is the interpreter's (which does a
+  long one as the host's own copy). The count of instructions goes on as the
+  interpreter's does, a fault part of the way too.
+- Encodings held to clang's (266 now).
+
+Three things found on the way:
+
+- **A real fault, in the new work**: a comparison, a long REP MOVSB, and the jump
+  on the comparison. The scan that decides whether a record of the flags is
+  needed took the jump to be answered by the host's flags, as it is while the
+  block runs on; but a long repetition leaves the block, and the interpreter then
+  ran the jump with flags nobody had recorded. uvicorn stopped at its start with a
+  read of address 8. The scan now takes a repetition for what may leave. A unit
+  case (it fails without the change).
+- The checker (`--jit-check`) ran a repetition that the interpreter does element
+  by element (its places overlap) as one instruction of the block: with p_fill's
+  millions it never ended. Such a pass through a block is now not compared; and
+  the checker's copy works the flags out from the record before it steps (a pass
+  not compared left them not worked out, and the next comparison differed for
+  nothing). The checker's message names the block's bytes.
+- **The same hazard is older than this card and is not closed**: any instruction
+  of a block that faults at a store (a store to a page that holds translated
+  code, which the interpreter then makes) leaves the block the same way, and a
+  jump after it in the same block was taken to be answered by the host's flags.
+  Not seen to fail; owed a card.
+
+| a kept request, eight pairs one after the other | the build before (R053) | this one | |
+|---|---|---|---|
+| the client's clock, median | 1.713 ms | 1.482 ms | 13.5% shorter |
+| uvicorn's loop on a CPU, median | 1.19 ms | 0.99 ms | 17% |
+| the interpreter's instructions a request | 1,050 | 400 | |
+| times generated code is gone into | 1,505 | 952 | |
+
+If QEMU's side is what it was in R046, the ratio is near 2.1; only the race says.
+
+**The JVM under load.** The JVM's case of making a key failed in the full run of
+the suites and then one run in six of the same case run alone again and again
+beside another. The JVM's own report: SIGSEGV in `CodeHeap::allocate`,
+`NativeJump::patch_verified_entry`, `ciEnv::register_method`: where it writes its
+own code. Run alone, one at a time: 16 of 16 pass. Four at once, 60 seconds each
+at most:
+
+| build | passed | SIGSEGV | hung |
+|---|---|---|---|
+| R052's | 31 of 32 | 0 | 0 (one ended with r64m's own code 2) |
+| R053's (before this card) | 37 of 48 | 10 | 1 |
+| R053's with `--copy-files` | 26 of 32 | 4 | 2 |
+| this card's, REP in blocks | 20 of 24 | 2 | 2 |
+| this card's, without REP in blocks | 28 of 32 | 3 | 1 |
+| this card's, without, files copied, the program read not through a mapping | 31 of 32 | 1 | 0 |
+
+So it is not of this card's making, and it is there since R053 at the latest. A
+first round with each of the three new translations switched off in turn said
+"REP" (24 of 24 without it); the next round without it failed 4 of 32: the first
+was chance. That was two rounds too many of one kind of test (the counts are too
+small to tell builds apart at one failure in six), and several runs were started
+with no limit of time and waited for while they hung: an hour was lost so. What
+is needed is the JVM's report in full for one failure (the address it could not
+write and what was mapped there), which was not got: a card of its own, and it
+is ADR 0020's point 3.
+
+Tests: 120 unit tests on macOS, 121 on Linux, plain and ordered; 62 programs four
+ways; primitives 116, traces 39; the container suites by the JIT, all; three ways
+before the last change of the scan's neighbours: all but two runs (the JVM's, as
+above, and Python's timer under the checker while five suites ran at once, as in
+R052).

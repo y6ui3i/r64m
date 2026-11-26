@@ -309,6 +309,19 @@ pub fn csel(wide: bool, rd: u8, rn: u8, rm: u8, cond: Cond) -> u32 {
     sf(wide) | 0x1a80_0000 | r(rm) << 16 | (cond as u32) << 12 | r(rn) << 5 | r(rd)
 }
 
+/// CASAL: if the memory at `rn` holds what `rs` does, `rt` is stored there; either
+/// way `rs` is given what the memory held. One act to every other thread, and with
+/// the order of an acquiring load and a releasing store (ARMv8.1's atomics).
+pub fn casal(wide: bool, rs: u8, rt: u8, rn: u8) -> u32 {
+    (if wide { 0xc8e0_fc00 } else { 0x88e0_fc00 }) | r(rs) << 16 | r(rn) << 5 | r(rt)
+}
+
+/// SWPAL: `rs` is stored in the memory at `rn` and `rt` given what was there, as one
+/// act, ordered as CASAL is.
+pub fn swpal(wide: bool, rs: u8, rt: u8, rn: u8) -> u32 {
+    (if wide { 0xf8e0_8000 } else { 0xb8e0_8000 }) | r(rs) << 16 | r(rn) << 5 | r(rt)
+}
+
 /// One if the condition holds, else zero.
 pub fn cset(wide: bool, rd: u8, cond: Cond) -> u32 {
     sf(wide) | 0x1a9f_07e0 | (cond.not() as u32) << 12 | r(rd)
@@ -584,6 +597,12 @@ mod tests {
     fn the_bits_are_the_assemblers() {
         let cases: &[(u32, u32, &str)] = &[
             (movz(true, 5, 0x1234, 0), 0xd2824685, "movz x5, #0x1234"),
+            // (clang -march=armv8.3-a, 2026-11-26.)
+            (casal(true, 25, 3, 17), 0xc8f9fe23, "casal x25, x3, [x17]"),
+            (casal(false, 25, 3, 17), 0x88f9fe23, "casal w25, w3, [x17]"),
+            (swpal(true, 3, 25, 17), 0xf8e38239, "swpal x3, x25, [x17]"),
+            (swpal(false, 3, 25, 17), 0xb8e38239, "swpal w3, w25, [x17]"),
+            (csel(true, 0, 0, 25, Cond::Eq), 0x9a990000, "csel x0, x0, x25, eq"),
             (movz(true, 5, 0x1234, 16), 0xd2a24685, "movz x5, #0x1234, lsl #16"),
             (movz(true, 17, 0xffff, 48), 0xd2fffff1, "movz x17, #0xffff, lsl #48"),
             (movk(true, 5, 0xabcd, 32), 0xf2d579a5, "movk x5, #0xabcd, lsl #32"),
@@ -850,7 +869,7 @@ mod tests {
         for (ours, theirs, name) in cases {
             assert_eq!(ours, theirs, "{name}: {ours:08x}, the assembler {theirs:08x}");
         }
-        assert_eq!(cases.len(), 261);
+        assert_eq!(cases.len(), 266);
     }
 
     #[test]
