@@ -412,12 +412,25 @@ fn ask_x86_order() -> bool {
     unsafe { libc::prctl(0x4d4d_444c, 1 as libc::c_ulong, 0 as libc::c_ulong, 0 as libc::c_ulong, 0 as libc::c_ulong) == 0 }
 }
 
-/// The end of one thread of the guest's (see `sys::end_thread`).
-pub fn end_thread(m: &mut Mem, s: &Sys, code: i32) -> ! {
+/// What the kernel does for a thread that ends, before the host's thread does: the
+/// word the guest asked to have cleared is cleared and one who waits on it woken.
+/// No signal is taken by the thread from here: none of the guest's can be delivered
+/// to it any more, and the kernel will give those of the process to another.
+pub fn thread_ends(m: &mut Mem, s: &Sys) {
+    unsafe {
+        let mut all: libc::sigset_t = std::mem::zeroed();
+        libc::sigfillset(&mut all);
+        libc::pthread_sigmask(libc::SIG_SETMASK, &all, std::ptr::null_mut());
+    }
     if s.clear_tid != 0 && m.write_u32(s.clear_tid, 0).is_ok() {
         // FUTEX_WAKE, one waiter.
         let _ = raw(libc::SYS_futex, [m.base() as u64 + s.clear_tid, 1, 1, 0, 0, 0]);
     }
+}
+
+/// The end of the guest's first thread while others go on (see `sys::end_thread`).
+pub fn end_thread(m: &mut Mem, s: &Sys, code: i32) -> ! {
+    thread_ends(m, s);
     // The host's thread, and nothing after it of r64m's: no more of the guest's
     // memory is touched.
     unsafe { libc::syscall(libc::SYS_exit, code as libc::c_long) };

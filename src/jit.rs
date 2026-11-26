@@ -284,6 +284,11 @@ impl Code {
         }
     }
 
+    /// How many instructions are written.
+    pub fn used(&self) -> usize {
+        self.used
+    }
+
     /// Forgets everything written: the next is written at the start again.
     pub fn empty(&mut self) {
         self.used = 0;

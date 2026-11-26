@@ -87,3 +87,10 @@ TLSv1.3 TLS_AES_256_GCM_SHA384 Hello, world
 $$ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout /tmp/tls-ec.key -out /tmp/tls-ec.crt -days 30 -subj /CN=localhost -addext subjectAltName=DNS:localhost 2>/dev/null && python3 -c 'import ssl,socket,threading as T; c=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); c.load_cert_chain("/tmp/tls-ec.crt","/tmp/tls-ec.key"); l=socket.create_server(("127.0.0.1",0)); f=lambda: (lambda s: (s.recv(99), s.sendall(b"Hello, world"), s.close()))(c.wrap_socket(l.accept()[0], server_side=True)); t=T.Thread(target=f); t.start(); s=ssl.create_default_context(cafile="/tmp/tls-ec.crt").wrap_socket(socket.create_connection(l.getsockname()), server_hostname="localhost"); s.sendall(b"hi"); print(s.version(), s.cipher()[0], s.recv(99).decode()); t.join()'
 TLSv1.3 TLS_AES_256_GCM_SHA384 Hello, world
 ? 0
+# Threads that come and go (R051): more of them, one after another, than a process
+# has pieces of generated code. Until then what a thread held of r64m's was kept
+# when it ended, and this stopped at the 1,024th. (The line expected is what the
+# program says it prints; hal could not be reached when the case was written.)
+$$ python3 -c 'import threading as T; n = [0]; f = lambda: n.__setitem__(0, n[0] + 1); [(t.start(), t.join()) for t in (T.Thread(target=f) for i in range(1200))]; print(n[0])'
+1200
+? 0

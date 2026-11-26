@@ -4155,3 +4155,89 @@ The card, written before the run.
     in place of copied (15 MB a process in R050)
 - **Cut-off**: the measurement by the count of this session's first hour; what is
   saved in place the same day. Sharing is not begun on this card.
+
+**Result (2026-11-26): the 18 MB was not a thread's cost. It was a leak: what a
+thread of the guest's held of r64m's was never given back when the thread ended.
+Fixed; and a thread's own record of its blocks made smaller. uvicorn under load:
+100 MB to 92 MB at the same moment, and flat from there where it grew 20 MB with
+every round before.**
+
+R050 read its numbers wrongly. It saw 148 MB with five threads against 80 MB with
+two and divided. The pool of threads FastAPI runs a plain function in lets a thread
+end when it has been idle and starts another when it is needed: the count of
+threads stayed five while many more than five had been started.
+
+What `--jit-memory` said (uvicorn alone in the R041 image, 16 connections kept from
+the Mac, 1,300 requests a second), for the first thread, 28,000 blocks of 315,000
+of the guest's instructions:
+
+| part | bytes before | after |
+|---|---|---|
+| generated code | 7.4 MB | 7.4 MB |
+| the record of each block (120 bytes, room for 32,768) | 3.9 MB | 3.9 MB |
+| where each instruction begins | 6.9 MB | 2.5 MB |
+| jumps made to come to a block | 0.9 MB | 0.9 MB |
+| landings of returns | 0.7 MB | 0.2 MB |
+| the map of places (41,000 known) | 1.4 MB | 1.4 MB |
+| the rest (the table, the map of landings, the allocator's own) | 1.5 MB | 1.5 MB |
+| in all | 22.7 MB | 17.9 MB |
+
+So the hypothesis held for the first thread: what is kept about blocks was twice
+the code. But a thread of the pool makes few blocks (under 2,000; 0.33 MB of code
+resident each): sixteen of them added 22 MB to the process, 1.4 MB each, the table
+(0.26 MB) and the guest's own stack among it.
+
+**The leak.** With the load given in rounds, 14 seconds idle between them (the pool
+lets its threads go after 10):
+
+| | before | after |
+|---|---|---|
+| resident after rounds 1, 2, 3, 4 | 101, 121, 142, 163 MB | 100.4, 100.4, 100.5, 99.8 MB |
+| pieces of generated code mapped | 17, 32, 47, 62 | as many as threads |
+
+A thread's `exit` was answered by the kernel's `exit` at once (R033), from deep
+inside the thread's loop: its blocks and their 64 MB mapping, its copy of the list
+of regions and the host's stack were never given back. And a process has 1,024
+places for pieces of code: a Python program that starts and joins 1,200 threads
+one after another stopped with "too many pieces of generated code in one process".
+A server left running would have stopped the same way after its thousandth thread.
+Now a thread other than the first clears and wakes as before (with every signal
+blocked first) and then returns from its function: everything it held is dropped,
+and the host's C library ends the thread and frees its stack. The first thread
+still ends by the kernel's call: the process's code is the one it gave. A case is
+added to the Python suite (1,200 threads, one after another).
+
+**Made smaller in place**: where each instruction of a block begins is kept as two
+32-bit numbers (the guest's address as bytes after the block's first) in a slice
+with no room to spare, in place of a 32-bit and a 64-bit number in a vector with
+room; a block's landings likewise without spare room.
+
+| uvicorn's resident memory | R050's build | now | natively on hal (R050) |
+|---|---|---|---|
+| after its start (2 threads) | 79.0 MB | 73.3 MB | 47.2 MB |
+| under 16 connections (17 threads) | 101.1 MB | 91.8 MB | 48.2 MB |
+
+By the card: what is kept was more than half and was made smaller in place. On
+sharing blocks between threads the numbers say no for now: ADR 0019's price
+(translated twice, held twice) is 1.4 MB for a thread of this pool, of which the
+code is 0.33 MB; no ADR is proposed. What is left over the real machine is the
+first thread's 18 MB and the guest's memory (a file's pages copied in every
+process, 15 MB here): mapping a file's pages in place of copying is the next thing
+that would save tens of megabytes, in every process.
+
+**Found beside it, not fixed: Node's workers fail one run in ten when several
+containers run at once.** `node` with four worker threads (the case in the Node
+suite), 40 runs five at a time by `--jit`: 9 failed with R050's build and 2 with
+this one, all the same way: "at 0x7ff800270b ... an instruction the CPU refuses",
+which is HLT in the guest's C library (musl crashes itself so when it finds its
+own state broken), after some 130 million instructions. The same address in both
+builds: not of this card's making. R047 saw it once under `--jit-check` and left
+it as not understood. Something a thread of r64m's does to memory another thread
+is using; a card of its own is owed, and it is ADR 0020's point 3.
+
+Tests: 118 unit tests on macOS, 119 on Linux; 62 programs four ways (248 runs);
+primitives 116, traces 39; the container suites three ways each: Python 75 (the
+new case among them), the goal 3, the JVM 6, Go 6, nginx 3, memcached 3, redis 3; Node 8
+of 9 (the failure above). hal could not be reached (the new case's expected line
+is what the program says it prints). The comparison with QEMU was not run (r64m
+stays registered).

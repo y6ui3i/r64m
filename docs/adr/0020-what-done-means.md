@@ -69,3 +69,7 @@ QEMU's place by the owner's word). Point 3: eight images run as the real machine
 has them; under load the network holds the work back on the real machine as much
 as under r64m. Point 2 as before (a kept connection 1.84). Memory: a guest thread
 costs about 18 MB of r64m's own, which is the next thing to decide.
+(R051: that was read wrongly. A thread that ended gave nothing back; fixed. The
+goal's server holds 92 MB under load where the real machine holds 48, and stays
+there. Open under point 3: Node's workers fail one run in ten when several
+containers run at once.)

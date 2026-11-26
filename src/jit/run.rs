@@ -59,8 +59,12 @@ impl Hasher for OfAddress {
 struct Block {
     code: *const u8,
     /// For each of its instructions, where its code begins (in host instructions from
-    /// the block's start) and its address in the guest.
-    starts: Vec<(u32, u64)>,
+    /// the block's start) and its address in the guest, as bytes after the block's
+    /// first instruction (`first`). Half the size of the two as they are made, and
+    /// no room kept for more (R051: with the room, 6.9 MB of a thread's 22.7).
+    starts: Box<[(u32, u32)]>,
+    /// The guest's address of its first instruction.
+    first: u64,
     /// The host pages of the guest's memory its instructions lie in.
     pages: (u64, u64),
     /// Where its instructions begin and end in the guest.
@@ -74,6 +78,13 @@ struct Block {
     /// The landings of returns in it (R046): the guest's return address and the
     /// host's address of the landing.
     pads: Vec<(u64, u64)>,
+}
+
+impl Block {
+    /// The guest's address of its instruction `i`.
+    fn at(&self, i: usize) -> u64 {
+        self.first + self.starts[i].1 as u64
+    }
 }
 
 /// What is counted for `--jit-stats`.
@@ -143,6 +154,9 @@ pub struct Jit {
     miss: u64,
     pub stats: Stats,
 }
+
+/// Whether each thread says what its blocks hold as they grow (`--jit-memory`).
+pub static SAY_MEMORY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Why `run` came back.
 pub enum Event {
@@ -359,7 +373,7 @@ impl Jit {
         let block = &self.blocks[self.blocks.partition_point(|b| b.code as usize <= pc).checked_sub(1)?];
         let word = ((pc - block.code as usize) / 4) as u32;
         let i = block.starts.partition_point(|&(start, _)| start <= word).saturating_sub(1);
-        Some((block.starts[0].1, block.starts[i].1, word))
+        Some((block.first, block.at(i), word))
     }
 
     /// And a block's code as it stands (to the next block's start, or 400
@@ -369,7 +383,7 @@ impl Jit {
         let block = &self.blocks[id];
         let end = self.blocks.get(id + 1).map_or(400, |next| ((next.code as usize).wrapping_sub(block.code as usize) / 4).min(400));
         let words = unsafe { std::slice::from_raw_parts(block.code as *const u32, end) }.to_vec();
-        Some((words, block.starts.clone()))
+        Some((words, block.starts.iter().map(|&(word, after)| (word, block.first + after as u64)).collect()))
     }
 
     /// Rewrites the jump at `site` to go to a block's code.
@@ -409,7 +423,7 @@ impl Jit {
             let block = &self.blocks[self.blocks.partition_point(|b| b.code as u64 <= pc) - 1];
             let word = ((pc - block.code as u64) / 4) as u32;
             let i = block.starts.partition_point(|&(start, _)| start <= word) - 1;
-            c.rip = block.starts[i].1;
+            c.rip = block.at(i);
             c.steps += i as u64;
             self.stats.in_blocks += i as u64;
             self.stats.faults += 1;
@@ -420,7 +434,7 @@ impl Jit {
             cpu::settle(c);
             if let Some(what) = differs(&want, c, &written, m) {
                 let block = &self.blocks[id];
-                let (n, from) = (block.starts.len(), block.starts[0].1);
+                let (n, from) = (block.starts.len(), block.first);
                 return Err(format!("the block of {n} instructions at {from:#x}: {what}"));
             }
         }
@@ -530,10 +544,44 @@ impl Jit {
                 }
             }
         }
+        // (With no room kept for more: there will be none.)
+        own.shrink_to_fit();
         let pads = own;
-        self.blocks.push(Block { code, starts, pages, guest: (from, to), guarded, incoming: Vec::new(), pads });
+        let starts = starts.iter().map(|&(word, at)| (word, (at - rip) as u32)).collect();
+        self.blocks.push(Block { code, starts, first: rip, pages, guest: (from, to), guarded, incoming: Vec::new(), pads });
         self.stats.blocks += 1;
+        if SAY_MEMORY.load(std::sync::atomic::Ordering::Relaxed) && self.blocks.len().is_multiple_of(2000) {
+            self.say_memory();
+        }
         true
+    }
+
+    /// What this thread's blocks hold, part by part, in bytes (`--jit-memory`): the
+    /// code written, what is kept about each block, each map, and the table. A map's
+    /// own cost is taken as its room times an entry's size and a byte of control.
+    fn say_memory(&self) {
+        use std::mem::size_of;
+        let code = (self.code.used() * 4) as u64;
+        let records = (self.blocks.capacity() * size_of::<Block>()) as u64;
+        let starts: u64 = self.blocks.iter().map(|b| (b.starts.len() * size_of::<(u32, u32)>()) as u64).sum();
+        let instructions: u64 = self.blocks.iter().map(|b| b.starts.len() as u64).sum();
+        let incoming: u64 = self.blocks.iter().map(|b| (b.incoming.capacity() * 8) as u64).sum();
+        let pads: u64 = self.blocks.iter().map(|b| (b.pads.capacity() * 16) as u64).sum();
+        // The allocator's own for each vector that holds anything: taken as 16 bytes.
+        let pieces = self.blocks.iter().map(|b| (!b.starts.is_empty()) as u64 + (b.incoming.capacity() != 0) as u64 + (b.pads.capacity() != 0) as u64).sum::<u64>();
+        let places = (self.places.capacity() * (size_of::<(u64, Place)>() + 1)) as u64;
+        let pad_map = (self.pads.capacity() * 17) as u64;
+        let holds = (self.holds.capacity() * 13) as u64 + (self.writes.capacity() * 10) as u64;
+        let known = (self.known.len() * 12) as u64;
+        let table = (self.table.len() * 16) as u64;
+        let all = code + records + starts + incoming + pads + pieces * 16 + places + pad_map + holds + known + table;
+        eprintln!(
+            "r64m: memory of thread {}: {} blocks, {} guest instructions, {} places known; code {code}, block records {records}, starts {starts}, incoming {incoming}, pads {pads}, {pieces} vectors, places {places}, pad map {pad_map}, pages {holds}, known {known}, table {table}; in all {all}",
+            crate::sys::thread_number(),
+            self.blocks.len(),
+            instructions,
+            self.places.len(),
+        );
     }
 
     /// Forgets every block with an instruction in the host page that holds `addr`, and

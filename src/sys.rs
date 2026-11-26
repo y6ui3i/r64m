@@ -177,10 +177,11 @@ pub fn threads_started() -> bool {
     THREADS.load(std::sync::atomic::Ordering::Relaxed) != 0
 }
 
-/// The calling thread of the guest's ends (`exit`): the word it asked to have
-/// cleared is cleared and whoever waits on it woken, as the kernel does for a thread
-/// of its own, and then the host's thread ends. If it is the last, the process ends
-/// with `code`.
+/// The guest's first thread ends (`exit`) while others go on: the word it asked to
+/// have cleared is cleared and whoever waits on it woken, as the kernel does for a
+/// thread of its own, and then the host's thread ends, by the kernel's call: the
+/// process's code, when its last thread has ended, is this one's. (What the thread
+/// held of r64m's stays: once in a process.)
 pub fn end_thread(m: &mut Mem, s: &Sys, code: i32) -> ! {
     #[cfg(target_os = "linux")]
     linux::end_thread(m, s, code);
@@ -189,6 +190,18 @@ pub fn end_thread(m: &mut Mem, s: &Sys, code: i32) -> ! {
         let _ = (m, s);
         std::process::exit(code)
     }
+}
+
+/// A thread of the guest's other than its first ends: the same clearing and waking,
+/// and then the caller returns from the thread's function, so that what the thread
+/// held is given back: its blocks and their code, its handle on the memory, the
+/// host's stack (R051: a server whose pool of threads comes and goes kept all of
+/// it, 1.4 MB for every thread that had ended, until no piece of code was left).
+pub fn thread_ends(m: &mut Mem, s: &Sys) {
+    #[cfg(target_os = "linux")]
+    linux::thread_ends(m, s);
+    #[cfg(not(target_os = "linux"))]
+    let _ = (m, s);
 }
 
 /// This thread's signals are noted in `c` from now (see `signal::attend`).
@@ -253,7 +266,7 @@ pub static QUIET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool:
 /// what a program that stops or waits was doing.
 pub static SAY_CALLS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-fn thread_number() -> i64 {
+pub fn thread_number() -> i64 {
     #[cfg(target_os = "linux")]
     return unsafe { libc::syscall(libc::SYS_gettid) } as i64;
     #[cfg(not(target_os = "linux"))]

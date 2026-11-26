@@ -144,7 +144,10 @@ real CPU does.
    run as the real machine has them (R047, R048): nginx, memcached, Node, a JVM,
    Go, PostgreSQL. Registered with the host's Docker in QEMU's place, the goal's
    request completes in the ordinary images unchanged by `docker run` alone (R049,
-   R050). Next: what a thread costs in memory, and tests run by a CI.
+   R050). A thread that ends gives back what it held (R051: until then a server
+   whose threads come and go grew without end). Next: Node's workers failing one
+   run in ten under load, a file's pages mapped in place of copied, and tests run
+   by a CI.
 
 One case is owed: the x87's square root when what is left over equals the root (the
 rounding there is not touched by any of g64m's cases; found by breaking it on purpose).
