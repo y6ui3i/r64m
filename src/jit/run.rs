@@ -20,6 +20,9 @@ pub const HOT: u8 = 4;
 const GIVEN_UP: u8 = 8;
 /// How much generated code there may be before all of it is forgotten.
 const CODE_BYTES: usize = 64 << 20;
+/// How often an instruction is begun again because the host refused a store that
+/// the list allows (R057), before the refusal is taken for one that stays.
+const MOST_REFUSALS: u32 = 1000;
 
 /// What is known of an address that has been arrived at.
 #[derive(Clone, Copy)]
@@ -226,6 +229,9 @@ impl Jit {
         // interpreter runs because no block could begin with it: there the address is
         // looked up.
         let mut arrived = true;
+        // How often in a row the host has refused a store that the list allows (see
+        // the arms for it below).
+        let mut refused = 0u32;
         self.from = 0;
         loop {
             // What other threads have done since the last look: to the list of
@@ -328,7 +334,10 @@ impl Jit {
             // instruction is run again.
             let (regs, flags) = (c.reg, c.rflags);
             match cpu::step(c, m) {
-                Ok(Step::Next) => arrived = stands_in || left_inside || c.rip < before || c.rip > before.wrapping_add(15),
+                Ok(Step::Next) => {
+                    refused = 0;
+                    arrived = stands_in || left_inside || c.rip < before || c.rip > before.wrapping_add(15);
+                }
                 Ok(Step::Syscall) => return Event::Syscall,
                 // A store to a host page that holds translated code. If it is to the
                 // code (the guest's own page written has a block's instruction in it):
@@ -371,8 +380,30 @@ impl Jit {
                             arrived = false;
                             continue;
                         }
+                        Err(Stop::Fault(f)) if f.access == Access::Write && refused < MOST_REFUSALS && m.is_shared() && m.guest_may_write(f.addr, f.addr + 1) => {
+                            (c.reg, c.rflags) = (regs, flags);
+                            refused += 1;
+                            std::thread::yield_now();
+                            arrived = false;
+                            continue;
+                        }
                         Err(stop) => return Event::Stop(stop),
                     }
+                }
+                // Refused by the host where the list, as it is now, lets the guest
+                // write, and no mark is on the page: it was closed when the store
+                // was made and has been opened since, by another thread that stores
+                // beside code and opens the page for its one instruction (R057: the
+                // JVM was sent this as its own fault, one run in a hundred under
+                // load). Not the guest's fault whatever the mark says at this
+                // moment: the instruction is begun again. A refusal that stays
+                // (nothing known does that) is said after a thousand tries.
+                Err(Stop::Fault(f)) if f.access == Access::Write && refused < MOST_REFUSALS && m.is_shared() && m.guest_may_write(f.addr, f.addr + 1) => {
+                    (c.reg, c.rflags) = (regs, flags);
+                    refused += 1;
+                    std::thread::yield_now();
+                    arrived = false;
+                    continue;
                 }
                 Err(stop) => return Event::Stop(stop),
             }
@@ -1323,6 +1354,41 @@ mod tests {
             assert_eq!(c.reg[RDX], 7 + 3 * 9);
             assert!(jit.stats.forgotten >= 1);
         }
+    }
+
+    #[test]
+    fn a_store_refused_while_another_thread_had_the_page_closed_is_made() {
+        // again: mov [rsi], ebx; sub ebx, 1; jne again; syscall. Its data is far
+        // from its code. Another thread marks the data's page as holding code and
+        // takes the mark off, over and over, as a thread does that stores beside
+        // code of its own: the store is refused now and then, and when this thread
+        // asks, the mark is sometimes there and sometimes gone again. Either way
+        // the fault is not the guest's (R057).
+        let code = [0x89, 0x1e, 0x83, 0xeb, 0x01, 0x75, 0xf9, 0x0f, 0x05];
+        let far = CODE + 0x10_0000;
+        let mut m = Mem::reserve().unwrap();
+        m.map(CODE, 4096, R | W | X).unwrap();
+        m.write_bytes(CODE, &code).unwrap();
+        m.map(far, 4096, R | W).unwrap();
+        m.map(DATA, 4096, R | W).unwrap();
+        let mut other = m.view();
+        let done = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                    other.mark_code(far, far + 1, true).unwrap();
+                    other.mark_code(far, far + 1, false).unwrap();
+                }
+            });
+            let mut jit = Jit::new(false, 1).unwrap();
+            let mut c = Cpu::new(CODE, DATA + 4096);
+            c.reg[RBX] = 300_000;
+            c.reg[RSI] = far;
+            let event = jit.run(&mut c, &mut m);
+            done.store(true, std::sync::atomic::Ordering::Relaxed);
+            assert!(matches!(event, Event::Syscall), "the guest was handed {:?}", match event { Event::Stop(stop) => format!("{stop:?}"), _ => "something else".to_string() });
+            assert_eq!(c.reg[RBX], 0);
+        });
     }
 
     #[test]

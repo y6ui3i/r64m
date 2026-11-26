@@ -4750,3 +4750,35 @@ The card, written before the run.
   - SIGSEGV again in the 96 after → its `--faults` line says whether it is the
     same kind (list allows) or a true one
 - **Cut-off**: the test runs five seconds at most; one round of 96 after.
+
+**Result (2026-11-27): the hypothesis held. A test of two threads hands the guest
+the fault without the fix and never with it; 96 JVM runs of eight at once after:
+96 end well, no SIGSEGV, no hang.**
+
+- The test (`a_store_refused_while_another_thread_had_the_page_closed_is_made`):
+  one thread marks a page of data and takes the mark off, over and over; the
+  other stores to the page 300,000 times through `Jit::run`. With the new arm
+  switched off the run was handed `Fault { Write }` (one run of two; the other
+  met no refusal at the wrong moment). With it, six runs of six pass, each with
+  20 to 80 refusals, about half of them found with the mark gone.
+- The fix, in `Jit::run`: a write the host refuses where the list as it is now
+  lets the guest write, in a memory more than one thread has, is begun again,
+  whatever the mark says at that moment; after a thousand in a row for one
+  instruction the fault is said as before (nothing known makes that happen).
+- The owner asked beside it: 「マルチスレッドでも…一方が Fault や例外になっても他方
+  には影響がないは確認しなくて良い？」. There was only what the JVM's runs imply.
+  Now a case (`tests/container/gcc.txt`): three threads take 20,000 faults each
+  (a read where nothing is, a write to a page that may only be read, a division
+  by zero) and return from the handler, on stacks of their own for handlers,
+  while four threads work beside them and take a lock; the handler counts a
+  signal in a thread that made none and one with another thread's address. The
+  real machine (hal, twice): none of either, and the four results. r64m by the
+  interpreter, the JIT and the JIT checked: the same lines.
+- Not covered: the calls that have the kernel write the guest's memory (`read`
+  into a page closed for translated code is answered EFAULT by the host's
+  kernel, if nothing opens it first). Not seen to fail; to be looked at with the
+  survey of calls R056 owes.
+- Tests after R056 and R057 together: 121 unit tests; the ten suites of
+  container cases by the interpreter, the JIT and the JIT checked (264 runs of
+  88 cases, the two new ones among them): all pass. (The three ways had not
+  been run since before R055.)

@@ -151,8 +151,9 @@ real CPU does.
    real machine 49). A kept request is 13.5% shorter (R054: compare-and-swap,
    swap and short repeated moves in blocks); the race with QEMU for it is owed.
    The JVM's hang at its end under load was a `futex` wake r64m refused (R056:
-   fixed; none in 96 runs of eight at once). Open: one of those runs in a
-   hundred ends with SIGSEGV at a store the guest may make.
+   fixed), and its SIGSEGV one run in a hundred a store refused while another
+   thread had the page closed (R057: fixed): 96 of 96 runs of eight at once
+   end well.
    The tests are run by a CI on every push
    ([docs/ci.md](docs/ci.md)): `cargo xtask ci` is the same by hand.
 
