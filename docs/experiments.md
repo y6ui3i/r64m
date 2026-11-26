@@ -4359,3 +4359,50 @@ The card, written before the run.
   - The memory does not fall (the pages are written anyway: relocations) → said
     with the numbers, and the copy kept: nothing is changed for no gain
 - **Cut-off**: `mmap` and its measurement today; the loader only if the first holds.
+
+**Result (2026-11-26): mapped, in `mmap` and in the loader. A process's own memory
+falls by what the files were: an idle Node holds 64 MB where it held 260 (the real
+machine 49); uvicorn's own memory 50 MB where it was 72. A start is no faster.**
+
+- `mmap` of a file without `MAP_SHARED` is the host's private mapping at the place
+  (`Mem::map_file`, beside R048's shared one), where the host's page is 4 KB;
+  elsewhere, and with `--copy-files`, the copy as before. A descriptor the host
+  will not map is answered with the host's own error.
+- The loader maps the pages a segment's file bytes fill, when the segment lies in
+  memory as in the file, clears what follows them in their last page when the
+  segment is larger in memory, and gives the rest as the guest's own. r64m itself
+  reads the file through a mapping of its own and gives that back when the
+  program is loaded: until now it read the whole file and kept it (Node's is 130
+  MB: held once by r64m and once more as the guest's copy).
+
+| resident memory, in MB | before | files copied (`--copy-files`) | files mapped | natively on hal |
+|---|---|---|---|---|
+| an idle Node: all, of which the process's own (anonymous) | 260, 257 | 134, 133 | 64, 21 | 49, 7 |
+| uvicorn after its start | 73, 72 | 73, 72 | 69, 50 | 47 (R050) |
+| uvicorn under 16 connections | 92, 91 | 92, 91 | 87, 69 | 48 (R050) |
+| an nginx worker's own (of eight) | | 12.7 | 4.8 | |
+
+What is no longer the process's own is the file's pages, which the kernel holds
+once for every process that maps the file and can give up when memory is short.
+The whole count falls less than the process's own because the file's pages that
+are touched are still counted for each process that touches them.
+
+A start, by the clock around `docker run`, nine runs each way, one after the
+other: `node -e 0` 378 ms copied and 350 mapped; `python3 -c pass` 295 and 296;
+`import fastapi` 786 and 774; busybox's `true` 214 and 197. The container's own
+start is most of it: the hypothesis's "a start reads less" is true and is not
+seen.
+
+By the card: the first held and the loader was done. What Linux does differently
+from a copy is now r64m's too: a page wholly past a file's end faults; a file
+changed under a mapping is seen in pages not yet written.
+
+Beside it: PostgreSQL's cases pass three ways (R050 left them owed: "the run
+printed nothing"; that run had been started through the image's entrypoint script,
+as R051's first runs of the other Alpine images were).
+
+Tests: 118 unit tests on macOS, 119 on Linux (a private mapping of a file among
+them: read, written without reaching the file, the file's later change seen in a
+page not written, protected, unmapped, a descriptor that is none refused); 62
+programs four ways; primitives 116, traces 39; every container suite three ways
+by `cargo xtask container`: 258 runs, PostgreSQL's among them.

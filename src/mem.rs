@@ -354,18 +354,29 @@ impl Mem {
     /// From then on the region is like any other: protected, unmapped and mapped
     /// over as the others are.
     pub fn map_shared(&mut self, start: u64, len: u64, prot: u8, file: Option<(i32, u64)>) -> Result<(), MapError> {
-        self.changing(|m| m.map_shared_alone(start, len, prot, file))
+        self.changing(|m| m.map_host_alone(start, len, prot, file, libc::MAP_SHARED))
     }
 
-    fn map_shared_alone(&mut self, start: u64, len: u64, prot: u8, file: Option<(i32, u64)>) -> Result<(), MapError> {
+    /// Maps `[start, start + len)` as a private mapping of the file `fd` from
+    /// `offset` (R053): the host's own, put at the place, so that the file's pages
+    /// are the kernel's one copy until this process writes them, as they are for
+    /// the same program on the real machine. What is written stays the process's.
+    /// A page wholly past the file's end is there and faults when touched, as on
+    /// Linux. Only where the host's page is the guest's (`MapError::Range` if not,
+    /// with nothing changed: the caller then copies the file's bytes as before).
+    pub fn map_file(&mut self, start: u64, len: u64, prot: u8, fd: i32, offset: u64) -> Result<(), MapError> {
+        self.changing(|m| m.map_host_alone(start, len, prot, Some((fd, offset)), libc::MAP_PRIVATE))
+    }
+
+    fn map_host_alone(&mut self, start: u64, len: u64, prot: u8, file: Option<(i32, u64)>, kind: libc::c_int) -> Result<(), MapError> {
         let end = self.range(start, len)?;
         if self.host_page != PAGE {
             return Err(MapError::Range);
         }
         self.carve(start, end);
         let (flags, fd, offset) = match file {
-            Some((fd, offset)) => (libc::MAP_SHARED | libc::MAP_FIXED, fd, offset as libc::off_t),
-            None => (libc::MAP_SHARED | libc::MAP_ANON | libc::MAP_FIXED, -1, 0),
+            Some((fd, offset)) => (kind | libc::MAP_FIXED, fd, offset as libc::off_t),
+            None => (kind | libc::MAP_ANON | libc::MAP_FIXED, -1, 0),
         };
         let p = unsafe { libc::mmap(self.host(start) as *mut libc::c_void, (end - start) as usize, libc::PROT_NONE, flags, fd, offset) };
         if p == libc::MAP_FAILED {
@@ -1468,6 +1479,28 @@ mod tests {
         // Mapped over afresh, it is the guest's own again and reads as nothing.
         m.map(A + 16 * PAGE, PAGE, RW).unwrap();
         assert_eq!(m.read_u64(A + 16 * PAGE), Ok(0));
+        // A private mapping of the file (R053): the file's bytes are read, what is
+        // written stays this mapping's, and the file's own later change is seen in
+        // a page not yet written (as Linux has it) and not in one that was.
+        m.map_file(A + 24 * PAGE, 2 * PAGE, RW, fd, 0).unwrap();
+        assert_eq!(m.read_u64(A + 25 * PAGE + 8), Ok(7));
+        m.write_u64(A + 25 * PAGE + 8, 11).unwrap();
+        assert_eq!(in_file(PAGE as i64 + 8), 7);
+        let five = 5u64.to_le_bytes();
+        assert_eq!(unsafe { libc::pwrite(fd, five.as_ptr() as *const libc::c_void, 8, 16) }, 8);
+        assert_eq!(unsafe { libc::pwrite(fd, five.as_ptr() as *const libc::c_void, 8, PAGE as i64 + 16) }, 8);
+        assert_eq!((m.read_u64(A + 24 * PAGE + 16), m.read_u64(A + 25 * PAGE + 16)), (Ok(5), Ok(0)));
+        // Read only, it is not written; protected otherwise and unmapped as any.
+        m.map_file(A + 32 * PAGE, PAGE, R, fd, PAGE).unwrap();
+        assert!(m.write_u64(A + 32 * PAGE, 1).is_err());
+        m.protect(A + 32 * PAGE, PAGE, RW).unwrap();
+        m.write_u64(A + 32 * PAGE, 1).unwrap();
+        assert_eq!(in_file(PAGE as i64), 0);
+        m.unmap(A + 24 * PAGE, 2 * PAGE).unwrap();
+        assert!(m.read_u64(A + 24 * PAGE).is_err());
+        // A descriptor that is no file is refused, and nothing is left there.
+        assert!(matches!(m.map_file(A + 40 * PAGE, PAGE, R, -1, 0), Err(MapError::Host(_))));
+        assert!(m.read_u64(A + 40 * PAGE).is_err());
         unsafe { libc::close(fd) };
     }
 }

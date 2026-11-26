@@ -397,6 +397,10 @@ fn prot_of(prot: u64) -> Result<u8, u64> {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// A file mapped privately is copied even where it could be mapped (`--copy-files`:
+/// to measure what the mapping saves, and to tell the two apart when one fails).
+pub static COPY_FILES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 fn mmap(m: &mut Mem, s: &mut Sys, addr: u64, len: u64, prot: u64, flags: u64, fd: u64, offset: u64) -> Result<u64, u64> {
     let prot = prot_of(prot)?;
     if len == 0 || len > m.size() || offset % PAGE != 0 {
@@ -427,12 +431,22 @@ fn mmap(m: &mut Mem, s: &mut Sys, addr: u64, len: u64, prot: u64, flags: u64, fd
         m.map_shared(at, size, prot, file.then_some((fd as i32, offset))).map_err(map_errno)?;
         s.change(at, at + size);
     } else if file {
-        // The file's bytes are read into memory of the guest's own: the same to a
+        // The host's own private mapping of the file where that can be (R053): the
+        // kernel's one copy of the file's pages, until they are written. Elsewhere
+        // the file's bytes are read into memory of the guest's own: the same to a
         // program that maps privately, which is what a loader and a compiler do.
-        m.map(at, size, crate::mem::R | crate::mem::W).map_err(map_errno)?;
-        s.change(at, at + size);
-        read_file_into(m, fd, at, len, offset)?;
-        m.protect(at, size, prot).map_err(map_errno)?;
+        match if COPY_FILES.load(std::sync::atomic::Ordering::Relaxed) { Err(MapError::Range) } else { m.map_file(at, size, prot, fd as i32, offset) } {
+            Ok(()) => s.change(at, at + size),
+            Err(MapError::Range) => {
+                m.map(at, size, crate::mem::R | crate::mem::W).map_err(map_errno)?;
+                s.change(at, at + size);
+                read_file_into(m, fd, at, len, offset)?;
+                m.protect(at, size, prot).map_err(map_errno)?;
+            }
+            // The host's own reason: a descriptor that is none, or cannot be mapped.
+            Err(MapError::Host(e)) => return Err(e.raw_os_error().map_or(ENOMEM, |n| n as u64)),
+            Err(e) => return Err(map_errno(e)),
+        }
     } else {
         m.map(at, size, prot).map_err(map_errno)?;
         s.change(at, at + size);

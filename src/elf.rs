@@ -119,21 +119,97 @@ pub fn interpreter(img: &[u8]) -> Option<Vec<u8>> {
 /// Puts the program's segments into `mem`: where it is linked to be, or at `PIE_AT`
 /// if it can be put anywhere.
 pub fn load(mem: &mut Mem, img: &[u8]) -> Result<Loaded, ElfError> {
-    load_at(mem, img, PIE_AT)
+    load_at(mem, img, PIE_AT, None)
+}
+
+/// The same, of a file that is open: its pages are mapped where they can be, not
+/// copied (R053).
+pub fn load_file(mem: &mut Mem, file: &File) -> Result<Loaded, ElfError> {
+    load_at(mem, file, PIE_AT, file.descriptor())
+}
+
+/// A file as r64m reads it to load it: the host's own mapping of it where there is
+/// one (the kernel's pages, nothing read that is not looked at, given back when
+/// this is dropped), or its bytes read whole. Node's is 130 MB, of which loading
+/// looks at the headers.
+pub struct File {
+    file: std::fs::File,
+    held: Held,
+}
+
+enum Held {
+    Mapped(*const u8, usize),
+    Read(Vec<u8>),
+}
+
+impl File {
+    pub fn open(path: &str) -> std::io::Result<File> {
+        let file = std::fs::File::open(path)?;
+        let len = file.metadata()?.len() as usize;
+        #[cfg(unix)]
+        if len != 0 {
+            use std::os::fd::AsRawFd;
+            let p = unsafe { libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ, libc::MAP_PRIVATE, file.as_raw_fd(), 0) };
+            if p != libc::MAP_FAILED {
+                return Ok(File { file, held: Held::Mapped(p as *const u8, len) });
+            }
+        }
+        let bytes = std::fs::read(path)?;
+        Ok(File { file, held: Held::Read(bytes) })
+    }
+
+    /// The host's descriptor, for mapping the file's pages into the guest.
+    fn descriptor(&self) -> Option<i32> {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            Some(self.file.as_raw_fd())
+        }
+        #[cfg(not(unix))]
+        None
+    }
+}
+
+impl std::ops::Deref for File {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        match &self.held {
+            Held::Mapped(p, len) => unsafe { std::slice::from_raw_parts(*p, *len) },
+            Held::Read(bytes) => bytes,
+        }
+    }
+}
+
+impl Drop for File {
+    fn drop(&mut self) {
+        if let Held::Mapped(p, len) = self.held {
+            unsafe { libc::munmap(p as *mut libc::c_void, len) };
+        }
+    }
 }
 
 /// Puts a program's interpreter into `mem` at `INTERP_AT`, and says in `program`
 /// where: the program then begins at the interpreter's entry, which is given back.
 pub fn load_interpreter(mem: &mut Mem, img: &[u8], program: &mut Loaded) -> Result<u64, ElfError> {
+    load_interpreter_from(mem, img, None, program)
+}
+
+/// The same, of a file that is open (see `load_file`).
+pub fn load_interpreter_file(mem: &mut Mem, file: &File, program: &mut Loaded) -> Result<u64, ElfError> {
+    load_interpreter_from(mem, file, file.descriptor(), program)
+}
+
+fn load_interpreter_from(mem: &mut Mem, img: &[u8], file: Option<i32>, program: &mut Loaded) -> Result<u64, ElfError> {
     if img.len() >= 18 && le::<2>(img, 16) != ET_DYN as u64 {
         return bad("the interpreter is linked to a fixed address");
     }
-    let interp = load_at(mem, img, INTERP_AT)?;
+    let interp = load_at(mem, img, INTERP_AT, file)?;
     program.interp = INTERP_AT;
     Ok(interp.entry)
 }
 
-fn load_at(mem: &mut Mem, img: &[u8], anywhere: u64) -> Result<Loaded, ElfError> {
+/// `file`: the descriptor `img` is the bytes of, if its pages may be mapped.
+fn load_at(mem: &mut Mem, img: &[u8], anywhere: u64, file: Option<i32>) -> Result<Loaded, ElfError> {
     if img.len() < 64 || img[..4] != *b"\x7fELF" {
         return bad("not an ELF file");
     }
@@ -194,10 +270,34 @@ fn load_at(mem: &mut Mem, img: &[u8], anywhere: u64) -> Result<Loaded, ElfError>
         }
         taken.push((start, end));
 
-        // Written while it can be written, then given the protection asked for. What
-        // the file does not fill stays zero, as the mapping gave it.
-        mem.map(start, end - start, R | W)?;
-        own(mem.write_bytes(vaddr, &img[offset as usize..(offset + filesz) as usize]));
+        // The pages the file fills are the file's own, mapped privately, where that
+        // can be (R053: the host's page the guest's, the segment placed in memory
+        // as it lies in the file): what follows the file's bytes in their last
+        // page is cleared, as the kernel clears it, and the pages after are the
+        // guest's own. Otherwise all of it is the guest's own, and the file's
+        // bytes are written while it can be written. Either way it is then given
+        // the protection asked for, and what the file does not fill is zero.
+        let filled = (vaddr + filesz).next_multiple_of(PAGE);
+        let mapped = match file {
+            Some(fd) if filesz != 0 && vaddr % PAGE == offset % PAGE => match mem.map_file(start, filled - start, R | W, fd, offset & !(PAGE - 1)) {
+                Ok(()) => true,
+                Err(crate::mem::MapError::Range) => false,
+                Err(e) => return Err(e.into()),
+            },
+            _ => false,
+        };
+        if mapped {
+            if memsz > filesz {
+                let rest = (filled - (vaddr + filesz)) as usize;
+                own(mem.write_bytes(vaddr + filesz, &vec![0; rest]));
+            }
+            if filled < end {
+                mem.map(filled, end - filled, R | W)?;
+            }
+        } else {
+            mem.map(start, end - start, R | W)?;
+            own(mem.write_bytes(vaddr, &img[offset as usize..(offset + filesz) as usize]));
+        }
         let mut prot = 0;
         if flags & 4 != 0 {
             prot |= R;

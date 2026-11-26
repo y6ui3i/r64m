@@ -146,8 +146,9 @@ real CPU does.
    request completes in the ordinary images unchanged by `docker run` alone (R049,
    R050). A thread that ends gives back what it held (R051: until then a server
    whose threads come and go grew without end), and a new thread knows its own id
-   before it runs (R052: Node's workers stopped one run in ten). Next: a file's
-   pages mapped in place of copied. The tests are run by a CI on every push
+   before it runs (R052: Node's workers stopped one run in ten). A file's pages
+   are mapped, not copied (R053: an idle Node holds 64 MB where it held 260; the
+   real machine 49). The tests are run by a CI on every push
    ([docs/ci.md](docs/ci.md)): `cargo xtask ci` is the same by hand.
 
 One case is owed: the x87's square root when what is left over equals the root (the

@@ -215,6 +215,9 @@ fn main() {
     if option("--quiet") {
         sys::QUIET.store(true, std::sync::atomic::Ordering::Relaxed);
     }
+    if option("--copy-files") {
+        sys::COPY_FILES.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     if option("--calls") {
         sys::SAY_CALLS.store(true, std::sync::atomic::Ordering::Relaxed);
     }
@@ -258,7 +261,7 @@ fn main() {
         return;
     };
 
-    let mut img = std::fs::read(path).unwrap_or_else(|e| fail(format_args!("{path}: {e}")));
+    let mut img = elf::File::open(path).unwrap_or_else(|e| fail(format_args!("{path}: {e}")));
     // A file that begins with "#!" names the program that is to run it: that one is
     // loaded, with its one argument if it has one, and then the file's own name.
     let mut args = args.clone();
@@ -269,17 +272,22 @@ fn main() {
         }
         args.insert(0, program);
         argv0 = None;
-        img = std::fs::read(&args[0]).unwrap_or_else(|e| fail(format_args!("{}: {e}", args[0])));
+        img = elf::File::open(&args[0]).unwrap_or_else(|e| fail(format_args!("{}: {e}", args[0])));
     }
     let path = &args[0].clone();
-    let mut loaded = elf::load(&mut mem, &img).unwrap_or_else(|e| fail(format_args!("{path}: {e}")));
+    // (With `--copy-files` a file's bytes are copied as they were before R053.)
+    let copy = sys::COPY_FILES.load(std::sync::atomic::Ordering::Relaxed);
+    let mut loaded = if copy { elf::load(&mut mem, &img) } else { elf::load_file(&mut mem, &img) }.unwrap_or_else(|e| fail(format_args!("{path}: {e}")));
     // A program that names an interpreter begins there (ADR 0017).
     let mut entry = loaded.entry;
     if let Some(name) = elf::interpreter(&img) {
         let name = String::from_utf8_lossy(&name).into_owned();
-        let img = std::fs::read(&name).unwrap_or_else(|e| fail(format_args!("{path}: its interpreter {name}: {e}")));
-        entry = elf::load_interpreter(&mut mem, &img, &mut loaded).unwrap_or_else(|e| fail(format_args!("{name}: {e}")));
+        let img = elf::File::open(&name).unwrap_or_else(|e| fail(format_args!("{path}: its interpreter {name}: {e}")));
+        entry = if copy { elf::load_interpreter(&mut mem, &img, &mut loaded) } else { elf::load_interpreter_file(&mut mem, &img, &mut loaded) }
+            .unwrap_or_else(|e| fail(format_args!("{name}: {e}")));
     }
+    // The program's file is looked at no more: its mapping in r64m is given back.
+    drop(img);
     let mut guest_args: Vec<&[u8]> = args.iter().map(|a| a.as_bytes()).collect();
     if let Some(name) = &argv0 {
         guest_args[0] = name.as_bytes();
