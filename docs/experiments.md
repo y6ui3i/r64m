@@ -4547,3 +4547,41 @@ ways; primitives 116, traces 39; the container suites by the JIT, all; three way
 before the last change of the scan's neighbours: all but two runs (the JVM's, as
 above, and Python's timer under the checker while five suites ran at once, as in
 R052).
+
+## R055: the JVM is sent a SIGSEGV where it writes its own code, under load (2026-11-26)
+
+The owner: 「JVM の不具合を先に」. For ADR 0020's point 3. What R054 left: four
+JVMs at once, one run in six ends with SIGSEGV in the JVM's own writing of code
+(`CodeHeap::allocate`, `NativeJump::patch_verified_entry`,
+`ciEnv::register_method`), or hangs; since R053's build at the latest; alone, 16
+of 16 pass. R054 counted runs of whole builds against each other and could not
+tell them apart.
+
+The card, written before the run.
+
+- **Hypothesis**: the fault the JVM is sent is r64m's own doing: a store to a
+  page r64m itself has closed to writing because some thread's blocks were
+  translated from it (ADR 0016), met by a thread that does not take it for that:
+  its copy of the list of regions is older than the mark, or the page was opened
+  and closed by another thread between this thread's fault and its second try.
+  The JVM writes code that other threads are running all the time; a C program
+  does not.
+- **What is changed from before** (R054): no build is counted against another.
+  r64m says each fault it hands the guest as a signal (`--faults`: the thread,
+  the instruction, the address, what the list of regions says of that address in
+  this thread's copy and in the shared one, and whether the page is marked as
+  code), and the JVM writes its own report to standard error: one failure is
+  read whole.
+- **Next move for each result**:
+  - The address is in a region the guest may write, marked as code or with the
+    two lists differing → the hypothesis: the store is tried again with the list
+    renewed and the page opened, in place of the signal; then 48 runs four at
+    once
+  - The address is not the guest's to write at all (no region, or read only by
+    the guest's own asking) → the fault is true to the guest's memory as r64m has
+    it, and the question is who unmapped or protected it: the calls of that run
+    are said (`--calls`) for the address
+  - No failure in 48 runs with the saying on → the saying changes the timing: the
+    line is kept in memory and said only at the end
+- **Cut-off**: every run has a limit of 60 seconds; one round of 48 runs to
+  capture; after the fix one round of 48. No third round of the same kind.
