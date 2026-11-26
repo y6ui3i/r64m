@@ -15,9 +15,14 @@ command (`xtask/src/main.rs`), so what the CI runs can be run by hand:
 
 | when | where | what |
 |---|---|---|
-| a push to `port` or `main`, a pull request (not one of documents only) | arm64 Linux | tests, guest, and the container cases by the JIT |
+| a push to `port` or `main` (not one of documents only), every pull request | arm64 Linux | tests, guest, and the container cases by the JIT |
 | Saturdays 18:17 UTC, and by hand ("Run workflow") | arm64 Linux | the same with the container cases three ways (interpreter, JIT, JIT checked) |
 | | macOS (arm64) | `cargo xtask test` |
+
+`main` is protected (since 2026-11-27): it changes only by a pull request, and a
+pull request is merged only when the job `linux` has passed on it; no push straight
+to it, no forced push, no deletion, for the owner too. That is why a pull request of
+documents only is run as well.
 
 The images of the container cases are Docker Hub's by digest (the very images the
 cases were taken in on hal; `SUITES` in `xtask/src/main.rs`), but two that are
@@ -30,7 +35,10 @@ and loaded on the arm64 runner. g64m is checked out at a fixed commit.
 The expected lines of every case are the real machine's and stay so: the CI runs
 r64m against them; it does not make them.
 
-## What it costs while the repository is private
+## What it cost while the repository was private
+
+The repository is public since 2026-11-27, and standard runners cost nothing for
+it. What follows is what was measured and reckoned before, kept for the numbers.
 
 GitHub Free includes 2,000 minutes a month; arm64 Linux counts 1 for 1 (about
 $0.005 a minute beyond that), x86-64 Linux about 1.2, macOS about 12.
