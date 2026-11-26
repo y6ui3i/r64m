@@ -32,14 +32,17 @@ r64m against them; it does not make them.
 
 ## What it costs while the repository is private
 
-Estimates of 2026-11-26, before the first run; to be replaced by what the runs
-take. GitHub Free includes 2,000 minutes a month; arm64 Linux counts 1 for 1 (about
+GitHub Free includes 2,000 minutes a month; arm64 Linux counts 1 for 1 (about
 $0.005 a minute beyond that), x86-64 Linux about 1.2, macOS about 12.
 
-- A push: about 1 minute of x86-64 (the image cache looked up) and 5 to 10 of
-  arm64 Linux: some 200 pushes a month fit.
-- The weekly run: perhaps 60 to 90 minutes of arm64 Linux and 4 of macOS (counted
-  as about 50): about 600 minutes a month.
+- A push, measured on 2026-11-26 (the second run; the first found that the
+  container cases must not be run on the runner itself): 7 seconds of x86-64 (the
+  image cache looked up; 53 seconds when the two images are built) and 5 minutes
+  35 seconds of arm64 Linux, of which the tests and their builds are 2 minutes and
+  the container cases 2 minutes 46 seconds. Counted as 7 minutes: some 280 pushes
+  a month fit.
+- The weekly run, not yet run, an estimate: perhaps 60 to 90 minutes of arm64
+  Linux and 4 of macOS (counted as about 50): about 600 minutes a month.
 
 Beyond the included minutes nothing is charged unless a budget for Actions was set
 in the account; the jobs then do not start. Once the repository is public, standard
