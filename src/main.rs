@@ -31,6 +31,9 @@ struct Mode {
 
 static MODE: std::sync::OnceLock<Mode> = std::sync::OnceLock::new();
 
+/// Whether each fault handed to the guest is said (`--faults`).
+static SAY_FAULTS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// How far the guest went in one step.
 enum Went {
     Next,
@@ -65,6 +68,13 @@ fn one(c: &mut cpu::Cpu, mem: &mut mem::Mem, blocks: &mut Option<jit::run::Jit>)
 /// signal that is, the handler is entered and it goes on there; if not, it ends, with
 /// what stopped it said and as that signal ends a process (ADR 0019, point 2).
 fn stopped(stop: cpu::Stop, c: &mut cpu::Cpu, mem: &mut mem::Mem, system: &mut sys::Sys) {
+    // Each fault that is about to be the guest's, said (`--faults`): a tool for
+    // finding one that should not have been.
+    if SAY_FAULTS.load(std::sync::atomic::Ordering::Relaxed) {
+        if let cpu::Stop::Fault(f) = &stop {
+            eprintln!("r64m: fault: thread {}, at {:#x}, {:?} of {:#x}: {}", sys::thread_number(), c.rip, f.access, f.addr, mem.say(f.addr));
+        }
+    }
     if sys::fault(c, mem, system, &stop) {
         return;
     }
@@ -218,6 +228,9 @@ fn main() {
     if option("--copy-files") {
         sys::COPY_FILES.store(true, std::sync::atomic::Ordering::Relaxed);
     }
+    if option("--faults") {
+        SAY_FAULTS.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     if option("--calls") {
         sys::SAY_CALLS.store(true, std::sync::atomic::Ordering::Relaxed);
     }
@@ -257,7 +270,7 @@ fn main() {
             mem.size().trailing_zeros(),
             mem.host_page() / 1024
         );
-        println!("usage: r64m [--count] [--jit | --jit-check] [--jit-now] [--jit-stats] [--jit-memory] [--calls] [--quiet] [--profile] [--trace | --trace-xmm] program [arguments]");
+        println!("usage: r64m [--count] [--jit | --jit-check] [--jit-now] [--jit-stats] [--jit-memory] [--calls] [--faults] [--quiet] [--profile] [--trace | --trace-xmm] program [arguments]");
         return;
     };
 

@@ -335,7 +335,10 @@ impl Jit {
                 // the translations are forgotten, the page can be written again, and
                 // the store is made. If it is to data that only shares the host's page
                 // with code (R010): the page is opened for this one instruction.
-                Err(Stop::Fault(f)) if f.access == Access::Write && m.is_code(f.addr) => {
+                // (Asked of the list as it is now: another thread may have marked
+                // the page since this one last looked, and the host then refused a
+                // store that this thread's copy of the list allowed.)
+                Err(Stop::Fault(f)) if f.access == Access::Write && { m.sync(); m.is_code(f.addr) } => {
                     (c.reg, c.rflags) = (regs, flags);
                     // An instruction writes 512 bytes at most: two of the guest's pages.
                     let page = f.addr & !(PAGE - 1);
@@ -358,6 +361,16 @@ impl Jit {
                     match stepped {
                         Ok(Step::Next) => arrived = stands_in || left_inside || c.rip < before || c.rip > before.wrapping_add(15),
                         Ok(Step::Syscall) => return Event::Syscall,
+                        // Closed again before the store was made: another thread
+                        // made a block from the page in that moment (R055: the
+                        // JVM writes code beside code its other threads run, and
+                        // was sent this fault as its own, one run in six under
+                        // load). The instruction is begun again, as it began.
+                        Err(Stop::Fault(again)) if again.access == Access::Write && { m.sync(); m.is_code(again.addr) } => {
+                            (c.reg, c.rflags) = (regs, flags);
+                            arrived = false;
+                            continue;
+                        }
                         Err(stop) => return Event::Stop(stop),
                     }
                 }

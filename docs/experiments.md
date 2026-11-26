@@ -4585,3 +4585,44 @@ The card, written before the run.
     line is kept in memory and said only at the end
 - **Cut-off**: every run has a limit of 60 seconds; one round of 48 runs to
   capture; after the fix one round of 48. No third round of the same kind.
+
+**Result (2026-11-26): the hypothesis held, and the fault is r64m's: a store to a
+page closed for translated code, opened for the store, and closed again by another
+thread before the store was made. Fixed: SIGSEGV in 1 of 100 runs where it was in
+about 15 of 100. Two things are left and not understood: that one, and a hang at
+the JVM's end in about 5 of 100.**
+
+- Two failures were caught in 12 runs with `--faults` and the JVM's report on
+  standard error. Both: a write (the JVM's C2 compiler thread, in
+  `ciEnv::register_method` and `CodeHeap::allocate`) to a page the guest may read,
+  write and run, marked as holding translated code, in this thread's list and in
+  the shared one alike. So the guest was sent a fault for memory it may write.
+- The way: a store to such a page that is not this thread's own code (R010's
+  "beside") opens the page, has the interpreter run the instruction again, and
+  closes it. If the second run faulted too, the fault went to the guest. Another
+  thread that makes a block from the page in that moment closes it. The
+  instruction is now begun again in that case; and the first question (is the
+  page marked?) is asked of the list as it is now, not of this thread's copy as
+  it was when it last looked.
+- After: 48 runs four at once, no SIGSEGV, 4 hung (60 seconds); then 12 (1 hung)
+  and 40 (1 SIGSEGV, no hang) while looking at the hang: 100 runs, 1 SIGSEGV, 5
+  hung. Before (R054's table, the builds since R053): 23 SIGSEGV and 7 hung in
+  216.
+- **The hang** (one caught): every thread asleep, no CPU time going on, and the
+  JVM's work done: the key was made and said so. It is at the JVM's end, and it
+  was there before the fix (R054: 7 of 216). Which call each thread waits in was
+  not got: the round that asked for it met no hang in 40 runs.
+- **The one SIGSEGV after the fix** was in a run without `--faults`: nothing is
+  known of it. Another way to the same end, or another thing.
+
+By the card's cut-off (one round after the fix; no third of the same kind) it
+stops here. Owed, as a card of its own: the hang at the end (the calls the
+threads wait in: `/proc/PID/task/*/syscall` of a hung run), and the residue, with
+`--faults` on in every run.
+
+Left in: `--faults` (each fault handed to the guest, with what both lists say of
+the address).
+
+Tests: 120 unit tests on macOS, 121 on Linux; 62 programs four ways; the
+container suites by the JIT, all. No unit test of the race itself: it needs two
+threads and the moment between them.

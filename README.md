@@ -148,7 +148,10 @@ real CPU does.
    whose threads come and go grew without end), and a new thread knows its own id
    before it runs (R052: Node's workers stopped one run in ten). A file's pages
    are mapped, not copied (R053: an idle Node holds 64 MB where it held 260; the
-   real machine 49). The tests are run by a CI on every push
+   real machine 49). A kept request is 13.5% shorter (R054: compare-and-swap,
+   swap and short repeated moves in blocks); the race with QEMU for it is owed.
+   Open: the JVM, four at once, hangs at its end in one run in twenty (R055).
+   The tests are run by a CI on every push
    ([docs/ci.md](docs/ci.md)): `cargo xtask ci` is the same by hand.
 
 One case is owed: the x87's square root when what is left over equals the root (the

@@ -658,6 +658,24 @@ impl Mem {
         self.regions.iter().any(|r| r.start < end && start < r.end && r.prot & W != 0)
     }
 
+    /// What is known of `addr`, in words (`--faults`): the region it lies in by
+    /// this thread's copy of the list and by the list all threads share, with the
+    /// versions of the two. A protection is said in bits: 1 read, 2 write, 4 run,
+    /// and the mark of translated code above them.
+    pub fn say(&self, addr: u64) -> String {
+        let of = |regions: &[Region]| match regions.iter().find(|r| r.start <= addr && addr < r.end) {
+            Some(r) => format!("{:#x}..{:#x} prot {:#x}", r.start, r.end, r.prot),
+            None => "nothing".to_string(),
+        };
+        match &self.shared {
+            Some(shared) => {
+                let all = shared.regions.lock().unwrap_or_else(|e| e.into_inner());
+                format!("this thread's list (version {}): {}; the shared list (version {}): {}", self.seen, of(&self.regions), shared.version.load(Ordering::Acquire), of(&all))
+            }
+            None => format!("the list: {}", of(&self.regions)),
+        }
+    }
+
     /// Does the page at `addr` hold translated code?
     pub fn is_code(&self, addr: u64) -> bool {
         self.regions.get(self.first_ending_after(addr)).is_some_and(|r| r.start <= addr && r.prot & C != 0)
