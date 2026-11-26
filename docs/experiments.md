@@ -3888,3 +3888,49 @@ The card, written before the run.
     and is now the file: a JVM's archive, a locale's) → shared mappings that are
     not writable go back to being copies, and that is said
 - **Cut-off**: the two images; all tests on both hosts; the container cases.
+
+The result (the Linux container on the Mac; hal for the expected lines).
+
+**Go and PostgreSQL run and print what the real machine prints. All six of R047's
+images now do. The same six under OrbStack's QEMU print the same too: this was
+catching up with QEMU, not passing it.**
+
+| image | what it was asked | result |
+|---|---|---|
+| `golang:1.23-alpine` | a program with goroutines, a channel, a hash: compiled, linked and run | as hal |
+| `postgres:17-alpine` | `initdb`, start, a table made, filled and summed, stop | as hal |
+
+What was built, as the card had it:
+
+- `Mem::map_shared`: the host's own shared mapping at the place in the guest's
+  memory, of a file or of none; refused where the host's page is not the guest's.
+  From then on a region like any other. `mmap` uses it for every `MAP_SHARED` on
+  Linux; on macOS all is as before (a private copy, and ENOSYS for a file to be
+  written).
+- System V shared memory: `shmget` and `shmctl` handed on; `shmat` attaches the
+  segment at a place in the guest's memory (the kernel puts it there, `SHM_REMAP`);
+  `shmdt` unmaps the place.
+- `msync` and `sync_file_range` handed on. (`fallocate` was there.)
+
+Of my guesses of what else would stop them: `shmget` and its three, yes;
+`sync_file_range`, not guessed (PostgreSQL goes on without it but says so);
+`semget`, not used by this build. Nothing that ran before stopped: the card's third
+branch did not come.
+
+A fault of the test's own, found by its failing: the three ways of a case that
+listens on a port (nginx's 80, Node's 8099) ran at once and met on the port.
+They begin in `/tmp` now, which is how a file's cases are told to be run one at a
+time.
+
+**Open**: Node's case of four worker threads failed once under `--jit-check` in one
+whole run of its file (with the 36 busybox cases at the same time), and then passed
+eleven times of eleven, eight of them alone. What it printed that once was not
+kept. With more than one thread `--jit-check` checks nothing and runs as `--jit`
+does, so this is a fault that shows rarely with threads under load, and it is not
+found.
+
+Tests: 119 unit tests on Linux (one new: a shared mapping is the file's pages, and
+a child's), 118 on macOS, plain and ordered; the 62 programs four ways; the guest's
+signal program; container cases GCC 144, redis 39, nginx 3, memcached 3, Node 9,
+the JVM 6; Go's and PostgreSQL's by `--jit` (their three ways each are owed: the
+run's output was lost to a mistake in my command).

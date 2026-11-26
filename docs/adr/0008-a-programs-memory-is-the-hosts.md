@@ -89,3 +89,9 @@ microsecond each time and not the guest kernel's few hundred nanoseconds.
 - Signals for the guest (SIGSEGV first) are part of the first version, not a later one.
 - Where the guest's memory is 16 KB-coarse, a test's expected output can differ from
   the real CPU's; such tests are run on Linux.
+
+**Added 2026-11-26 (R048)**: on Linux a mapping the guest asks to be shared is the host's
+own shared mapping put at its place in the guest's memory (`Mem::map_shared`), and a
+System V segment is attached there the same way. On macOS, where a host page is four
+of the guest's, there is no such thing: a shared mapping is the private copy it was,
+and one of a file to be written is refused.

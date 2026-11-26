@@ -140,8 +140,10 @@ real CPU does.
    container and to `curl` outside it. Beside QEMU (R042 to R046): the start 3.0 times
    as fast, a request on a new connection 2.3, on a kept one 1.8 by the client's
    clock (R046: a return is foreseen by the host's own stack of returns). Both are as the real machine has them.
-   What done means is [0020](docs/adr/0020-what-done-means.md); next: a list of
-   other images, and containers that talk over the network.
+   What done means is [0020](docs/adr/0020-what-done-means.md). Six other images
+   run as the real machine has them (R047, R048): nginx, memcached, Node, a JVM,
+   Go, PostgreSQL. Next: r64m in QEMU's place in the host's Docker, and containers
+   that talk over the network.
 
 One case is owed: the x87's square root when what is left over equals the root (the
 rounding there is not touched by any of g64m's cases; found by breaking it on purpose).

@@ -67,6 +67,9 @@ pub struct Proc {
     actions: [[u64; 4]; 65],
     /// The calls that were named as not known.
     named: BTreeSet<u64>,
+    /// The System V segments attached (`shmat`): where, and how long each is.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    segments: std::collections::BTreeMap<u64, u64>,
 }
 
 /// How a thread or the process ends.
@@ -114,7 +117,7 @@ impl Sys {
     pub fn new(out: Output, brk: u64) -> Sys {
         // A gap under the interpreter, as much as a stack: nothing of the two meets.
         let mmap_top = INTERP_AT - (256 << 20);
-        let proc = Proc { brk, brk_start: brk, mmap_top, actions: [[0; 4]; 65], named: BTreeSet::new() };
+        let proc = Proc { brk, brk_start: brk, mmap_top, actions: [[0; 4]; 65], named: BTreeSet::new(), segments: Default::default() };
         #[allow(unused_mut)]
         let mut s = Sys {
             out,
@@ -295,6 +298,10 @@ pub fn call(c: &mut Cpu, m: &mut Mem, s: &mut Sys) -> Option<Exit> {
         131 => sigaltstack(m, s, a, b),
         20 => writev(m, s, a, b, d),
         25 => mremap(m, s, a, b, d, e),
+        #[cfg(target_os = "linux")]
+        30 => shmat(m, s, a, b, d),
+        #[cfg(target_os = "linux")]
+        67 => shmdt(m, s, a),
         60 => return Some(Exit::Thread((a & 0xff) as i32)),
         231 => return Some(Exit::Group((a & 0xff) as i32)),
         158 => arch_prctl(c, m, a, b),
@@ -379,8 +386,11 @@ fn mmap(m: &mut Mem, s: &mut Sys, addr: u64, len: u64, prot: u64, flags: u64, fd
     }
     let size = len.next_multiple_of(PAGE);
     let file = flags & MAP_ANONYMOUS == 0;
-    if file && flags & MAP_SHARED != 0 && prot & crate::mem::W != 0 {
-        // What is written would have to reach the file: not yet.
+    // Shared: the host's own shared mapping at the place, where that can be (Linux:
+    // R048). Elsewhere a shared mapping is the private copy it was before, but
+    // for one of a file that is to be written, which a copy cannot be.
+    let shared = flags & MAP_SHARED != 0 && cfg!(target_os = "linux");
+    if file && flags & MAP_SHARED != 0 && prot & crate::mem::W != 0 && !shared {
         return Err(ENOSYS);
     }
     let at = if flags & (MAP_FIXED | MAP_FIXED_NOREPLACE) != 0 {
@@ -395,7 +405,10 @@ fn mmap(m: &mut Mem, s: &mut Sys, addr: u64, len: u64, prot: u64, flags: u64, fd
         p.mmap_top = at;
         at
     };
-    if file {
+    if shared {
+        m.map_shared(at, size, prot, file.then_some((fd as i32, offset))).map_err(map_errno)?;
+        s.change(at, at + size);
+    } else if file {
         // The file's bytes are read into memory of the guest's own: the same to a
         // program that maps privately, which is what a loader and a compiler do.
         m.map(at, size, crate::mem::R | crate::mem::W).map_err(map_errno)?;
@@ -487,6 +500,51 @@ fn mremap(m: &mut Mem, s: &mut Sys, old: u64, old_len: u64, new_len: u64, flags:
     s.change(old, old + was);
     s.change(to, to + now);
     Ok(to)
+}
+
+/// `shmat`: a System V segment attached at a place in the guest's memory (R048). The
+/// host's kernel puts it there (in place of what the reservation had: SHM_REMAP), so
+/// it is the same memory in every process that attaches it, and in a child.
+#[cfg(target_os = "linux")]
+fn shmat(m: &mut Mem, s: &mut Sys, id: u64, addr: u64, flags: u64) -> Result<u64, u64> {
+    const READ_ONLY: u64 = 0x1000;
+    // How long it is: the sixth word of what IPC_STAT says of it.
+    let mut about = [0u64; 16];
+    if unsafe { libc::shmctl(id as i32, libc::IPC_STAT, about.as_mut_ptr() as *mut libc::shmid_ds) } != 0 {
+        return Err(errno());
+    }
+    let size = about[6].next_multiple_of(PAGE);
+    if size == 0 || addr % PAGE != 0 {
+        return Err(EINVAL);
+    }
+    let at = if addr != 0 {
+        addr
+    } else {
+        let mut p = s.proc();
+        let at = p.mmap_top.checked_sub(size).ok_or(ENOMEM)?;
+        p.mmap_top = at;
+        at
+    };
+    let prot = if flags & READ_ONLY != 0 { crate::mem::R } else { crate::mem::R | crate::mem::W };
+    m.adopt(at, size, prot, |host| {
+        let got = unsafe { libc::shmat(id as i32, host as *const libc::c_void, (flags & READ_ONLY) as i32 | libc::SHM_REMAP) };
+        if got as isize == -1 { Err(std::io::Error::last_os_error()) } else { Ok(()) }
+    })
+    .map_err(map_errno)?;
+    s.proc().segments.insert(at, size);
+    s.change(at, at + size);
+    Ok(at)
+}
+
+/// `shmdt`: the place is unmapped, which is how the kernel knows it detached.
+#[cfg(target_os = "linux")]
+fn shmdt(m: &mut Mem, s: &mut Sys, addr: u64) -> Result<u64, u64> {
+    let Some(size) = s.proc().segments.remove(&addr) else {
+        return Err(EINVAL);
+    };
+    m.unmap(addr, size).map_err(map_errno)?;
+    s.change(addr, addr + size);
+    Ok(0)
 }
 
 // ---- the CPU ------------------------------------------------------------------------------------

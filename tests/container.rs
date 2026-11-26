@@ -98,6 +98,8 @@ fn main() {
         ("memcached", include_str!("container/memcached.txt")),
         ("node", include_str!("container/node.txt")),
         ("java", include_str!("container/java.txt")),
+        ("go", include_str!("container/go.txt")),
+        ("postgres", include_str!("container/postgres.txt")),
     ];
     for (file, text) in files {
         // Only where the file's programs are.

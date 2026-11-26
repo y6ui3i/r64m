@@ -1,8 +1,10 @@
 #! needs /docker-entrypoint.d
 # The official nginx in its Alpine image (`nginx:alpine`), unchanged: started as a daemon, its
 # first page asked for over HTTP, a page that is not there, and told to quit.
+# (The cases that listen on a port begin in /tmp, which is how this file's cases are
+# told to be run one at a time.)
 # What the real machine printed (hal, the same image copied to it; 2026-11-26).
-$$ nginx > /dev/null 2>&1 && sleep 1 && wget -qO- http://127.0.0.1/ | grep -o '<title>.*</title>'; wget -qO- http://127.0.0.1/nothing 2>&1 | grep -c 404; nginx -s quit 2> /dev/null; while [ -e /run/nginx.pid ]; do sleep 1; done; echo ended
+$$ cd /tmp && nginx > /dev/null 2>&1 && sleep 1 && wget -qO- http://127.0.0.1/ | grep -o '<title>.*</title>'; wget -qO- http://127.0.0.1/nothing 2>&1 | grep -c 404; nginx -s quit 2> /dev/null; while [ -e /run/nginx.pid ]; do sleep 1; done; echo ended
 <title>Welcome to nginx!</title>
 1
 ended

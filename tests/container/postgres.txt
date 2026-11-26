@@ -1,0 +1,15 @@
+#! needs /usr/local/bin/postgres
+# PostgreSQL 17 in its Alpine image (`postgres:17-alpine`): `initdb`, the server started, a
+# table made and filled and summed, the server stopped. Many processes that share memory (a
+# shared mapping kept across `fork`, a System V segment: R048), `signalfd`, `fsync`.
+# What the real machine printed (hal, the same image copied to it; 2026-11-26).
+$$ su postgres -c 'initdb -D /tmp/pg -A trust > /dev/null 2>&1; echo initdb $?; pg_ctl -D /tmp/pg -l /tmp/pg.log -o "-c listen_addresses=" -w start > /dev/null 2>&1; echo start $?; psql -h /var/run/postgresql -At -c "select 6*7, version() like \$\$PostgreSQL 17%\$\$" -c "create table t(a int, b text); insert into t select g, md5(g::text) from generate_series(1,1000) g; select sum(a), count(*), max(b) from t" -c "select count(*) from pg_stat_activity where backend_type = \$\$checkpointer\$\$" postgres; pg_ctl -D /tmp/pg -w stop > /dev/null 2>&1; echo stop $?; rm -rf /tmp/pg'
+initdb 0
+start 0
+42|t
+CREATE TABLE
+INSERT 0 1000
+500500|1000|ffeabd223de0d4eacb9a3e6e53e5448d
+1
+stop 0
+? 0

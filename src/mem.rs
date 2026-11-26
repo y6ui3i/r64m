@@ -345,6 +345,59 @@ impl Mem {
         self.changing(|m| m.map_alone(start, len, prot))
     }
 
+    /// Maps `[start, start + len)` as memory that is shared (R048): the host's own
+    /// shared mapping put at the place, of the file `fd` from `offset`, or of no file
+    /// (`None`). What is written is seen by every process that has the same mapping
+    /// (a child made by `fork` among them) and reaches the file. Only where the
+    /// host's page is the guest's: elsewhere a host page could hold part of a shared
+    /// mapping and part of something else, and it is refused (`MapError::Range`).
+    /// From then on the region is like any other: protected, unmapped and mapped
+    /// over as the others are.
+    pub fn map_shared(&mut self, start: u64, len: u64, prot: u8, file: Option<(i32, u64)>) -> Result<(), MapError> {
+        self.changing(|m| m.map_shared_alone(start, len, prot, file))
+    }
+
+    fn map_shared_alone(&mut self, start: u64, len: u64, prot: u8, file: Option<(i32, u64)>) -> Result<(), MapError> {
+        let end = self.range(start, len)?;
+        if self.host_page != PAGE {
+            return Err(MapError::Range);
+        }
+        self.carve(start, end);
+        let (flags, fd, offset) = match file {
+            Some((fd, offset)) => (libc::MAP_SHARED | libc::MAP_FIXED, fd, offset as libc::off_t),
+            None => (libc::MAP_SHARED | libc::MAP_ANON | libc::MAP_FIXED, -1, 0),
+        };
+        let p = unsafe { libc::mmap(self.host(start) as *mut libc::c_void, (end - start) as usize, libc::PROT_NONE, flags, fd, offset) };
+        if p == libc::MAP_FAILED {
+            // Nothing is there now: what was carved out is handed back as it is
+            // when unmapped.
+            let e = io::Error::last_os_error();
+            self.host_sync(start, end).map_err(MapError::Host)?;
+            return Err(MapError::Host(e));
+        }
+        self.insert(Region { start, end, prot });
+        self.host_sync(start, end).map_err(MapError::Host)
+    }
+
+    /// Says that `[start, start + len)` is mapped with `prot`, the host having been
+    /// given what is there by someone else (a System V segment attached at the
+    /// place): the list is told, and the host's protection made what the list asks.
+    pub fn adopt(&mut self, start: u64, len: u64, prot: u8, attach: impl FnOnce(*mut u8) -> io::Result<()>) -> Result<(), MapError> {
+        self.changing(|m| {
+            let end = m.range(start, len)?;
+            if m.host_page != PAGE {
+                return Err(MapError::Range);
+            }
+            m.carve(start, end);
+            if let Err(e) = attach(m.host(start)) {
+                m.host_sync(start, end).map_err(MapError::Host)?;
+                return Err(MapError::Host(e));
+            }
+            m.insert(Region { start, end, prot });
+            m.host_sync(start, end).map_err(MapError::Host)
+        })
+    }
+
     /// Unmaps `[start, start + len)`.
     pub fn unmap(&mut self, start: u64, len: u64) -> Result<(), MapError> {
         self.changing(|m| m.unmap_alone(start, len))
@@ -1364,5 +1417,57 @@ mod tests {
         m.protect(A, PAGE, R).unwrap();
         assert_eq!(m.swap_if(A, 64, 9, 1), Err(fault(A, Access::Write)));
         assert_eq!(m.read_u64(A), Ok(9));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_shared_mapping_is_the_files_pages_and_a_childs_too() {
+        let mut m = Mem::reserve().unwrap();
+        // (Only where the host's page is the guest's.)
+        if m.host_page() != PAGE {
+            assert!(matches!(m.map_shared(A, PAGE, RW, None), Err(MapError::Range)));
+            return;
+        }
+        let fd = unsafe { libc::memfd_create(c"r64m".as_ptr(), 0) };
+        assert!(fd >= 0 && unsafe { libc::ftruncate(fd, 2 * PAGE as i64) } == 0);
+        let in_file = |at: i64| {
+            let mut v = [0u8; 8];
+            assert_eq!(unsafe { libc::pread(fd, v.as_mut_ptr() as *mut libc::c_void, 8, at) }, 8);
+            u64::from_le_bytes(v)
+        };
+        // What is written is in the file, and in another mapping of it.
+        m.map_shared(A, 2 * PAGE, RW, Some((fd, 0))).unwrap();
+        m.write_u64(A + PAGE + 8, 7).unwrap();
+        assert_eq!(in_file(PAGE as i64 + 8), 7);
+        m.map_shared(A + 8 * PAGE, PAGE, R, Some((fd, PAGE))).unwrap();
+        assert_eq!(m.read_u64(A + 8 * PAGE + 8), Ok(7));
+        assert!(m.write_u64(A + 8 * PAGE, 1).is_err());
+        // Protected and unmapped as any region; the file keeps what it was given.
+        m.protect(A, PAGE, R).unwrap();
+        assert!(m.write_u64(A, 1).is_err());
+        m.unmap(A, 2 * PAGE).unwrap();
+        assert!(m.read_u64(A + PAGE + 8).is_err());
+        assert_eq!(in_file(PAGE as i64 + 8), 7);
+        // With no file: what a child writes, its parent reads.
+        m.map_shared(A + 16 * PAGE, PAGE, RW, None).unwrap();
+        m.map(A + 17 * PAGE, PAGE, RW).unwrap();
+        let (shared, private) = (m.host(A + 16 * PAGE) as *mut u64, m.host(A + 17 * PAGE) as *mut u64);
+        match unsafe { libc::fork() } {
+            0 => unsafe {
+                shared.write(9);
+                private.write(9);
+                libc::_exit(0)
+            },
+            child => {
+                assert!(child > 0);
+                let mut status = 0;
+                assert_eq!(unsafe { libc::waitpid(child, &mut status, 0) }, child);
+            }
+        }
+        assert_eq!((m.read_u64(A + 16 * PAGE), m.read_u64(A + 17 * PAGE)), (Ok(9), Ok(0)));
+        // Mapped over afresh, it is the guest's own again and reads as nothing.
+        m.map(A + 16 * PAGE, PAGE, RW).unwrap();
+        assert_eq!(m.read_u64(A + 16 * PAGE), Ok(0));
+        unsafe { libc::close(fd) };
     }
 }

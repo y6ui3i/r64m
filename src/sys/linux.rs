@@ -649,6 +649,14 @@ pub fn call(c: &mut Cpu, m: &mut Mem, s: &mut Sys, n: u64, a: [u64; 6]) -> Optio
         // allocators count on it. The pages are the host's (ADR 0008).
         28 if a[2] == 4 => buf(m, a[0], a[1]).and_then(|at| raw(libc::SYS_madvise, [at, a[1], 4, 0, 0, 0])),
         28 => Ok(0),
+        // System V shared memory: made and asked about here (the structure is the
+        // same on both); attached and detached where the guest's memory is kept.
+        277 => raw(libc::SYS_sync_file_range, a),
+        29 => raw(libc::SYS_shmget, a),
+        31 => p(m, a[2]).and_then(|about| raw(libc::SYS_shmctl, [a[0], a[1], about, 0, 0, 0])),
+        // msync: the pages are the host's, and where they are a file's the host
+        // knows which.
+        26 => buf(m, a[0], a[1]).and_then(|at| raw(libc::SYS_msync, [at, a[1], a[2], 0, 0, 0])),
 
         // futex: the word waited on is the guest's memory, which is the host's (ADR
         // 0008), so the kernel's own futex on `base + g` is the guest's. The fourth

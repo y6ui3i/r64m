@@ -1,0 +1,11 @@
+#! needs /usr/local/go/bin/go
+# Go 1.23 in its Alpine image (`golang:1.23-alpine`): a program compiled, linked (the linker
+# writes its output through a shared mapping of the file: R048) and run: goroutines, a channel, a
+# hash, a float. Go's own runtime: its threads, its signals, no libc.
+# What the real machine printed (hal, the same image copied to it; 2026-11-26).
+$$ go version
+go version go1.23.12 linux/amd64
+? 0
+$$ mkdir -p /tmp/m && cd /tmp/m && printf '%s\n' 'package main' 'import ("fmt"; "sync"; "sort"; "crypto/sha256"; "os")' 'func main() {' ' var wg sync.WaitGroup; out := make([]int, 8)' ' for i := range out { wg.Add(1); go func(i int) { defer wg.Done(); s := 0; for k := 0; k < 100000; k++ { s += k % (i + 1) }; out[i] = s }(i) }' ' wg.Wait(); sort.Ints(out); c := make(chan int); go func() { t := 0; for v := range c { t += v }; c <- t }(); _ = os.Args' ' fmt.Printf("Hello, world %v %x %v\n", out, sha256.Sum256([]byte("r64m")), 1.0/3)' '}' > m.go && GO111MODULE=off go run m.go; cd /tmp && rm -rf m
+Hello, world [0 50000 99999 150000 200000 249996 299995 350000] 35e42e8d8413d3df33b529f74f5d597afcc6294e07c1155c599cd2c15f5d3103 0.3333333333333333
+? 0
