@@ -381,6 +381,7 @@ fn thread(c: &mut Cpu, m: &mut Mem, s: &mut Sys, flags: u64, stack: u64, parent_
     m.thread_has_x86_order(ask_x86_order());
     let (tell, told) = std::sync::mpsc::channel();
     let set_tid = flags & CLONE_CHILD_SETTID != 0;
+    let set_parent_tid = flags & CLONE_PARENT_SETTID != 0;
     super::THREADS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     std::thread::Builder::new()
         .spawn(move || {
@@ -389,14 +390,19 @@ fn thread(c: &mut Cpu, m: &mut Mem, s: &mut Sys, flags: u64, stack: u64, parent_
             if set_tid {
                 let _ = view.write_u32(child_tid, tid as u32);
             }
+            // The kernel writes the id where the parent asked before the new thread
+            // runs at all: a C library keeps a thread's id there, and the thread
+            // reads it for the first lock it takes (R052: written by the parent
+            // after this thread had started, it was now and then still nothing; a
+            // lock taken with it was not held, and its release was refused).
+            if set_parent_tid {
+                let _ = view.write_u32(parent_tid, tid as u32);
+            }
             let _ = tell.send(tid);
             body(child, view, its);
         })
         .map_err(|_| EAGAIN)?;
     let tid = told.recv().map_err(|_| EAGAIN)?;
-    if flags & CLONE_PARENT_SETTID != 0 {
-        let _ = m.write_u32(parent_tid, tid as u32);
-    }
     Ok(tid as u64)
 }
 

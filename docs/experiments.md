@@ -4279,3 +4279,45 @@ The card, written before the run.
     process by that signal, as a small test in the guest's suite
 - **Cut-off**: the 40 runs with calls said, and the reading of them, by this
   session's first hour; no second round of the same 40 without a changed condition.
+
+**Result (2026-11-26): the hypothesis was wrong in its detail and the cause is
+found and fixed. No call answered wrongly: `clone` wrote the new thread's id
+where the parent asked after the thread had begun to run. The kernel writes it
+before.**
+
+- With every call said, 0 of 40 failed (the saying changes the timing). By the
+  card, the stack at the stop alone: 2 of 60 failed, both with the same caller of
+  `abort`: libuv's `uv_mutex_unlock`, from `NodePlatform::RegisterIsolate`, in a
+  worker's thread just started. A release of a lock was refused.
+- musl keeps a thread's id in the thread's own block, and has the kernel write it
+  (`CLONE_PARENT_SETTID`). A lock that checks its holder writes that id into the
+  lock's word. r64m started the host's thread, which ran the guest at once, and
+  the parent wrote the id when the thread had told it: a thread that took a lock
+  in that moment wrote nothing into it. The lock was then held by nobody, and its
+  release, once the id was there, was refused; or two threads held it.
+- The same explains the stop at HLT: `abort` sends the signal to the thread's id,
+  and that was still nothing. A SIGABRT with no handler does end a process under
+  r64m: tried by hand from the first thread and another, with signals blocked,
+  and after a handler was set and taken away (all four end with 134).
+- Shown by making it worse: with the parent held back 50 ms before its write, 9
+  of 30 runs failed; with the fix and the same 50 ms, 0 of 30, side by side.
+- A small program for the GCC suite: 2,000 threads, four at a time, each takes and
+  releases a checked lock. The build before never finishes it (a lock nobody
+  holds is waited for for ever); the fix prints no refusal.
+- Now the new thread writes its id itself, before it tells the parent and before
+  it runs any of the guest.
+- The Node case at the end, 60 runs each, three and three at a time: the build
+  before 59, the fix 60. (That alone would not tell them apart; the two above do.)
+
+R047's one failure of this case and R051's one in ten are this. Any C library's
+threads were open to it: a program whose first act in a new thread is to take a
+lock that checks its holder.
+
+Tests: 118 unit tests on macOS, 119 on Linux; 62 programs four ways; primitives
+116, traces 39; the suites three ways each: GCC 21 (the new case among them),
+Python 75, the goal 3, the JVM 6, Go 6, Node 9, nginx 3, memcached 3, redis 3. One
+of Python's (a timer that counts how far a loop got in 50 ms, under the checker)
+failed once while ten suites ran together and passes alone, three times of three:
+the load's, not r64m's. hal could not be reached: the new case's expected line is
+what the program says it prints. Left in: at an instruction the CPU refuses, r64m
+says the thread and the top of the guest's stack.

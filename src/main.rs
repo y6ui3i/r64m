@@ -77,6 +77,11 @@ fn stopped(stop: cpu::Stop, c: &mut cpu::Cpu, mem: &mut mem::Mem, system: &mut s
         cpu::Stop::Again => unreachable!("an instruction to be run again is run again where it stands"),
     };
     eprintln!("r64m: at {:#x} after {} instructions: {what}", c.rip, c.steps);
+    if matches!(stop, cpu::Stop::Protection) {
+        // A C library ends `abort` so: what is on the stack says who called it.
+        let words: Vec<String> = (0..24).filter_map(|i| mem.read::<8>(c.reg[cpu::RSP] + 8 * i).ok()).map(|w| format!("{:x}", u64::from_le_bytes(w))).collect();
+        eprintln!("r64m: thread {}, on its stack: {}", sys::thread_number(), words.join(" "));
+    }
     sys::die_of(&stop)
 }
 
