@@ -4830,3 +4830,41 @@ beside them.
   repository; they hold what the tests print.
 - `main` is 29 commits behind `port` (it has R046's state): what a visitor
   sees first. Whether it is brought up before the change is the owner's word.
+
+## R058: two unit tests never end, once, on the CI (2026-11-27)
+
+The first pull request's run (`e88778a`, arm64 Linux, the pull request's own run)
+stood for 24 minutes in the unit tests and was cancelled; the push's run of the same
+commit had passed in 4. What had not ended: `mem::tests::the_host_is_as_open_as_the_list_to_the_host_page`
+and `mem::tests::the_reservation_is_large_and_closed`. Both ask the host by a child
+(`host_refuses`: `fork`, the child reads or writes the address and dies of it or
+does not, the parent waits). The test added today
+(`a_store_refused_while_another_thread_had_the_page_closed_is_made`, R057) had
+ended in that run; it runs beside them, with a thread that changes protections
+without pause.
+
+The card, written before the run.
+
+- **Hypothesis**: the child does not end. It is made by `fork` from one thread of
+  a process with many: it has that thread alone and the others' state as it stood.
+  When its access is refused, r64m's handler of faults runs in it (put in place
+  by any test that made generated code), and something on that path, or in the C
+  library's `fork`, waits for what a thread that does not exist in the child
+  held. Today's test makes such moments many (a thread always inside a change of
+  the list and of the host's protections), which is why it shows now.
+- **What is changed from before**: nothing was looked for before; it was seen
+  once. The condition is made: the unit tests' file for arm64 Linux run in a
+  container with the filter `mem::tests` and today's test together, again and
+  again, each run with 20 seconds at most; a run that passes them is asked for
+  its processes and what each waits in. The same count with `mem::tests` alone.
+- **Next move for each result**:
+  - A child is found that waits (in a lock of the C library's, or spinning in
+    the handler) → `host_refuses` is made not to depend on the process's state:
+    the child ends by the kernel's own doing, with nothing of r64m's or the
+    library's run in it after `fork`; and whether r64m itself forks so (`fork`
+    for the guest, `sys/linux.rs`) is read for the same hazard
+  - The parent is found in `fork` itself → the same, by the lock it waits for
+  - No hang in 300 runs with the test and 300 without → not this: the CI's
+    runner (4 cores, another kernel) is the condition missing; the two tests are
+    then run there alone by a workflow run asked for by hand, with a limit
+- **Cut-off**: 300 runs each way, 20 seconds a run at most.
