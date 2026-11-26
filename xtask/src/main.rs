@@ -88,8 +88,12 @@ fn for_linux() -> &'static [&'static str] {
     if cfg!(target_os = "linux") { &["--target", LINUX] } else { &[] }
 }
 
+/// The unit tests, the primitives and the traces: not the container cases, which
+/// run where a file of the image they name is, and on a Linux host with a shell
+/// and a compiler of its own would take the host's programs for the image's (the
+/// CI's first run did), nor the guest's, which `guest` builds first.
 fn test(more: &[String]) -> bool {
-    ran(cargo().args(["test", "--release"]).args(for_linux()).args(more))
+    ran(cargo().args(["test", "--release", "--bin", "r64m", "--test", "prim", "--test", "trace"]).args(for_linux()).args(more))
 }
 
 /// The guest's programs built for x86-64 Linux, and the tests that run them. Only
