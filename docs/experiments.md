@@ -4321,3 +4321,8 @@ failed once while ten suites ran together and passes alone, three times of three
 the load's, not r64m's. hal could not be reached: the new case's expected line is
 what the program says it prints. Left in: at an instruction the CPU refuses, r64m
 says the thread and the top of the guest's stack.
+
+**Added the same day**: hal reached. The two cases new in R051 and R052 (1,200
+threads one after another in Python; 2,000 threads and a checked lock in C), run
+there in the same images as the suites give them, print what the cases expect and
+end with 0. The cases' notes now say so.

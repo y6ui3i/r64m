@@ -89,8 +89,8 @@ TLSv1.3 TLS_AES_256_GCM_SHA384 Hello, world
 ? 0
 # Threads that come and go (R051): more of them, one after another, than a process
 # has pieces of generated code. Until then what a thread held of r64m's was kept
-# when it ended, and this stopped at the 1,024th. (The line expected is what the
-# program says it prints; hal could not be reached when the case was written.)
+# when it ended, and this stopped at the 1,024th. What the real machine printed
+# (hal, 2026-11-26).
 $$ python3 -c 'import threading as T; n = [0]; f = lambda: n.__setitem__(0, n[0] + 1); [(t.start(), t.join()) for t in (T.Thread(target=f) for i in range(1200))]; print(n[0])'
 1200
 ? 0
