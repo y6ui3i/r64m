@@ -142,8 +142,9 @@ real CPU does.
    clock (R046: a return is foreseen by the host's own stack of returns). Both are as the real machine has them.
    What done means is [0020](docs/adr/0020-what-done-means.md). Six other images
    run as the real machine has them (R047, R048): nginx, memcached, Node, a JVM,
-   Go, PostgreSQL. Next: r64m in QEMU's place in the host's Docker, and containers
-   that talk over the network.
+   Go, PostgreSQL. Registered with the host's Docker in QEMU's place, the goal's
+   request completes in the ordinary images unchanged by `docker run` alone (R049,
+   R050). Next: what a thread costs in memory, and tests run by a CI.
 
 One case is owed: the x87's square root when what is left over equals the root (the
 rounding there is not touched by any of g64m's cases; found by breaking it on purpose).

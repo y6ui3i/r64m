@@ -4051,3 +4051,73 @@ The card, written before the run.
 - **Cut-off**: the request; one run of each load; the memory of each process
   once. QEMU beside it is not measured here: the entry stays registered by the
   owner's word, and QEMU cannot be chosen while it is.
+
+The result (the Mac, r64m registered in OrbStack's VM as R049 left it; hal for the
+same programs run natively).
+
+**ADR 0020's point 1 holds: in the ordinary images unchanged, by `docker run` alone,
+the goal's request completes.** `python:3.13-slim` installs FastAPI and uvicorn
+with its own `pip` when it starts (under r64m) and serves; the official
+`nginx:alpine`, given a configuration and a certificate as files, takes TLS and
+passes to the other container by its name on a network Docker made; `curl` on the
+Mac gets 200, the certificate verified, `Hello, world`.
+
+One thing stopped it: **`sendmmsg` was not known**, and glibc's lookup of a name
+sends its two questions with it (the lookup failed, and `pip` with it). It and
+`recvmmsg` are done now by the calls for one message, one after another.
+
+**Under load the network is what holds the work back, and it is not r64m's doing:
+the same on the real machine.**
+
+| kept connections from the client | requests a second | uvicorn, user + system | nginx, user + system |
+|---|---|---|---|
+| 1 | 624 | 1.11 + 0.08 ms | 0.11 + 0.05 ms |
+| 4 | 848 | 0.99 + 0.08 ms | 0.12 + 0.10 ms |
+| 16 | 772, then falling to 480 | 1.2 to 1.9 + 0.1 ms | 0.3 + 0.1 ms rising to 0.4 + 1.5 ms |
+
+uvicorn is one process and is the limit at about 900 a second. With time nginx's
+system time grows to three quarters of its time and the rate halves. I took it
+first for r64m's `epoll` (the calls counted with `--calls`: two waits a request,
+nothing going round), then for each worker warming up (the same load three times:
+it got worse, not better). What it is: nginx opens a new connection to the other
+container for every request, each closed one waits a minute in the kernel
+(TIME_WAIT: 12,700 of them after the first load, 19,800 four loads later), and
+finding a free port for the next gets slower. **hal, natively, with the same two
+containers and sixteen connections: 1,504 requests a second falling to 808 as its
+waiting sockets go from 12,000 to 28,300.** So it is the configuration and the
+kernel; a connection to the other server that is kept (nginx's `keepalive`) is the
+remedy, and it is a line of configuration, not of r64m. System time in uvicorn
+stays under a tenth throughout.
+
+**Memory: a thread of the guest's costs r64m about 18 MB of its own, and that is
+what grows.**
+
+| resident memory | under r64m | natively on hal |
+|---|---|---|
+| uvicorn after its start (2 threads) | 79.6 MB | 47.2 MB |
+| uvicorn under 16 connections (5 threads) | 148 MB | 48.2 MB |
+| an nginx worker | 18.8 MB, most of it its parent's (the parent's own: 0.9 MB) | 6.6 MB, most of it the file's |
+| a shell that waits | 0.45 MB of its own | |
+
+Of uvicorn's 148 MB the guest's own memory is 55 MB, near what the real machine has;
+r64m's own is 92.5 MB, of which 25 MB is generated code. FastAPI runs a function
+that is not `async` in a pool of threads, the pool grew to five under load, and each
+thread has its own blocks and its own tables (ADR 0019, point A): the same 28,000
+blocks translated once for each. The JIT is not making blocks over (`--jit-stats`:
+28,164 blocks after 1,000 requests, 28,186 after 8,000, never emptied). Two other
+costs seen: a file's pages are a copy in every process (15 MB of libraries here,
+which natively are shared), and the code a block is made from is read again by
+each thread.
+
+By the card: the network needs nothing of r64m; memory is as the hypothesis said
+and more with threads, and what would make it smaller is a decision of design
+(blocks shared by the threads of a process; a file's pages mapped, not copied,
+which R048's shared mapping shows the way to on Linux): a card of its own, not
+begun.
+
+Not measured: QEMU beside any of this (r64m stays registered, by the owner's word,
+and QEMU cannot be chosen while it is).
+
+Tests after `sendmmsg`: 118 unit tests on macOS. The container suites were run
+before it (Python 72, the goal 3, Go 6 three ways each; PostgreSQL's three ways are
+still owed: the run printed nothing, for a reason not yet looked at).

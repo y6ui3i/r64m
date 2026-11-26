@@ -175,6 +175,30 @@ fn readlink(m: &mut Mem, s: &Sys, dir: u64, path: u64, to: u64, len: u64) -> Res
 
 // ---- sockets and waiting ----------------------------------------------------------------------
 
+/// `sendmmsg` and `recvmmsg`: several messages by one call, each a header as
+/// `sendmsg` has it followed by a word for how many bytes went. Done one after
+/// another with the call for one; the answer is how many were done, or the first
+/// one's error if none was. (A wait for the second and later ones is not cut
+/// short by `recvmmsg`'s own time limit, which is not handed on: what uses it here
+/// is a name lookup, which asks for as many answers as it sent questions.)
+fn messages(m: &mut Mem, number: c_long, fd: u64, list: u64, count: u64, flags: u64) -> Result<u64, u64> {
+    const WAIT_FOR_ONE: u64 = 0x10000;
+    let mut done = 0;
+    for i in 0..count.min(1024) {
+        let header = list + 64 * i;
+        // After the first, only what is there already (MSG_DONTWAIT), where the
+        // caller asked to wait for one.
+        let flags = if done > 0 && flags & WAIT_FOR_ONE != 0 { flags | 0x40 } else { flags };
+        match message(m, number, fd, header, flags & !WAIT_FOR_ONE) {
+            Ok(n) => m.write_u32(header + 56, n as u32).map_err(|_| EFAULT)?,
+            Err(e) if done == 0 => return Err(e),
+            Err(_) => break,
+        }
+        done += 1;
+    }
+    Ok(done)
+}
+
 /// `sendmsg` and `recvmsg`: the header holds pointers of the guest's (to an address,
 /// to a list of pieces, to control data), so one of the host's is made beside it,
 /// and what the kernel writes into the header is written back.
@@ -558,6 +582,8 @@ pub fn call(c: &mut Cpu, m: &mut Mem, s: &mut Sys, n: u64, a: [u64; 6]) -> Optio
         44 => buf(m, a[1], a[2]).and_then(|from| p(m, a[4]).and_then(|to| raw(libc::SYS_sendto, [a[0], from, a[2], a[3], to, a[5]]))),
         45 => same(m, libc::SYS_recvfrom, 0b11_0010),
         46 => message(m, libc::SYS_sendmsg, a[0], a[1], a[2]),
+        307 => messages(m, libc::SYS_sendmsg, a[0], a[1], a[2], a[3]),
+        299 => messages(m, libc::SYS_recvmsg, a[0], a[1], a[2], a[3]),
         47 => message(m, libc::SYS_recvmsg, a[0], a[1], a[2]),
         48 => same(m, libc::SYS_shutdown, 0),
         49 => same(m, libc::SYS_bind, 0b10),

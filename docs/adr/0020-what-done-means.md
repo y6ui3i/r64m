@@ -62,3 +62,10 @@ point 5).
   an experiment.
 - Registering r64m as the runner of x86-64 programs in the host's Docker (point 1)
   changes the whole Docker VM and is still the owner's to say when.
+
+**Where it stands after R047 to R050 (2026-11-26, later)**: point 1 holds (R050: the
+ordinary images unchanged, two containers, `docker run` alone, r64m registered in
+QEMU's place by the owner's word). Point 3: eight images run as the real machine
+has them; under load the network holds the work back on the real machine as much
+as under r64m. Point 2 as before (a kept connection 1.84). Memory: a guest thread
+costs about 18 MB of r64m's own, which is the next thing to decide.
