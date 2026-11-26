@@ -4716,3 +4716,37 @@ SIGSEGV above; a survey of every call for arguments it does not use, the real
 machine beside r64m with those registers set; cases of contention (locks,
 condition variables, semaphores, threads made and ended; musl, glibc, Go) with a
 limit of time each, for CI.
+
+## R057: a store the list allows, refused by the host: the JVM's SIGSEGV that is left (2026-11-27)
+
+The owner: 「マルチスレッド関連を強化するか」; the first of the three things R056
+names. For ADR 0020's point 3. What R055 and R056 left: one JVM in a hundred,
+eight at once, is sent SIGSEGV for a write to a page that both lists say it may
+write, with no mark of translated code (two caught with `--faults`: prot 7 in
+`CodeHeap::allocate`, prot 3 in `memset`).
+
+The card, written before the run.
+
+- **Hypothesis**: the page was closed (marked, the host's page read only) when
+  the store was made, and open again when the thread asked: another thread that
+  stores beside code opens the page for its one instruction, by taking the mark
+  off, and puts it back. A thread whose store was refused a moment before asks
+  in that window, finds no mark, and hands the fault to the guest (`Jit::run`:
+  the question is asked once, after the fault). R055 closed the opposite window
+  (closed again before the second try), not this one.
+- **What is changed from before**: no waiting for a capture; the two records are
+  the observation. The condition is made: a unit test with two threads, one
+  that marks and unmarks a page in a loop, one that stores to it through
+  `Jit::run`, which must never be handed a fault. Then the fix: a write the host
+  refuses where the list, as it is now, lets the guest write is r64m's own
+  doing whatever the mark says at that moment, and the instruction is begun
+  again (with a bound, so that a refusal that stays is still said).
+- **Next move for each result**:
+  - The test hands a fault before the fix and none after → the fix is kept; 96
+    JVM runs of eight at once, and the suites
+  - The test hands no fault before the fix → the window is not this one: the
+    calls that write the guest's memory for it (`read` into a closed page: the
+    kernel answers EFAULT) are looked at next, by the JVM's report of which call
+  - SIGSEGV again in the 96 after → its `--faults` line says whether it is the
+    same kind (list allows) or a true one
+- **Cut-off**: the test runs five seconds at most; one round of 96 after.
