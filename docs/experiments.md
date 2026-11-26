@@ -3857,3 +3857,34 @@ memory is (ADR 0008, 0013), and so is asked.
 
 Still to do in this experiment: the JVM's case three ways (running); Go and
 PostgreSQL after the decision.
+
+## R048: mappings that are shared, on Linux (2026-11-26)
+
+For ADR 0020's point 3. The owner's word on R047's question: 「共有マッピングを作る」.
+
+The card, written before the run.
+
+- **Hypothesis**: on Linux, where the host's page is the guest's, a mapping the guest
+  asks to be shared can be the host's own shared mapping put at its place in the
+  guest's memory (`mmap` with `MAP_SHARED | MAP_FIXED` on the reservation; with the
+  guest's descriptor, or none), and the list of regions needs to know nothing more
+  of it: protection, unmapping and mapping over it go as for any region, a child
+  made by `fork` shares it because the host's kernel does, and what is written
+  reaches the file because it is the file's pages. With that, and System V's
+  segments attached the same way (`shmat` at the place), Go's linker writes its
+  program and PostgreSQL does `initdb`, starts, answers a query and stops, each as
+  the real machine. What else stops them I guess to be small: a call or two
+  (`fallocate`, `msync`, `shmget` and its three, `semget` if this build uses it).
+- **What is changed from before** (R047): `Mem` gains one way to map (shared, Linux
+  only; on macOS the answer stays ENOSYS for a writable file and a private copy
+  for the rest, as now); `mmap` uses it for every `MAP_SHARED`; `msync`; the four
+  calls of System V shared memory. ADR 0008 gets a note.
+- **Next move for each result**:
+  - Both run as hal → their cases, with hal's lines; all tests; then the network
+    under load and memory, as the owner asked
+  - Go runs, PostgreSQL stops elsewhere → what it stops at is found with `--calls`
+    and mended if it is a call; if it is of another kind it is written down
+  - A program that ran before stops (a shared read-only mapping that was a copy
+    and is now the file: a JVM's archive, a locale's) → shared mappings that are
+    not writable go back to being copies, and that is said
+- **Cut-off**: the two images; all tests on both hosts; the container cases.
