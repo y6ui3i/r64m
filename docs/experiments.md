@@ -4406,3 +4406,46 @@ them: read, written without reaching the file, the file's later change seen in a
 page not written, protected, unmapped, a descriptor that is none refused); 62
 programs four ways; primitives 116, traces 39; every container suite three ways
 by `cargo xtask container`: 258 runs, PostgreSQL's among them.
+
+## R054: the kept connection, the one of point 2's four under 2 (2026-11-26)
+
+The owner: 「維持接続を 2 倍に」. For ADR 0020's point 2: by the client's clock a
+request on a kept connection is 1.95 ms under r64m and 3.59 under QEMU (R046):
+1.84. Twice needs 1.79 ms or less: 8% of r64m's.
+
+What is known (R046's table): the two servers' CPU time for a request is 1.29 ms
+(uvicorn) and 0.17 (nginx's worker), 1.46 together; the client sees 1.95. Under
+QEMU 3.16 and 0.26, 3.42 together; the client sees 3.59. So r64m has 0.49 ms in a
+request that is not the servers' CPU, where QEMU has 0.17. R044 took that part for
+the client's and the port's own, the same on both sides; these numbers say it is
+not the same.
+
+QEMU cannot be run beside r64m while r64m is registered (the VM's entry for QEMU
+names no file). The work is measured against r64m's own build of before, the two
+side by side; the race with QEMU needs r64m's entry switched off for its minutes
+and on again, which is asked of the owner when there is something to race.
+
+The card, written before the run.
+
+- **Hypothesis**: about 0.3 ms of a kept request under r64m is waiting that r64m
+  adds: a hand-over between threads or processes (nginx to uvicorn and back;
+  uvicorn's loop to its pool's thread and back, which is how FastAPI runs a
+  function that is not `async`) that is slower under r64m than its CPU time
+  shows: a call that sleeps where it need not, a wake that comes late, or time in
+  the kernel that the sampler does not count. Taking it away is the 8% and more.
+- **What is changed from before** (R046): each thread's user and system time is
+  read from the kernel for 2,000 kept requests (not the sampler's count), with
+  the client's clock for the same requests, so that the request's wall time is
+  divided into uvicorn's loop, its pool's thread, nginx, and what is none of them;
+  and the system calls of one request are said with the time each took.
+- **Next move for each result**:
+  - A part of the wall time is in neither server's CPU and a call is seen to wait
+    (a timeout, a sleep, a wake that the other side had to poll for) → that call's
+    handling is made the kernel's own and the request measured again
+  - System time is a large part (a quarter of the CPU or more) → which calls, and
+    what r64m does around each (copies, the list of regions, signals' masks)
+  - Neither: all of it is user time in generated code → R044's list of what still
+    leaves blocks (LOCK CMPXCHG, XCHG with memory, short REP MOVS and STOS: 4% by
+    its count) is built, the largest first, and the request measured after each
+- **Cut-off**: the division of the time today; no more than three changes built on
+  it before the race is asked for.
