@@ -150,7 +150,9 @@ real CPU does.
    are mapped, not copied (R053: an idle Node holds 64 MB where it held 260; the
    real machine 49). A kept request is 13.5% shorter (R054: compare-and-swap,
    swap and short repeated moves in blocks); the race with QEMU for it is owed.
-   Open: the JVM, four at once, hangs at its end in one run in twenty (R055).
+   The JVM's hang at its end under load was a `futex` wake r64m refused (R056:
+   fixed; none in 96 runs of eight at once). Open: one of those runs in a
+   hundred ends with SIGSEGV at a store the guest may make.
    The tests are run by a CI on every push
    ([docs/ci.md](docs/ci.md)): `cargo xtask ci` is the same by hand.
 

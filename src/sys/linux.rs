@@ -706,11 +706,19 @@ pub fn call(c: &mut Cpu, m: &mut Mem, s: &mut Sys, n: u64, a: [u64; 6]) -> Optio
         // futex: the word waited on is the guest's memory, which is the host's (ADR
         // 0008), so the kernel's own futex on `base + g` is the guest's. The fourth
         // argument is a time to wait for the calls that wait (WAIT, LOCK_PI,
-        // WAIT_BITSET, WAIT_REQUEUE_PI) and a number for the others.
+        // WAIT_BITSET, WAIT_REQUEUE_PI, LOCK_PI2) and a number for the others. The
+        // fifth is a second word only for the calls that move or wake waiters of two
+        // (REQUEUE, CMP_REQUEUE, WAKE_OP, WAIT_REQUEUE_PI, CMP_REQUEUE_PI); for the
+        // others it is whatever the register held, and is not looked at (R056: taken
+        // for an address always, a WAKE was refused when the register held a number
+        // that is no address of the guest's; the C library does not look at what
+        // WAKE answers, and whoever waited was left asleep: the JVM hung so at its
+        // end, one run in twenty of eight at once).
         202 => (|| {
-            let waits = matches!(a[1] & 0x7f, 0 | 6 | 9 | 11);
-            let fourth = if waits { p(m, a[3])? } else { a[3] };
-            raw(libc::SYS_futex, [p(m, a[0])?, a[1], a[2], fourth, p(m, a[4])?, a[5]])
+            let op = a[1] & 0x7f;
+            let fourth = if matches!(op, 0 | 6 | 9 | 11 | 13) { p(m, a[3])? } else { a[3] };
+            let fifth = if matches!(op, 3 | 4 | 5 | 11 | 12) { p(m, a[4])? } else { 0 };
+            raw(libc::SYS_futex, [p(m, a[0])?, a[1], a[2], fourth, fifth, a[5]])
         })(),
 
         // ---- who the process is

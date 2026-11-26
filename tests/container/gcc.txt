@@ -35,3 +35,12 @@ int x = sizeof(long) * 8 + 1;
 $$ cd /tmp && printf '%s\n' '#include <pthread.h>' '#include <sched.h>' '#include <stdio.h>' 'static pthread_mutex_t m; static int refused;' 'static void *f(void *a) { pthread_mutex_lock(&m); for (int i = 0; i < 3; i++) sched_yield(); if (pthread_mutex_unlock(&m)) __sync_fetch_and_add(&refused, 1); return 0; }' 'int main(void) { pthread_mutexattr_t at; pthread_mutexattr_init(&at); pthread_mutexattr_settype(&at, PTHREAD_MUTEX_ERRORCHECK); pthread_mutex_init(&m, &at);' 'for (int i = 0; i < 500; i++) { pthread_t t[4]; for (int k = 0; k < 4; k++) pthread_create(&t[k], 0, f, 0); for (int k = 0; k < 4; k++) pthread_join(t[k], 0); }' 'printf("releases of a lock refused: %d\n", refused); return 0; }' > r64m-tid.c && gcc -O1 r64m-tid.c -o r64m-tid -lpthread && ./r64m-tid; rm -f r64m-tid.c r64m-tid
 releases of a lock refused: 0
 ? 0
+# A wake is a wake whatever the registers it does not use hold (R056): FUTEX_WAKE
+# and FUTEX_WAIT look at three and four of the call's six, and the C library leaves
+# the others as they were. r64m took the fifth for an address in every futex call
+# and refused the call when it was none; nobody looks at what a wake answers, and
+# whoever waited slept on: the JVM hung so at its end, one run in twenty of eight
+# at once. What the real machine printed (hal, 2026-11-27).
+$$ cd /tmp && printf '%s\n' '#include <errno.h>' '#include <stdio.h>' '#include <sys/syscall.h>' '#include <unistd.h>' 'static int w;' 'int main(void) { long a = syscall(SYS_futex, &w, 129, 1, -1L, -1L, -1L); long b = syscall(SYS_futex, &w, 128, 1, 0L, -1L, -1L); printf("wake %ld, wait on another value %ld (%d)\n", a, b, errno); return 0; }' > r64m-fx.c && gcc -O1 r64m-fx.c -o r64m-fx && ./r64m-fx; rm -f r64m-fx.c r64m-fx
+wake 0, wait on another value -1 (11)
+? 0

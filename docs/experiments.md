@@ -4665,3 +4665,54 @@ The card, written before the run.
     calls instead
 - **Cut-off**: every run 60 seconds; 96 runs to capture, stopped at the second
   hang caught; after a fix, one round of 96.
+
+**Result (2026-11-27): the hypothesis held: a wake was lost, and r64m lost it, in
+the `futex` call itself. Fixed: no hang in 96 runs of eight at once, where 3 of
+104 hung. One run in 96 still ends with SIGSEGV; that is another thing, and now
+there is a record of it.**
+
+- Beside r64m, the same load (eight at once): the real machine, 96 of 96 end (hal;
+  the owner: 「halでもやってみるか」); user-mode QEMU on the Mac, 48 of 48 (the
+  owner: 「qemuでもやっていいよ」; r64m's entry in the VM was removed for the two
+  minutes and put back). So it is r64m's.
+- Round a (40 runs): two passed 60 seconds. One was not a hang: its threads had
+  moved two seconds later, and it had not said its first line; a slow run. The
+  other was one: the VM thread in a sleep it repeats, the rest in `futex`.
+- Round b (64 runs, with the words read from the process's memory): two hangs,
+  the same. In each, two or three threads wait on one word in the C library's own
+  memory (musl's `__lock`, likely the allocator's), expecting 80000002h and
+  80000003h (held, two and three counted), and the word holds 2: not held, two
+  counted. It was released and nobody was woken. Everything else follows: a
+  thread asleep there holds a mutex of the JVM's that four more wait for.
+- The cause: r64m took the fifth argument of every `futex` call for an address
+  and answered EFAULT when it was none of the guest's. FUTEX_WAKE does not use
+  it: the register holds what was left there. musl's `__wake` and glibc's
+  `futex_wake` do not look at the answer. So a wake was dropped whenever R8
+  happened to hold a large number at a release that had waiters: a matter of
+  which code ran before, and of there being waiters at all, which is why load
+  brings it out. It has been so since the call was written; R053 is only where
+  it was first counted.
+- A program that makes the call with the unused registers set says so at once
+  (now a case in `tests/container/gcc.txt`): the real machine `wake 0`, r64m
+  before `wake -1` (EFAULT), after `wake 0`. The same under glibc 2.41 (the
+  owner: 「glibcは大丈夫なのかな？」): before -1, after 0. Not a matter of which C
+  library; Go makes the call itself and was open to it too (not tried).
+- After: 96 runs, eight at once: no hang, 95 end well, one SIGSEGV. The count by
+  itself is weak (0 of 96 against 3 of 104); what carries it is the state read
+  from the hung processes and the call shown refused.
+- **The SIGSEGV that is left** (one in round b, one after; both with `--faults`):
+  a write to a page that both lists say the guest may write, with no mark of
+  translated code (prot 7 in `CodeHeap::allocate`, prot 3 in `memset`). So the
+  host refused a store the list allows: R055's kind, by a way R055's fix does
+  not cover (it asks the list once, after the fault; the mark can be gone by
+  then while the host's page was still closed at the store). Owed as its own
+  card.
+- Not looked at: `shmctl`'s third argument is taken for an address for every
+  command, and IPC_RMID does not use it. The same kind; programs pass a null
+  there. Owed with the survey below.
+
+What the owner asked next (「マルチスレッド関連を強化するか」), in this order: the
+SIGSEGV above; a survey of every call for arguments it does not use, the real
+machine beside r64m with those registers set; cases of contention (locks,
+condition variables, semaphores, threads made and ended; musl, glibc, Go) with a
+limit of time each, for CI.
