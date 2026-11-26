@@ -3499,3 +3499,33 @@ what r64m and QEMU agreed on. hal was reached, the image `r64m-goal:amd64` copie
 command lines run there natively: `TLSv1.3 TLS_AES_256_GCM_SHA384 Hello, world` twice,
 and `200 nginx Hello, world`, `0`, `20`, exit code 0. **The same lines as the test
 data, which now says so.** A scratch folder `/tmp/r041-1126` is left on hal.
+
+## R044: where a request on a kept connection spends its time (2026-11-26)
+
+R043 left a kept connection at 1.63 times QEMU by the client's clock (2.06 by
+uvicorn's CPU time, 1.5 by nginx's worker's).
+
+The card, written before the run.
+
+- **Hypothesis**: of uvicorn's 1.84 ms a request, a quarter is still not generated
+  code, in two parts I cannot yet tell apart: (1) instructions the interpreter is
+  given (R042's list for uvicorn after LEAVE: PMOVMSKB, REP STOS and REP MOVS,
+  LOCK CMPXCHG, XCHG, and the jumps after them), and (2) the way between blocks
+  through the run loop (`Jit::run` and `enter` were 9% of R042's samples: returns
+  and jumps through an operand that miss the table). If (1) is the larger, the
+  instructions at the top of the list are translated; if (2), the table.
+  The aim for this experiment: uvicorn 1.5 ms or less and the client's clock at
+  1.9 or more.
+- **What is changed from before** (R043): nothing until the profile is read.
+  `--profile` and `--jit-why` on uvicorn alone over 4,000 kept requests, and on a
+  single nginx process the same; `--jit-stats` without its timers for the counts.
+- **Next move for each result**:
+  - Interpreted instructions lead → the commonest translated, each with a unit
+    test and, for SSE, a trace from hal
+  - The run loop leads → what misses the table is counted (returns, indirect
+    calls) and the table or the joining is changed
+  - Generated code is over 85% and neither leads → the request is at what blocks
+    as they are can do; the client's floor is measured before anything else, and
+    the quality of the code (R-numbers to come) is another matter
+- **Cut-off**: one profile each; then the change the profile asks for, the CPU
+  times and three launches by the client's clock.
