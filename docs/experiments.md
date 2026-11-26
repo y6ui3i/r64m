@@ -4241,3 +4241,41 @@ new case among them), the goal 3, the JVM 6, Go 6, nginx 3, memcached 3, redis 3
 of 9 (the failure above). hal could not be reached (the new case's expected line
 is what the program says it prints). The comparison with QEMU was not run (r64m
 stays registered).
+
+## R052: Node's workers fail one run in ten under load (2026-11-26)
+
+The owner: 「Node の不具合を先に」. For ADR 0020's point 3 (the Node image is on its
+list, and the case is in its suite).
+
+What is known before the card (R051, and the guest's C library disassembled): the
+address the run stops at is the HLT at the end of musl's `abort`. The guest called
+`abort` and said nothing first; `abort` raised SIGABRT, then took the handler away
+and sent the signal to itself again, and still ran on to the HLT. So there are two
+things: why Node aborts, and why a SIGABRT with no handler, sent by a thread to
+itself, does not end the process there as it does on the real machine.
+
+The card, written before the run.
+
+- **Hypothesis**: a call of the kernel's that r64m answers gives, now and then
+  when threads end or start beside one another, an error the real machine never
+  gives (libuv calls `abort` without a word when a call on a thread, a lock or its
+  own descriptors fails): the last calls of the thread that aborts, said by
+  `--calls`, show one answered with an error just before the signals of `abort`.
+- **What is changed from before** (R051): the same case run 40 times, five at a
+  time, with every call said; and r64m says, when it stops at an instruction the
+  CPU refuses, the return addresses on the guest's stack, so that who called
+  `abort` can be read from the program's file.
+- **Next move for each result**:
+  - A call answered with an error stands just before → that call's answer is made
+    the real machine's, a case that fails often is written from it (the call made
+    by many threads at once), and the 40 runs repeated
+  - No call fails, and the caller of `abort` is a check of the program's own
+    state (a lock's, a queue's) → the memory is what is wrong: the instructions
+    that are to be atomic and are not (R033's list) are looked for in the code
+    around the caller, with ordered blocks on and off
+  - Saying the calls makes the failure go away (0 of 40) → the caller's address
+    alone, without `--calls`, and the question is put again from that
+  - Either way: a SIGABRT with no handler sent by `tkill` to the caller ends the
+    process by that signal, as a small test in the guest's suite
+- **Cut-off**: the 40 runs with calls said, and the reading of them, by this
+  session's first hour; no second round of the same 40 without a changed condition.
