@@ -4121,3 +4121,37 @@ and QEMU cannot be chosen while it is).
 Tests after `sendmmsg`: 118 unit tests on macOS. The container suites were run
 before it (Python 72, the goal 3, Go 6 three ways each; PostgreSQL's three ways are
 still owed: the run printed nothing, for a reason not yet looked at).
+
+## R051: where a thread's 18 MB is (2026-11-26)
+
+The owner: 「メモリを先に」 (memory before the CI). ADR 0020 sets no bar for memory;
+its point 3 asks that it be measured, and R050 measured it: about 18 MB of r64m's
+own for each thread of the guest's, of which generated code is about 5 MB.
+
+The card, written before the run.
+
+- **Hypothesis**: most of a thread's 18 MB is not generated code but what is kept
+  about each block (three vectors a block, the map of places, the maps of pages):
+  some 13 MB for 28,000 blocks, near 480 bytes a block, where the code itself is
+  180. If so, a good part can be had back without touching ADR 0019's point A
+  (each thread its own blocks): kept smaller, the same design.
+- **What is changed from before** (R050): r64m says, when asked (`--jit-memory`),
+  how many bytes each part holds for a thread: code written, the blocks' own
+  vectors, each map, the table. R050 had only the process's total from outside.
+- **Next move for each result**:
+  - What is kept about blocks is more than half of a thread's cost → it is made
+    smaller in place (one array for all blocks' instruction starts, nothing kept
+    that is only needed while a block is made), and the goal's memory measured
+    again beside R050's
+  - Code is more than half, or what is kept cannot be made much smaller → nothing
+    is saved short of sharing: the design is written as an ADR for the owner
+    (blocks of a process shared by its threads), and nothing built before the word
+  - The parts do not add up to what the process holds from outside (a third or
+    more unexplained) → what else is a thread's is looked for in the process's
+    map (`smaps`): the host's stacks, the allocator's own, a copy of the list of
+    regions
+  - Either way the ADR for sharing is proposed with the numbers this gives: what
+    sharing would save beyond what is saved in place, and a file's pages mapped
+    in place of copied (15 MB a process in R050)
+- **Cut-off**: the measurement by the count of this session's first hour; what is
+  saved in place the same day. Sharing is not begun on this card.
