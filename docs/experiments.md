@@ -4823,10 +4823,10 @@ beside them.
   as the real machine many times, by that name only; one line says it was out
   of reach "(the VPN)".
 - The ledger quotes the owner's words, in Japanese, where a card begins by them
-  (about seventy places). They are instructions about the work; the owner's to
+  (twenty places). They are instructions about the work; the owner's to
   say whether they stay.
 - GitHub: no pull request, no issue, no release, no wiki, no secret set for
   Actions. The CI's past runs and their logs become readable with the
   repository; they hold what the tests print.
-- `main` is 30 or so commits behind `port` (it has R050's state): what a visitor
+- `main` is 29 commits behind `port` (it has R046's state): what a visitor
   sees first. Whether it is brought up before the change is the owner's word.
