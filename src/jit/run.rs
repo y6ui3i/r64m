@@ -3169,4 +3169,42 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn the_bytes_top_bits_a_lower_half_from_memory_and_the_smaller_and_larger_bytes() {
+        // pmovmskb eax, xmm1; pmovmskb r8d, xmm2; pmovmskb ebx, xmm8
+        // movlpd xmm3, [rsi]; movlps xmm4, [rsi+8]
+        // pminub xmm5, xmm1; pmaxub xmm6, [rsi]; syscall
+        let code = [
+            0x66, 0x0f, 0xd7, 0xc1, 0x66, 0x44, 0x0f, 0xd7, 0xc2, 0x66, 0x41, 0x0f, 0xd7, 0xd8, 0x66, 0x0f, 0x12, 0x1e, 0x0f, 0x12, 0x66,
+            0x08, 0x66, 0x0f, 0xda, 0xe9, 0x66, 0x0f, 0xde, 0x36, 0x0f, 0x05,
+        ];
+        let data: Vec<u8> = (0..16u8).map(|i| i.wrapping_mul(37) ^ 0x5a).collect();
+        let values: [(u64, u64); 6] = [
+            (0, 0),
+            (u64::MAX, u64::MAX),
+            (0x8000_0000_0000_0080, 0x0080_0000_0000_8000),
+            (0x7f7f_7f7f_7f7f_7f7f, 0x8080_8080_8080_8080),
+            (0x0123_4567_89ab_cdef, 0xfedc_ba98_7654_3210),
+            (0xff00_ff00_ff00_ff00, 0x00ff_00ff_00ff_00ff),
+        ];
+        let mask = |(lo, hi): (u64, u64)| (0..16).fold(0u64, |m, i| m | ((if i < 8 { lo >> (8 * i + 7) } else { hi >> (8 * (i - 8) + 7) }) & 1) << i);
+        for (k, &v) in values.iter().enumerate() {
+            let (w, x) = (values[(k + 1) % 6], values[(k + 2) % 6]);
+            let (c, _) = checked(&code, &data, &|c| {
+                fill_xmm(c);
+                (c.xmm[2], c.xmm[3]) = v;
+                (c.xmm[4], c.xmm[5]) = w;
+                (c.xmm[16], c.xmm[17]) = x;
+                (c.reg[RSI], c.reg[RAX], c.reg[RBX], c.reg[8]) = (DATA, u64::MAX, u64::MAX, u64::MAX);
+            });
+            assert_eq!((c.reg[RAX], c.reg[8], c.reg[RBX]), (mask(v), mask(w), mask(x)), "of {v:x?}");
+        }
+        let mut m = guest(&code, &data);
+        let mut jit = Jit::new(false, 1).unwrap();
+        let mut c = Cpu::new(CODE, DATA + 4096);
+        c.reg[RSI] = DATA;
+        assert!(matches!(jit.run(&mut c, &mut m), Event::Syscall));
+        assert_eq!(jit.stats.in_blocks, c.steps - 1);
+    }
 }

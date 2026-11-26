@@ -117,6 +117,7 @@ fn is_sse(op: u16) -> bool {
         op,
         0x110 | 0x111 | 0x116 | 0x128 | 0x129 | 0x12a | 0x12c | 0x12e | 0x12f | 0x151 | 0x154..=0x15a | 0x15c..=0x15f
             | 0x16e | 0x16f | 0x17e | 0x17f | 0x1d6 | 0x1db | 0x1df | 0x1eb | 0x1ef
+            | 0x112 | 0x1d7
     ) || is_packed(op)
 }
 
@@ -124,7 +125,7 @@ fn is_sse(op: u16) -> bool {
 /// PUNPCKH of each size, PCMPGT and PCMPEQ, PSHUFD, the shifts by a constant, PADD
 /// and PSUB of each size, PMULUDQ.
 fn is_packed(op: u16) -> bool {
-    matches!(op, 0x160..=0x162 | 0x164..=0x166 | 0x168..=0x16a | 0x16c | 0x16d | 0x170..=0x176 | 0x1c6 | 0x1d4 | 0x1f4 | 0x1f8..=0x1fe)
+    matches!(op, 0x160..=0x162 | 0x164..=0x166 | 0x168..=0x16a | 0x16c | 0x16d | 0x170..=0x176 | 0x1c6 | 0x1d4 | 0x1da | 0x1de | 0x1f4 | 0x1f8..=0x1fe)
 }
 
 /// Is it one with this prefix?
@@ -140,6 +141,9 @@ fn sse_with(op: u16, pre: u8) -> bool {
         0x16f | 0x17f | 0x17e => pre == 1 || pre == 2,
         // MOVD and MOVQ into a register, MOVQ out of one, PAND, PANDN, POR, PXOR.
         0x16e | 0x1d6 | 0x1db | 0x1df | 0x1eb | 0x1ef => pre == 1,
+        // PMOVMSKB; MOVLPS and MOVLPD from memory.
+        0x1d7 => pre == 1,
+        0x112 => pre < 2,
         // The scalar arithmetic and the conversions.
         0x12a | 0x12c | 0x151 | 0x158..=0x15a | 0x15c..=0x15f => pre == 2 || pre == 3,
         // SHUFPS has no prefix; the packed integers have 66h (without it they are the
@@ -325,6 +329,9 @@ fn read(bytes: &[u8], rip: u64) -> Option<Ins> {
             0x173 => matches!(ins.rm, Rm::Reg(_)) && matches!(ins.reg & 7, 2 | 3 | 6 | 7),
             // (With 66h and a register it is no instruction.)
             0x116 => pre == 0 || matches!(ins.rm, Rm::Mem { .. }),
+            // (Of two registers it is MOVHLPS, or no instruction.)
+            0x112 => matches!(ins.rm, Rm::Mem { .. }),
+            0x1d7 => matches!(ins.rm, Rm::Reg(_)),
             _ => true,
         };
         return (sse_with(op, pre) && shift_ok).then_some(ins);
@@ -1220,7 +1227,7 @@ impl Emit<'_> {
             }
             // Element by element, and the layings side by side: one instruction of
             // the host's each. PUNPCKL is ZIP1 and PUNPCKH is ZIP2.
-            0x160..=0x162 | 0x164..=0x166 | 0x168..=0x16a | 0x16c | 0x16d | 0x174..=0x176 | 0x1d4 | 0x1f8..=0x1fe => {
+            0x160..=0x162 | 0x164..=0x166 | 0x168..=0x16a | 0x16c | 0x16d | 0x174..=0x176 | 0x1d4 | 0x1da | 0x1de | 0x1f8..=0x1fe => {
                 let b = self.fsrc(ins.rm, FpSize::Q);
                 let (op, lane) = match ins.op {
                     0x160..=0x162 => (V3::Zip1, ins.op - 0x160),
@@ -1230,10 +1237,33 @@ impl Emit<'_> {
                     0x16d => (V3::Zip2, 3),
                     0x174..=0x176 => (V3::Cmeq, ins.op - 0x174),
                     0x1d4 => (V3::Add, 3),
+                    0x1da => (V3::Umin, 0),
+                    0x1de => (V3::Umax, 0),
                     0x1f8..=0x1fb => (V3::Sub, ins.op - 0x1f8),
                     _ => (V3::Add, ins.op - 0x1fc),
                 };
                 self.put(a64::vec3(op, lane_of(lane), reg, reg, b));
+            }
+            // PMOVMSKB: the top bit of each of the sixteen bytes, as sixteen bits of a
+            // general register. Each byte to 0 or 1; then pairs, fours and eights of
+            // them gathered into the lowest byte of each half, by adding to each
+            // element itself moved right.
+            0x1d7 => {
+                let Rm::Reg(s) = ins.rm else { unreachable!() };
+                self.put(a64::vshift(VShift::Ushr, Lane::B, V0, s, 7));
+                self.put(a64::vshift(VShift::Usra, Lane::H, V0, V0, 7));
+                self.put(a64::vshift(VShift::Usra, Lane::S, V0, V0, 14));
+                self.put(a64::vshift(VShift::Usra, Lane::D, V0, V0, 28));
+                self.put(a64::umov_b(reg, V0, 0));
+                self.put(a64::umov_b(T0, V0, 8));
+                self.put(a64::arith(false, false, false, reg, reg, T0, 8));
+            }
+            // MOVLPS and MOVLPD from memory: the lower half, the upper kept.
+            0x112 => {
+                let Rm::Mem { base, index, disp } = ins.rm else { unreachable!() };
+                let a = self.address(base, index, disp);
+                self.fmem(FpSize::D, true, V0, a);
+                self.put(a64::ins_low(true, reg, V0));
             }
             // PMULUDQ: the 64-bit products of the lower halves of the two 64-bit
             // elements of each.

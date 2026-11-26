@@ -480,6 +480,9 @@ pub enum V3 {
     Zip2 = 0x4e00_7800,
     Uzp1 = 0x4e00_1800,
     Uzp2 = 0x4e00_5800,
+    /// The smaller and the larger of each pair, unsigned.
+    Umin = 0x6e20_6c00,
+    Umax = 0x6e20_6400,
 }
 
 pub fn vec3(op: V3, lane: Lane, rd: u8, rn: u8, rm: u8) -> u32 {
@@ -514,6 +517,8 @@ pub enum VShift {
     Ushr,
     Sshr,
     Shl,
+    /// To the right without its sign, and added to what the register written held.
+    Usra,
 }
 
 pub fn vshift(op: VShift, lane: Lane, rd: u8, rn: u8, by: u32) -> u32 {
@@ -522,8 +527,14 @@ pub fn vshift(op: VShift, lane: Lane, rd: u8, rn: u8, by: u32) -> u32 {
         VShift::Ushr => (0x6f00_0400, 2 * bits - by),
         VShift::Sshr => (0x4f00_0400, 2 * bits - by),
         VShift::Shl => (0x4f00_5400, bits + by),
+        VShift::Usra => (0x6f00_1400, 2 * bits - by),
     };
     form | field << 16 | r(rn) << 5 | r(rd)
+}
+
+/// Byte `i` of a vector register to a general one, the rest of that one zero.
+pub fn umov_b(rd: u8, rn: u8, i: u32) -> u32 {
+    0x0e00_3c00 | (i << 1 | 1) << 16 | r(rn) << 5 | r(rd)
 }
 
 /// Sixteen bytes from byte `from` of `rn` followed by `rm`: a move of the whole
@@ -781,6 +792,15 @@ mod tests {
             (dup_s(1, 2, 0), 0x4e040441, "dup v1.4s, v2.s[0]"),
             (dup_s(1, 17, 3), 0x4e1c0621, "dup v1.4s, v17.s[3]"),
             (vshift(VShift::Ushr, Lane::S, 1, 1, 7), 0x6f390421, "ushr v1.4s, v1.4s, #7"),
+            (vshift(VShift::Ushr, Lane::B, 16, 3, 7), 0x6f090470, "ushr v16.16b, v3.16b, #7"),
+            (vshift(VShift::Usra, Lane::H, 16, 16, 7), 0x6f191610, "usra v16.8h, v16.8h, #7"),
+            (vshift(VShift::Usra, Lane::S, 16, 16, 14), 0x6f321610, "usra v16.4s, v16.4s, #14"),
+            (vshift(VShift::Usra, Lane::D, 16, 16, 28), 0x6f641610, "usra v16.2d, v16.2d, #28"),
+            (umov_b(3, 16, 0), 0x0e013e03, "umov w3, v16.b[0]"),
+            (umov_b(16, 16, 8), 0x0e113e10, "umov w16, v16.b[8]"),
+            (arith(false, false, false, 3, 3, 16, 8), 0x0b102063, "add w3, w3, w16, lsl #8"),
+            (vec3(V3::Umin, Lane::B, 1, 1, 2), 0x6e226c21, "umin v1.16b, v1.16b, v2.16b"),
+            (vec3(V3::Umax, Lane::B, 1, 1, 2), 0x6e226421, "umax v1.16b, v1.16b, v2.16b"),
             (vshift(VShift::Ushr, Lane::D, 1, 1, 32), 0x6f600421, "ushr v1.2d, v1.2d, #32"),
             (vshift(VShift::Ushr, Lane::H, 1, 1, 15), 0x6f110421, "ushr v1.8h, v1.8h, #15"),
             (vshift(VShift::Sshr, Lane::S, 1, 1, 31), 0x4f210421, "sshr v1.4s, v1.4s, #31"),
@@ -816,7 +836,7 @@ mod tests {
         for (ours, theirs, name) in cases {
             assert_eq!(ours, theirs, "{name}: {ours:08x}, the assembler {theirs:08x}");
         }
-        assert_eq!(cases.len(), 250);
+        assert_eq!(cases.len(), 259);
     }
 
     #[test]

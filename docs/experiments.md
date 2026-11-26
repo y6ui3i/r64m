@@ -3529,3 +3529,51 @@ The card, written before the run.
     the quality of the code (R-numbers to come) is another matter
 - **Cut-off**: one profile each; then the change the profile asks for, the CPU
   times and three launches by the client's clock.
+
+The result (the Mac, as before).
+
+**Neither part leads: uvicorn is 80% generated code, and what the profile could ask
+for was small. uvicorn's request went from 1.84 to 1.78 ms; the aim of 1.5 is not
+met, and a kept connection is 1.67 times QEMU by the client's clock.**
+
+The profile of uvicorn over 4,000 kept requests (its start is in it, about a fifth
+of the samples): generated code 80%; the interpreter about 7% (`exec`, `settle`,
+`step`, the SSE unit, the string instructions); the run loop and the way in 5%;
+system calls 4%. So both parts of the hypothesis are there and neither is a
+quarter: together they are an eighth.
+
+What was built from it: **PMOVMSKB** (the commonest instruction still interpreted:
+647 a request, and it is in every string function of glibc's that looks for a
+byte: four host instructions gather the sixteen top bits), **MOVLPS and MOVLPD from
+memory**, **PMINUB and PMAXUB**. Encodings against clang as the others; one unit
+test more (117).
+
+| | QEMU | R043 | R044 | QEMU / R044 |
+|---|---|---|---|---|
+| uvicorn's CPU time, a kept connection | 3.66 ms | 1.84 ms | 1.78 ms | 2.06 |
+| nginx's worker's, a kept connection | 0.35 ms | 0.26 ms | 0.27 ms | 1.3 |
+| nginx's worker's, a handshake | 10.8 ms | 4.2 ms | 4.1 ms | 2.6 |
+| by the client's clock: the start | 3.70 s | 1.46 s | 1.29 s | 2.87 |
+| a new connection | 19.65 ms | 8.90 ms | 8.43 ms | 2.33 |
+| a kept connection | 4.17 ms | 2.79 ms | 2.49 ms | 1.67 |
+
+(The kept connection's three launches were 3.36, 2.49 and 2.72 ms for r64m and
+4.29, 4.20, 4.17 for QEMU: r64m's is the noisier, and the least is what is given.)
+
+What still leaves blocks in uvicorn, for each request: conditional jumps that begin
+a block or follow an interpreted instruction 735, REP STOS 372, REP MOVS 341, LOCK
+CMPXCHG 190, XCHG with memory 271, SYSCALL 66. About 1,900 events at some 40 ns:
+4% of the request. Each is a piece of work of its own (a compare-and-swap in
+blocks; the string instructions as loops; a jump that reads RFLAGS where there is
+no record), and all of them together do not reach 1.5 ms.
+
+So by the card's third branch: the request is near what blocks as they are can do,
+and the two things to know next are (1) the client's and the port's own time, which
+is in both sides of the client's clock (a native arm64 nginx and FastAPI under the
+same client would give it; that is a download to ask for), and (2) what the 80%
+is: the quality of the code for CPython's interpreter loop (jumps through a
+register, calls and returns, the flags at each compare), which no experiment here
+has looked at with a profile of the guest's own addresses.
+
+Tests: 117 unit tests plain and ordered on both hosts; the 62 programs four ways;
+container cases GCC 144, Python 72, redis 39, the goal 3; prim 116 and trace 39.
