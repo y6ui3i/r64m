@@ -3577,3 +3577,39 @@ has looked at with a profile of the guest's own addresses.
 
 Tests: 117 unit tests plain and ordered on both hosts; the 62 programs four ways;
 container cases GCC 144, Python 72, redis 39, the goal 3; prim 116 and trace 39.
+
+## R045: what the generated code for uvicorn's request is (2026-11-26)
+
+R044: 80% of uvicorn's time is generated code, and nothing has yet said which code
+or what is slow in it.
+
+The card, written before the run.
+
+- **Hypothesis**: the samples in generated code gather in few blocks (the twenty
+  hottest hold 40% or more), and they are CPython's evaluation loop and what it
+  calls for every bytecode: reference counts, type checks, the dispatch. In their
+  host code the cost that is not the guest's own work is, in my guess of the order:
+  (1) the end of a block that jumps through a register or returns (the table's
+  lookup, a dozen instructions for one of the guest's), (2) the record of the
+  flags written where the next block may read it (three moves for a compare whose
+  jump is in the same block already skips them; a compare before a call or a
+  return does not), (3) the count of instructions added at each end, (4) the look
+  for a signal.
+- **What is changed from before** (R044): `--profile` says, for a sample in
+  generated code, which block and which of the guest's instructions it was in (the
+  main thread's blocks), and the guest's base in the host; nothing else. The
+  guest's addresses are named from the image's own files (`/proc/PID/maps` of the
+  running r64m, and `nm`).
+- **Next move for each result**:
+  - Ends of blocks lead → how a return finds its block is the next experiment (a
+    prediction beside the call, as hardware does it)
+  - The record leads → what is known dead across a call or a return (the ABI
+    says the flags do not live across them) is the next: a decision for an ADR,
+    since it is a guess about the guest that a hand-written program may break
+  - The guest's own work leads (loads, stores, compares that are one host
+    instruction each) → the request is where it can be with this design, and that
+    is said
+  - Spread thin over thousands of blocks → the per-block costs (3, 4) are
+    measured by taking each out in a build of its own
+- **Cut-off**: one profile; the ten hottest blocks read instruction by instruction.
+  No change to the translator in this experiment.
