@@ -3747,3 +3747,47 @@ Tests: 118 unit tests plain and ordered on both hosts (one new: the one landing,
 and its forgetting with the code); the 62 programs four ways; the guest's signal
 program; container cases GCC 144, Python 72, redis 39, the goal 3; prim 116, trace
 39.
+
+## R047: six other images (2026-11-26)
+
+For ADR 0020's point 3 (compatible). The owner allowed the downloads: the x86-64
+images `nginx:alpine`, `node:22-alpine`, `postgres:17-alpine`,
+`eclipse-temurin:21-jre-alpine`, `memcached:alpine`, `golang:1.23-alpine`, from
+Docker Hub.
+
+The card, written before the run.
+
+- **Hypothesis**: each image, given one piece of its own work under r64m (`--jit`),
+  either does it as the real machine does or stops for one of a few kinds of
+  reason, and I guess which for each before running:
+  - nginx (musl): serves a file over HTTP; as the goal's nginx did. Runs.
+  - memcached (musl, threads, epoll): set and get over TCP. Runs.
+  - Go (its own runtime: threads by `clone` with its own stacks, signals for
+    preemption, `sigaltstack`, no libc): builds and runs a program. Stops at a
+    system call or a flag of `clone` the table does not have, or at preemption's
+    signals (`tgkill` to its own threads, many a second).
+  - PostgreSQL (many processes, System V or POSIX shared memory, semaphores,
+    `fsync`): `initdb`, start, one query, stop. Stops at shared memory (`shmget`
+    or a shared writable mapping, which is a known gap) .
+  - Node (V8 makes code and runs it; `mprotect` between writing and running; the
+    code on pages the guest writes): a script that computes and prints. Stops,
+    or runs slowly, where V8's generated code meets ADR 0016's guard; or at
+    `pkey` or `memfd` calls.
+  - a JVM (the same, more so; many threads; signals used for null checks:
+    SIGSEGV on purpose): `java -version`, then a class run from source. Stops at
+    the faults it takes on purpose, or at its use of `mprotect` and `madvise`.
+- **What is changed from before** (R046): nothing in r64m until an image stops;
+  then the smallest thing that lets it go on, each noted. What needs a decision
+  (shared memory between processes is one) is brought to the owner, not built.
+- **Next move for each result**:
+  - Runs and prints what QEMU prints → the same command on hal; the case is
+    written with hal's lines
+  - A call not in the table, a flag, a structure → added as the others were
+  - A stop of a kind that needs design (shared memory, a fault taken on
+    purpose inside generated code, code made and run by the guest at speed) →
+    written down with what it would take; the image is listed as not yet
+  - Runs but differs from hal → found by the trace or by halving the work, before
+    any guess
+- **Cut-off**: each image tried; the small fixes made; the list of what runs and
+  what does not, with reasons. Not in this experiment: speed, the network under
+  load, memory.
