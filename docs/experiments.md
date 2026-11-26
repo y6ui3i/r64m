@@ -3934,3 +3934,39 @@ a child's), 118 on macOS, plain and ordered; the 62 programs four ways; the gues
 signal program; container cases GCC 144, redis 39, nginx 3, memcached 3, Node 9,
 the JVM 6; Go's and PostgreSQL's by `--jit` (their three ways each are owed: the
 run's output was lost to a mistake in my command).
+
+## R049: r64m in QEMU's place in the host's Docker (2026-11-26)
+
+For ADR 0020's point 1: started by `docker run` with nothing naming r64m. The owner's
+picture: 「Docker コマンド → OrbStack → r64m → イメージの起動」, and of where r64m sits:
+「QEMU の代わり」.
+
+The card, written before the run.
+
+- **Hypothesis**: the kernel of OrbStack's VM runs x86-64 programs by what is
+  registered with `binfmt_misc` (now `qemu-x86_64`, flags POCF). If r64m is
+  registered for the same programs (flags PF: the program's own first argument
+  kept, and r64m's file held open by the kernel so that every container finds it
+  whatever its files are), an entry made later is asked first, and
+  `docker run --platform linux/amd64 IMAGE` runs the image under r64m with no
+  word of r64m in the command. r64m needs two small things for it: to know it was
+  started by the kernel (by the name it is registered under), where it takes the
+  path and the first argument in the kernel's order and uses the JIT; and to start
+  itself again for `execve` by `/proc/self/exe`, since its own path means nothing
+  inside another container. Then the six images of R047, the goal's request and
+  redis run as their cases have them, by `docker run` alone.
+- **What is changed from before** (R048): the two things in r64m; one line written
+  to the VM's `binfmt_misc`, and taken away at the end (by `echo -1`), unless the
+  owner says to leave it. While it is there every x86-64 container of the VM runs
+  under r64m; the only other container running is arm64 and is not touched.
+- **Next move for each result**:
+  - The images run → the cases are run as Docker runs them (the test program
+    itself an x86-64 container's command), and what differs from running r64m by
+    name is written down; then the owner is asked whether it stays registered
+  - The kernel still chooses QEMU → the order of entries is found out; QEMU's is
+    not removed or disabled without asking (it is OrbStack's own)
+  - Something that worked by name does not work this way (a set-user-ID program
+    without flag C, a program run from a descriptor, `docker exec`) → written
+    down, with what flag or change it would take
+- **Cut-off**: the images and the goal by `docker run`; the entry removed, and
+  QEMU seen to run x86-64 again.
