@@ -3649,3 +3649,38 @@ file's pages as memory of its own, so the host's list of mappings has no names: 
 list of the guest's mappings from r64m itself is owed).
 
 By the card's first branch: how a return finds its block is the next experiment.
+
+## R046: a return predicted by the host's own stack of returns (2026-11-26)
+
+R045: the time in generated code is arriving at blocks, and a return is an indirect
+jump the host cannot foresee.
+
+The card, written before the run.
+
+- **Hypothesis**: the host predicts a `ret` from the `bl` instructions before it,
+  whatever register the `ret` names and whether or not that register came from the
+  `bl`. So: the guest's CALL is made a host `bl` (to the way out for the function,
+  which is joined to its block as now), and the host instruction after that `bl`
+  is a landing for the guest's return address: a way out to that address, joined
+  to its block like any other. The table of blocks gives that landing for the
+  return address, not the block itself; and the guest's RET looks its address up
+  as now and goes there by `ret` in place of `br`. When the guest returns where
+  its call said, the host foresaw it; when it does not (a return address written
+  by hand, `longjmp`), the jump is only not foreseen, as every return is now.
+  Nothing rests on the host's stack or on x30 holding anything. With this
+  uvicorn's request is 1.5 ms or less (1.78 now), and the primitives that call
+  (p_recursion, p_funcptr) are faster, none slower by more than 2%.
+- **What is changed from before** (R045): CALL (direct and through an operand) and
+  RET in the translator; the table's entry for an address that is some call's
+  return; the landings forgotten with the block that holds them.
+- **Next move for each result**:
+  - 1.5 ms or less → the three measures beside QEMU again, and the primitives
+  - Faster but not 1.5 → the samples on first words again: what is left is jumps
+    through a register that are not returns (CPython's dispatch, the PLT), and
+    the table's size is the next thing to try
+  - No change → the host does not predict as supposed, or the first word is
+    sampled for another reason (the instruction cache): a program of two blocks
+    that only call and return is timed both ways before anything else
+  - Slower → taken out, and the same small program says why
+- **Cut-off**: all tests on both hosts; uvicorn's CPU time one launch; the client's
+  clock three; the primitives against R044's build.
