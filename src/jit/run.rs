@@ -344,6 +344,26 @@ impl Jit {
         }
     }
 
+    /// For `--profile`: of a host address in this thread's generated code, the block
+    /// it is in (by the guest's address of its first instruction), the guest's
+    /// instruction, and how many host instructions it is from the block's start.
+    pub fn where_is(&self, pc: usize) -> Option<(u64, u64, u32)> {
+        let block = &self.blocks[self.blocks.partition_point(|b| b.code as usize <= pc).checked_sub(1)?];
+        let word = ((pc - block.code as usize) / 4) as u32;
+        let i = block.starts.partition_point(|&(start, _)| start <= word).saturating_sub(1);
+        Some((block.starts[0].1, block.starts[i].1, word))
+    }
+
+    /// And a block's code as it stands (to the next block's start, or 400
+    /// instructions), with where each of the guest's instructions begins.
+    pub fn code_of(&self, rip: u64) -> Option<(Vec<u32>, Vec<(u32, u64)>)> {
+        let Some(&Place::Block(id)) = self.places.get(&rip) else { return None };
+        let block = &self.blocks[id];
+        let end = self.blocks.get(id + 1).map_or(400, |next| ((next.code as usize).wrapping_sub(block.code as usize) / 4).min(400));
+        let words = unsafe { std::slice::from_raw_parts(block.code as *const u32, end) }.to_vec();
+        Some((words, block.starts.clone()))
+    }
+
     /// Rewrites the jump at `site` to go to a block's code.
     fn join(&mut self, site: u64, id: usize) {
         let words = (self.blocks[id].code as i64 - site as i64) / 4;

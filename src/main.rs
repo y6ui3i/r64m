@@ -328,7 +328,15 @@ fn main() {
     };
     lines.flush().ok();
     if profile {
-        profile::report(jit::is_generated, main as *const () as usize);
+        let hot = profile::report(jit::is_generated, main as *const () as usize, |pc| blocks.as_ref().and_then(|b| b.where_is(pc)));
+        // The code of the blocks met most often, as words an assembler can be given,
+        // with where each of the guest's instructions begins in them.
+        for &(rip, count) in hot.iter().take(40) {
+            if let Some((words, starts)) = blocks.as_ref().and_then(|b| b.code_of(rip)) {
+                eprintln!("r64m: profile: block {rip:#x} {count} starts {starts:x?}");
+                eprintln!("r64m: profile: words {}", words.iter().map(|w| format!("{w:08x}")).collect::<Vec<_>>().join(" "));
+            }
+        }
     }
     if count {
         eprintln!("r64m: {} instructions", c.steps);

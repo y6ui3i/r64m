@@ -54,18 +54,28 @@ pub fn start() -> std::io::Result<()> {
 }
 
 /// Stops the timer and prints what was noted: `generated` says of a place whether it
-/// is in generated code, `anchor` is the address of a function whose name is known.
-pub fn report(generated: impl Fn(usize) -> bool, anchor: usize) {
+/// is in generated code, `anchor` is the address of a function whose name is known,
+/// and `guest` says of a place in generated code which block it is in (by the guest's
+/// address of its first instruction), which of the guest's instructions, and how many
+/// host instructions from the block's start (R045). What comes back is the blocks by
+/// how often they were met, the most first.
+pub fn report(generated: impl Fn(usize) -> bool, anchor: usize, guest: impl Fn(usize) -> Option<(u64, u64, u32)>) -> Vec<(u64, usize)> {
     unsafe {
         let off: libc::itimerval = std::mem::zeroed();
         libc::setitimer(libc::ITIMER_PROF, &off, std::ptr::null_mut());
     }
     let n = COUNT.load(Ordering::Relaxed).min(MOST);
     let mut by_place = std::collections::BTreeMap::new();
+    let mut by_guest = std::collections::BTreeMap::new();
+    let mut by_block = std::collections::BTreeMap::new();
     let mut in_generated = 0;
     for place in PLACES.iter().take(n).map(|p| p.load(Ordering::Relaxed)) {
         if generated(place) {
             in_generated += 1;
+            if let Some((block, at, word)) = guest(place) {
+                *by_guest.entry((block, word, at)).or_insert(0usize) += 1;
+                *by_block.entry(block).or_insert(0usize) += 1;
+            }
         } else {
             *by_place.entry(place).or_insert(0usize) += 1;
         }
@@ -74,4 +84,10 @@ pub fn report(generated: impl Fn(usize) -> bool, anchor: usize) {
     for (place, count) in by_place {
         eprintln!("r64m: profile: {count} {place:#x}");
     }
+    for ((block, word, at), count) in by_guest {
+        eprintln!("r64m: profile: guest {count} {block:#x} {word} {at:#x}");
+    }
+    let mut blocks: Vec<(u64, usize)> = by_block.into_iter().collect();
+    blocks.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    blocks
 }

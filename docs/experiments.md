@@ -3613,3 +3613,39 @@ The card, written before the run.
     measured by taking each out in a build of its own
 - **Cut-off**: one profile; the ten hottest blocks read instruction by instruction.
   No change to the translator in this experiment.
+
+The result (uvicorn alone under `--profile`, 6,000 kept requests; 8,327 samples, 6,867
+in generated code, 6,622 of them in the main thread's blocks).
+
+**My hypothesis of where the samples gather was wrong, and what they show instead is
+plainer: 60% of the samples in generated code are on the first host instruction of
+a block.** Not in few blocks: 2,486 blocks were met; the twenty hottest hold 16.5%,
+the hundred hottest 32%, a thousand 76%.
+
+A sample falls on the instruction the processor is waiting to finish, and the first
+instruction after a jump that was not foreseen is where it waits. So the time is not
+the guest's work inside blocks, nor the record of the flags, nor the count: it is
+arriving. Read in the hottest blocks (CPython's evaluation loop, at
+`_PyEval_EvalFrameDefault`+0xfb and on; a stub of the PLT that is one `jmp` through
+memory; the loader's `__tls_get_addr`):
+
+- Inside, the guest's instructions are one to three host instructions each and
+  hardly sampled: a load is `add`, `ldr`; a compare and its jump are `adds`,
+  `b.eq`. In the hottest block 112 of 158 samples are on its first word, 7 on a
+  load, and 26 on the end's lookup.
+- Every end that is a jump through a register or memory, and every return, is the
+  table's lookup and a `br`: the host's predictor sees one indirect jump, and for a
+  return it has no stack to predict from as it has for the real thing. The lookup's
+  second load is the next most sampled place (137 of the 1,495 samples in the forty
+  hottest blocks; the table is 256 KB, more than the first-level cache).
+- The first word is the look for a signal (`tbnz`), never taken; it is sampled
+  because it is first, not for what it is.
+
+What was added to r64m for this, and stays: `--profile` says for each sample in
+generated code which block, which of the guest's instructions and which host
+instruction, and prints the forty hottest blocks' code. The guest's addresses were
+named by asking the same Python for the address of a known function (r64m gives a
+file's pages as memory of its own, so the host's list of mappings has no names: a
+list of the guest's mappings from r64m itself is owed).
+
+By the card's first branch: how a return finds its block is the next experiment.
