@@ -56,6 +56,12 @@ pub struct Built {
     /// of the flags need not be written (R013). A store there forgets the block as a
     /// store to its own instructions does.
     pub seen: Option<(u64, u64)>,
+    /// The landings of returns (R046): for each CALL in the block, its `bl` (counted
+    /// from the block's start) and the guest's return address, which the host
+    /// instruction after the `bl` is a way out to. Where another block has the same
+    /// CALL already, whoever keeps the blocks makes this `bl` a jump to that one: a
+    /// return address has one landing, or the host would foresee the wrong one.
+    pub pads: Vec<(u32, u64)>,
 }
 
 /// What a block that uses the XMM registers begins with: if none has loaded them since
@@ -735,6 +741,8 @@ struct Emit<'a> {
     /// The instruction being translated: where it is, and how many of the block
     /// came before it (for a way out to the interpreter from inside it).
     now: (u64, usize),
+    /// The landings of returns written so far (`Built::pads`).
+    pads: Vec<(u32, u64)>,
 }
 
 impl Emit<'_> {
@@ -1601,20 +1609,37 @@ impl Emit<'_> {
         self.out();
     }
 
+    /// What follows a CALL's pushing of its return address `next` (R046): a `bl`
+    /// over a landing for that address, which is a way out to it like any other. The
+    /// `bl` is for the host's predictor alone: when the guest's RET comes back to
+    /// `next`, it goes (by the table) to this landing with a `ret`, and the host has
+    /// foreseen that. x30 is written and never read. What is written after this is
+    /// the way to the function. The block's instructions are counted before.
+    fn call_over_landing(&mut self, next: u64) -> usize {
+        let bl = self.w.len();
+        self.put(a64::nop());
+        self.pads.push((bl as u32, next));
+        self.leave_counted(next);
+        self.w[bl] = a64::bl((self.w.len() - bl) as i32);
+        bl
+    }
+
     /// A way out with RIP in `T0`, which is not known until it is run: nothing to
     /// join. The address is looked up in the table of blocks (R011): its low bits
     /// choose a place, and if the place holds this address the code beside it is gone
     /// to. Else it is the way out to Rust, which fills the place when it has found the
     /// block.
-    fn leave_at_t0(&mut self, n: usize) {
-        self.put(a64::arith_imm(true, false, false, RAN, RAN, n as u32, false));
+    /// The block's instructions are counted before. `back` for a RET, which goes to
+    /// what it finds by the host's `ret`: foreseen if it is the landing after the
+    /// `bl` of the CALL it answers.
+    fn look_up_t0(&mut self, back: bool) {
         self.put(a64::ubfx(T1, T0, 0, TABLE_BITS));
         self.put(a64::arith(true, false, false, T1, TABLE, T1, 4));
         self.put(a64::mem_imm(Size::X, Op::Load, T2, T1, 0));
         self.put(a64::mem_imm(Size::X, Op::Load, T3, T1, 8));
         self.put(a64::arith(true, true, true, a64::ZR, T2, T0, 0));
         self.put(a64::b_cond(Cond::Ne, 2));
-        self.put(a64::br(T3));
+        self.put(if back { a64::ret_to(T3) } else { a64::br(T3) });
         self.put(a64::mem_imm(Size::X, Op::Store, a64::ZR, CPU, offset_of!(Cpu, left_from) as u32));
         self.out();
     }
@@ -1655,7 +1680,7 @@ pub fn translate(m: &Mem, rip: u64, exact: bool) -> Option<Built> {
 /// The same; with `ordered`, for a process that has more than one thread: every load
 /// and store of the guest's memory keeps x86's order between threads.
 pub fn translate_as(m: &Mem, rip: u64, exact: bool, ordered: bool) -> Option<Built> {
-    let mut e = Emit { w: Vec::new(), ordered, seg: 0, flags: None, m, rip, exact, skip: false, seen: None, later: None, host: true, bails: Vec::new(), now: (0, 0) };
+    let mut e = Emit { w: Vec::new(), ordered, seg: 0, flags: None, m, rip, exact, skip: false, seen: None, later: None, host: true, bails: Vec::new(), now: (0, 0), pads: Vec::new() };
     let mut starts = Vec::new();
     let mut taken: Vec<Taken> = Vec::new();
     let mut sse = false;
@@ -2105,7 +2130,9 @@ pub fn translate_as(m: &Mem, rip: u64, exact: bool, ordered: bool) -> Option<Bui
             0xe8 => {
                 e.constant(T0, next);
                 e.push(T0);
-                e.leave(ins.imm as u64, starts.len());
+                e.put(a64::arith_imm(true, false, false, RAN, RAN, starts.len() as u32, false));
+                e.call_over_landing(next);
+                e.leave_counted(ins.imm as u64);
                 ended = true;
             }
             0xff => {
@@ -2123,13 +2150,18 @@ pub fn translate_as(m: &Mem, rip: u64, exact: bool, ordered: bool) -> Option<Bui
                     e.push(T0);
                 }
                 e.put(a64::mov(true, T0, T2));
-                e.leave_at_t0(starts.len());
+                e.put(a64::arith_imm(true, false, false, RAN, RAN, starts.len() as u32, false));
+                if field == 2 {
+                    e.call_over_landing(next);
+                }
+                e.look_up_t0(false);
                 ended = true;
             }
             0xc3 => {
                 e.mem(Size::X, Op::Load, T0, RSP);
                 e.put(a64::arith_imm(true, false, false, RSP, RSP, 8, false));
-                e.leave_at_t0(starts.len());
+                e.put(a64::arith_imm(true, false, false, RAN, RAN, starts.len() as u32, false));
+                e.look_up_t0(true);
                 ended = true;
             }
             0x70..=0x7f | 0x180..=0x18f => {
@@ -2252,11 +2284,15 @@ pub fn translate_as(m: &Mem, rip: u64, exact: bool, ordered: bool) -> Option<Bui
     // The look is taken out of a block no cycle passes through: the instruction at
     // its start, with everything after it one place earlier. (What jumps within the
     // block jumps by a distance, which is the same.)
+    let mut e_pads = std::mem::take(&mut e.pads);
     let mut words = e.w;
     if !cycle {
         words.remove(0);
         for start in &mut starts {
             start.0 -= 1;
+        }
+        for pad in &mut e_pads {
+            pad.0 -= 1;
         }
     }
     // A block that uses the XMM registers loads them first. What was written for it
@@ -2267,10 +2303,13 @@ pub fn translate_as(m: &Mem, rip: u64, exact: bool, ordered: bool) -> Option<Bui
         for start in &mut starts {
             start.0 += first.len() as u32;
         }
+        for pad in &mut e_pads {
+            pad.0 += first.len() as u32;
+        }
         first.append(&mut words);
         words = first;
     }
-    Some(Built { words, starts, end: at, seen: e.seen })
+    Some(Built { words, starts, end: at, seen: e.seen, pads: e_pads })
 }
 
 impl Emit<'_> {

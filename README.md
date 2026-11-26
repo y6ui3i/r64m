@@ -137,10 +137,11 @@ real CPU does.
    one instruction (R039), which costs the tightest loops 1 to 4%. TLS 1.3 between a
    Python server and client, with keys `openssl` made, completes (R040). **The goal's request completes** (R041): nginx takes
    it over TLS and passes it to FastAPI, `Hello, world` comes back, to a client in the
-   container and to `curl` outside it. Beside QEMU (R042, R043): the start 2.9 times
-   as fast, a request on a new connection 2.3, on a kept one 1.7 by the client's
-   clock (2.06 by the server's CPU time; R044). Both are as the real machine has them.
-   Next: what is still under 2.
+   container and to `curl` outside it. Beside QEMU (R042 to R046): the start 3.0 times
+   as fast, a request on a new connection 2.3, on a kept one 1.8 by the client's
+   clock (R046: a return is foreseen by the host's own stack of returns). Both are as the real machine has them.
+   What done means is [0020](docs/adr/0020-what-done-means.md); next: a list of
+   other images, and containers that talk over the network.
 
 One case is owed: the x87's square root when what is left over equals the root (the
 rounding there is not touched by any of g64m's cases; found by breaking it on purpose).

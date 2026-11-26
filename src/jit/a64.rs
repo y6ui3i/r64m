@@ -288,6 +288,18 @@ pub fn br(rn: u8) -> u32 {
     0xd61f_0000 | r(rn) << 5
 }
 
+/// A call: the jump of `b`, with the address after it left in x30 and, what it is
+/// used for here, remembered by the processor as where the next return goes.
+pub fn bl(words: i32) -> u32 {
+    debug_assert!((-(1 << 25)..1 << 25).contains(&words));
+    0x9400_0000 | (words as u32 & 0x03ff_ffff)
+}
+
+/// A jump to the address in a register that the processor takes for a return.
+pub fn ret_to(rn: u8) -> u32 {
+    0xd65f_0000 | r(rn) << 5
+}
+
 pub fn ret() -> u32 {
     0xd65f_03c0
 }
@@ -796,6 +808,8 @@ mod tests {
             (vshift(VShift::Usra, Lane::H, 16, 16, 7), 0x6f191610, "usra v16.8h, v16.8h, #7"),
             (vshift(VShift::Usra, Lane::S, 16, 16, 14), 0x6f321610, "usra v16.4s, v16.4s, #14"),
             (vshift(VShift::Usra, Lane::D, 16, 16, 28), 0x6f641610, "usra v16.2d, v16.2d, #28"),
+            (bl(5), 0x94000005, "bl .+20"),
+            (ret_to(26), 0xd65f0340, "ret x26"),
             (umov_b(3, 16, 0), 0x0e013e03, "umov w3, v16.b[0]"),
             (umov_b(16, 16, 8), 0x0e113e10, "umov w16, v16.b[8]"),
             (arith(false, false, false, 3, 3, 16, 8), 0x0b102063, "add w3, w3, w16, lsl #8"),
@@ -836,7 +850,7 @@ mod tests {
         for (ours, theirs, name) in cases {
             assert_eq!(ours, theirs, "{name}: {ours:08x}, the assembler {theirs:08x}");
         }
-        assert_eq!(cases.len(), 259);
+        assert_eq!(cases.len(), 261);
     }
 
     #[test]

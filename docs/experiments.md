@@ -3684,3 +3684,66 @@ The card, written before the run.
   - Slower → taken out, and the same small program says why
 - **Cut-off**: all tests on both hosts; uvicorn's CPU time one launch; the client's
   clock three; the primitives against R044's build.
+
+The result (the Mac; QEMU 9.2.2 beside r64m `--jit`; the primitives on macOS against
+R043's build).
+
+**The goal's work is a fifth faster: uvicorn's request 1.29 ms (1.5 was the card's),
+a kept connection 1.84 times QEMU by the client's clock, a new one 2.34, the start
+2.98. One primitive pays for it: p_recursion takes 2.6 times as long, and the reason
+is the host's own: its stack of returns is shorter than a recursion 200 deep.**
+
+| | QEMU | R044 | R046 | QEMU / R046 |
+|---|---|---|---|---|
+| uvicorn's CPU time, a kept connection | 3.16 ms | 1.78 ms | 1.29 ms | 2.45 |
+| nginx's worker's, a kept connection | 0.26 ms | 0.27 ms | 0.17 ms | 1.5 |
+| nginx's worker's, a handshake | 10.1 ms | 4.1 ms | 3.4 ms | 2.97 |
+| by the client's clock: the start | 3.17 s | 1.29 s | 1.06 s | 2.98 |
+| a new connection | 16.88 ms | 8.43 ms | 7.20 ms | 2.34 |
+| a kept connection | 3.59 ms | 2.49 ms | 1.95 ms | 1.84 |
+
+(R044's column and its QEMU were measured while a container left over from R043's
+hundred runs of the signal case was still going round on one core, which I found
+two hours later and stopped; this table's QEMU and R046 are without it. That is why
+QEMU's own times are lower here. The ratios in R044 and R045 were of runs side by
+side under the same load; they are not measured again.)
+
+What was built:
+
+- The guest's CALL ends its block with a host `bl` over a landing: the instruction
+  after the `bl` is a way out to the return address, joined to the block there
+  like any other; what the `bl` jumps to is the way to the function (or, for a
+  call through an operand, the lookup). The guest's RET looks its address up as
+  before and goes there by `ret`.
+- The table gives the landing for an address that is some call's return address.
+- **A return address has one landing.** The first build had one for each block that
+  held the call, and blocks overlap (one from a function's start, one from the
+  top of its loop): the table held the landing of the block made last while the
+  other block's `bl` ran, so every return was foreseen wrongly, and p_funcptr
+  took 2.1 times as long, p_recursion 3.1. Found by the samples (all on the
+  landing) and by switching the `ret` and the `bl` off one at a time: the `ret`
+  alone was the cost. Now a block whose call another block already holds has its
+  `bl` made a jump to that block's. p_funcptr is back within 4%.
+- A program on the Mac itself (assembler, in the scratch folder) timed the idea
+  apart from r64m: a return by `br` 1.7 ns, by `ret` after a `bl` 0.73, with a
+  landing that jumps on 1.4; writing x30 in between, or loading the address from
+  memory, changes nothing.
+
+**What is slower, and stays so in this build**: p_recursion, 0.42 to 1.08 s. Its
+`fib` is as before; its `depth` goes 200 calls down and comes 200 back, and the
+host remembers only the last few dozen calls, so most of the returns on the way
+back are foreseen wrongly, where the indirect jump before had one target and was
+always right. A real x86-64 has the same short memory and the same cost, so this
+is how such a program runs on hardware; but the primitive was 2.9 times QEMU and
+is not now (not measured beside QEMU again). The other 21 that are raced are
+within 2% (p_funcptr 3.6% slower: two jumps more for each call).
+
+Not done: the landing is a jump to the block at the return address; the block could
+go on there itself, as it does past a conditional jump, and the two jumps would be
+none. And a return that is not predicted well could be told apart only by counting,
+which nothing here does.
+
+Tests: 118 unit tests plain and ordered on both hosts (one new: the one landing,
+and its forgetting with the code); the 62 programs four ways; the guest's signal
+program; container cases GCC 144, Python 72, redis 39, the goal 3; prim 116, trace
+39.

@@ -71,6 +71,9 @@ struct Block {
     guarded: bool,
     /// The jumps in other blocks (or in this one) that were rewritten to come here.
     incoming: Vec<u64>,
+    /// The landings of returns in it (R046): the guest's return address and the
+    /// host's address of the landing.
+    pads: Vec<(u64, u64)>,
 }
 
 /// What is counted for `--jit-stats`.
@@ -96,6 +99,9 @@ pub struct Jit {
     blocks: Vec<Block>,
     /// What is known of each address arrived at.
     places: HashMap<u64, Place, BuildHasherDefault<OfAddress>>,
+    /// The landing of a return to each address that is some call's return address
+    /// (R046): what the table gives for it, in place of the block there.
+    pads: HashMap<u64, u64, BuildHasherDefault<OfAddress>>,
     /// How often a host page's blocks were forgotten for a write.
     writes: HashMap<u64, u8>,
     /// For each of the guest's own 4 KB pages, how many blocks have an instruction
@@ -181,6 +187,7 @@ impl Jit {
             code: Code::new(CODE_BYTES)?,
             blocks: Vec::new(),
             places: HashMap::default(),
+            pads: HashMap::default(),
             known: Default::default(),
             // (The tests can be run with every block ordered: R64M_ORDERED.)
             ordered: cfg!(test) && std::env::var_os("R64M_ORDERED").is_some(),
@@ -253,7 +260,8 @@ impl Jit {
                         // And generated code that comes to this address by a return
                         // or through an operand finds it in the table from now on.
                         if !self.check {
-                            self.table[Self::place(c.rip)] = [c.rip, self.blocks[id].code as u64];
+                            let to = self.pads.get(&c.rip).copied().unwrap_or(self.blocks[id].code as u64);
+                            self.table[Self::place(c.rip)] = [c.rip, to];
                         }
                         match self.run_block(id, c, m) {
                             Ok(whole) => {
@@ -459,7 +467,7 @@ impl Jit {
         if self.writes.get(&page).is_some_and(|&n| n >= GIVEN_UP) {
             return false;
         }
-        let Some(Built { words, starts, end, seen }) = translate_as(m, rip, self.check, self.ordered) else {
+        let Some(Built { words, starts, end, seen, pads }) = translate_as(m, rip, self.check, self.ordered) else {
             return false;
         };
         if std::env::var_os("R64M_JIT_DUMP").is_some() {
@@ -500,7 +508,30 @@ impl Jit {
         if self.places.insert(rip, Place::Block(self.blocks.len())).is_none() {
             self.know(rip);
         }
-        self.blocks.push(Block { code, starts, pages, guest: (from, to), guarded, incoming: Vec::new() });
+        // A return to one of this block's calls is to find the landing after that
+        // call, not the block at the address: from now on, and where the table
+        // already says the block. A call that another block holds too (blocks
+        // overlap) keeps the landing it has: this block's `bl` is made a jump to
+        // that block's, so that what the host remembers at the call is where the
+        // return will go. (The two are forgotten together: both have the call's
+        // instruction, and blocks go by the page.)
+        let mut own = Vec::new();
+        for &(word, next) in &pads {
+            let bl = code as u64 + 4 * word as u64;
+            match self.pads.get(&next) {
+                Some(&landing) => unsafe { self.code.rewrite(bl as *const u8, a64::b(((landing - 4) as i64 - bl as i64) as i32 / 4)) },
+                None => {
+                    self.pads.insert(next, bl + 4);
+                    own.push((next, bl + 4));
+                    let place = &mut self.table[Self::place(next)];
+                    if place[0] == next && !self.check {
+                        place[1] = bl + 4;
+                    }
+                }
+            }
+        }
+        let pads = own;
+        self.blocks.push(Block { code, starts, pages, guest: (from, to), guarded, incoming: Vec::new(), pads });
         self.stats.blocks += 1;
         true
     }
@@ -583,6 +614,16 @@ impl Jit {
             for site in std::mem::take(&mut self.blocks[id].incoming) {
                 unsafe { self.code.rewrite(site as *const u8, a64::b(1)) };
             }
+            // Its landings are of calls that are no longer there.
+            for (next, pad) in std::mem::take(&mut self.blocks[id].pads) {
+                if self.pads.get(&next) == Some(&pad) {
+                    self.pads.remove(&next);
+                }
+                let place = &mut self.table[Self::place(next)];
+                if *place == [next, pad] {
+                    *place = [u64::MAX, self.miss];
+                }
+            }
             let (from, to) = self.blocks[id].guest;
             // (A block that is not guarded was not counted. It goes with the rest of
             // its host page all the same: more than is needed, never less.)
@@ -609,6 +650,7 @@ impl Jit {
             let _ = m.mark_code(block.pages.0, block.pages.1, false);
         }
         self.blocks.clear();
+        self.pads.clear();
         self.places.clear();
         self.known.clear();
         self.holds.clear();
@@ -3226,5 +3268,34 @@ mod tests {
         c.reg[RSI] = DATA;
         assert!(matches!(jit.run(&mut c, &mut m), Event::Syscall));
         assert_eq!(jit.stats.in_blocks, c.steps - 1);
+    }
+
+    #[test]
+    fn a_return_address_has_one_landing_whichever_block_holds_its_call() {
+        // mov ebx, 3; top: add edx, 1; call f; sub ebx, 1; jnz top; syscall
+        // f: add esi, 2; ret
+        // The block from the start and the block from `top` both hold the call: the
+        // return address has one landing (R046), and it goes when the code does.
+        let code = [0xbb, 3, 0, 0, 0, 0x83, 0xc2, 0x01, 0xe8, 0x07, 0, 0, 0, 0x83, 0xeb, 0x01, 0x75, 0xf3, 0x0f, 0x05, 0x83, 0xc6, 0x02, 0xc3];
+        let (c, _) = checked(&code, &[], &|c| (c.reg[RDX], c.reg[RSI]) = (0, 0));
+        assert_eq!((c.reg[RDX], c.reg[RSI], c.reg[RBX]), (3, 6, 0));
+        let mut m = guest(&code, &[]);
+        let mut jit = Jit::new(false, 1).unwrap();
+        let mut c = Cpu::new(CODE, DATA + 4096);
+        assert!(matches!(jit.run(&mut c, &mut m), Event::Syscall));
+        assert_eq!((c.reg[RDX], c.reg[RSI]), (3, 6));
+        assert_eq!(jit.stats.in_blocks, c.steps - 1);
+        assert_eq!(jit.pads.keys().copied().collect::<Vec<_>>(), [CODE + 13]);
+        // Where the table has the return address, it has the landing: not the block.
+        let block = match jit.places[&(CODE + 13)] {
+            Place::Block(id) => jit.blocks[id].code as u64,
+            _ => panic!("no block at the return address"),
+        };
+        let place = jit.table[Jit::place(CODE + 13)];
+        assert_eq!((place[0], place[1]), (CODE + 13, jit.pads[&(CODE + 13)]));
+        assert_ne!(place[1], block);
+        jit.guest_changed(CODE, CODE + 4096, &mut m);
+        assert!(jit.pads.is_empty());
+        assert_ne!(jit.table[Jit::place(CODE + 13)][0], CODE + 13);
     }
 }
