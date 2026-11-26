@@ -21,8 +21,8 @@ whether it worked or not.
 
 The work is on the branch `port`: commits and pushes go there. `main` is what a
 visitor sees: it is brought up to `port` when the owner says so, by a fast-forward, and
-not otherwise (first on 2026-11-26, with ADR 0020; again on 2026-11-27, before the
-repository was made public). No pull request is opened against `main` and nothing is
+not otherwise (first on 2026-11-26, with ADR 0020; again on 2026-11-27, ahead of
+the repository being made public). No pull request is opened against `main` and nothing is
 merged into it without that word.
 
 (Until 2026-11-26 `main` held the skeleton alone and waited for a version that works:
