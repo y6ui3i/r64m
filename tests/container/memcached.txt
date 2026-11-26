@@ -1,0 +1,15 @@
+#! needs /usr/local/bin/memcached
+# memcached in its Alpine image (`memcached:alpine`): started as a daemon; a value stored and
+# read, a number stored and added to, a value deleted, over TCP. Threads and epoll.
+# What the real machine printed (hal, the same image copied to it; 2026-11-26).
+$$ memcached -d -P /tmp/mc.pid && sleep 1 && printf 'set k 0 0 5\r\nhello\r\nget k\r\nset n 0 0 2\r\n41\r\nincr n 1\r\ndelete k\r\nget k\r\nquit\r\n' | nc 127.0.0.1 11211 | tr -d '\r'; kill $(cat /tmp/mc.pid); sleep 1; echo ended
+STORED
+VALUE k 0 5
+hello
+END
+STORED
+42
+DELETED
+END
+ended
+? 0

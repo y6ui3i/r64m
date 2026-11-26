@@ -241,6 +241,17 @@ fn map_errno(e: MapError) -> u64 {
     }
 }
 
+/// Whether each system call is said on standard error (`--calls`): a tool for finding
+/// what a program that stops or waits was doing.
+pub static SAY_CALLS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn thread_number() -> i64 {
+    #[cfg(target_os = "linux")]
+    return unsafe { libc::syscall(libc::SYS_gettid) } as i64;
+    #[cfg(not(target_os = "linux"))]
+    0
+}
+
 /// Answers the call the registers describe. `Some` is the end of the thread or of
 /// the process.
 pub fn call(c: &mut Cpu, m: &mut Mem, s: &mut Sys) -> Option<Exit> {
@@ -256,6 +267,12 @@ pub fn call(c: &mut Cpu, m: &mut Mem, s: &mut Sys) -> Option<Exit> {
     let (a, b, d) = (c.reg[RDI], c.reg[RSI], c.reg[RDX]);
     let (e, f, g) = (c.reg[R10], c.reg[R8], c.reg[R9]);
     let number = c.reg[RAX];
+    // `--calls`: each call as it is made and, on a line of its own, what it answered
+    // (a call that waits is seen waiting).
+    let said = SAY_CALLS.load(std::sync::atomic::Ordering::Relaxed);
+    if said {
+        eprintln!("r64m: call {} {number}({a:#x}, {b:#x}, {d:#x}, {e:#x}, {f:#x}, {g:#x}) at {:#x}", thread_number(), c.rip);
+    }
     let result: Result<u64, u64> = match number {
         1 => write(m, s, a, b, d),
         9 => mmap(m, s, a, b, d, e, f, g),
@@ -307,6 +324,9 @@ pub fn call(c: &mut Cpu, m: &mut Mem, s: &mut Sys) -> Option<Exit> {
         Ok(v) => v,
         Err(errno) => errno.wrapping_neg(),
     };
+    if said {
+        eprintln!("r64m: call {} {number} = {:#x}", thread_number(), c.reg[RAX] as i64);
+    }
     #[cfg(target_os = "linux")]
     if let Some(during) = s.waited_with.take() {
         if !signal::deliver_after_wait(c, m, s, during) {
@@ -434,6 +454,13 @@ fn mremap(m: &mut Mem, s: &mut Sys, old: u64, old_len: u64, new_len: u64, flags:
     if old % PAGE != 0 || new_len == 0 || flags & !MAYMOVE != 0 {
         return Err(EINVAL);
     }
+    // Of an address that is not mapped the answer is EFAULT whatever else is asked:
+    // musl finds the end of the first thread's stack by asking to grow one page
+    // after another, downwards, until that is the answer (R047: Node went on asking
+    // for ever).
+    let Some(prot) = m.regions().iter().find(|r| r.start <= old && old < r.end).map(|r| r.prot & 7) else {
+        return Err(EFAULT);
+    };
     let (was, now) = (old_len.next_multiple_of(PAGE), new_len.next_multiple_of(PAGE));
     if now <= was {
         if now < was {
@@ -445,9 +472,6 @@ fn mremap(m: &mut Mem, s: &mut Sys, old: u64, old_len: u64, new_len: u64, flags:
     if flags & MAYMOVE == 0 {
         return Err(ENOMEM);
     }
-    let Some(prot) = m.regions().iter().find(|r| r.start <= old && old < r.end).map(|r| r.prot & 7) else {
-        return Err(EFAULT);
-    };
     let to = {
         let mut p = s.proc();
         let to = p.mmap_top.checked_sub(now).ok_or(ENOMEM)?;
@@ -750,6 +774,9 @@ mod tests {
         // Larger, not allowed to move: refused. Allowed: somewhere else, with what it
         // held, and the old place gone.
         assert_eq!(ask(&mut c, &mut m, &mut s, 25, &[at, 2 * 4096, 5 * 4096, 0]), ENOMEM.wrapping_neg());
+        // Of what is not mapped: EFAULT, whether or not it may move.
+        assert_eq!(ask(&mut c, &mut m, &mut s, 25, &[at + 2 * 4096, 4096, 2 * 4096, 0]), EFAULT.wrapping_neg());
+        assert_eq!(ask(&mut c, &mut m, &mut s, 25, &[at + 2 * 4096, 4096, 2 * 4096, 1]), EFAULT.wrapping_neg());
         let to = ask(&mut c, &mut m, &mut s, 25, &[at, 2 * 4096, 5 * 4096, 1]);
         assert!(to != at && to % 4096 == 0);
         assert_eq!((m.read_u64(to), m.read_u64(to + 4096), m.read_u64(to + 4 * 4096)), (Ok(0x1111), Ok(0x2222), Ok(0)));

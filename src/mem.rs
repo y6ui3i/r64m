@@ -53,6 +53,45 @@ pub struct Region {
     pub prot: u8,
 }
 
+/// Copies `len` bytes to `to`, a byte at a time, and answers 1; or, if the host
+/// refuses a store, answers 0: the handler of faults sends the thread on at the
+/// routine's second ending (`refused_store`). Some of the bytes may have been
+/// written by then.
+#[unsafe(naked)]
+unsafe extern "C" fn store_or_not(to: *mut u8, from: *const u8, len: usize) -> u64 {
+    core::arch::naked_asm!(
+        "cbz x2, 3f",
+        "2: ldrb w3, [x1], #1",
+        "strb w3, [x0], #1",
+        "subs x2, x2, #1",
+        "b.ne 2b",
+        "3: mov x0, #1",
+        "ret",
+        "mov x0, #0",
+        "ret",
+    )
+}
+
+/// Adds nothing to the byte at `at`, as one act (`ldaddb wzr, w3, [x0]`), and
+/// answers 1; or 0 if the host refuses the store, as `store_or_not` does.
+#[unsafe(naked)]
+unsafe extern "C" fn may_store(at: *mut u8) -> u64 {
+    core::arch::naked_asm!(".inst 0x383f0003", "mov x0, #1", "ret", "mov x0, #0", "ret")
+}
+
+/// For the handler of faults: if the host's program counter is in one of the two
+/// routines above, where the thread is to go on (the ending that answers 0).
+pub fn refused_store(pc: usize) -> Option<usize> {
+    let (copy, ask) = (store_or_not as *const () as usize, may_store as *const () as usize);
+    if (copy..copy + 28).contains(&pc) {
+        Some(copy + 28)
+    } else if (ask..ask + 12).contains(&pc) {
+        Some(ask + 12)
+    } else {
+        None
+    }
+}
+
 #[derive(Debug)]
 pub enum MapError {
     /// Not on a page, empty, or not inside the reservation (Linux's EINVAL or ENOMEM).
@@ -433,10 +472,32 @@ impl Mem {
         if self.log.is_some() {
             self.note(addr, from.len());
         }
+        if self.shared.is_some() {
+            return self.store_shared(addr, from);
+        }
         // The list allowed it, and the host is at least as open as the list.
         unsafe { ptr::copy_nonoverlapping(from.as_ptr(), self.host(addr), from.len()) };
         self.ordered();
         Ok(())
+    }
+
+    /// A store into memory that other threads have too. This thread's list allowed
+    /// it; but another thread may since have marked the page as holding translated
+    /// code, and then the host refuses the store (a thread of a JVM writes methods
+    /// into pages another is running from, all the time: R047). So the store is one
+    /// that can be refused: then the list is looked at again, and the answer is the
+    /// list's, which the caller meets as it meets any store beside code.
+    #[cold]
+    fn store_shared(&mut self, addr: u64, from: &[u8]) -> Result<(), Fault> {
+        for _ in 0..3 {
+            if unsafe { store_or_not(self.host(addr), from.as_ptr(), from.len()) } != 0 {
+                self.ordered();
+                return Ok(());
+            }
+            self.renew();
+            self.check(addr, from.len() as u64, Access::Write)?;
+        }
+        Err(Fault { addr, access: Access::Write })
     }
 
     /// Writes the low `bits` of `new` at `addr` if what is there is still `old`, as
@@ -452,8 +513,15 @@ impl Mem {
         }
         let at = self.host(addr);
         if addr % bytes as u64 != 0 {
-            unsafe { ptr::copy_nonoverlapping(new.to_le_bytes().as_ptr(), at, bytes) };
-            return Ok(true);
+            return self.write_bytes(addr, &new.to_le_bytes()[..bytes]).map(|()| true);
+        }
+        // Shared: the host is asked first whether it lets the place be written (an
+        // addition of nothing, as one act), as `store_shared` asks. (Between the
+        // asking and the exchange the page can still be marked: not closed.)
+        if self.shared.is_some() && unsafe { may_store(at) } == 0 {
+            self.renew();
+            self.check(addr, bytes as u64, Access::Write)?;
+            return Err(Fault { addr, access: Access::Write });
         }
         const ORDER: Ordering = Ordering::SeqCst;
         Ok(unsafe {
@@ -541,6 +609,14 @@ impl Mem {
     pub fn fill(&mut self, addr: u64, v: u64, bytes: u64, n: u64) -> Result<(), Fault> {
         let len = n.checked_mul(bytes).unwrap_or(u64::MAX);
         self.check(addr, len, Access::Write)?;
+        if self.shared.is_some() {
+            // An element at a time, each a store that can be refused.
+            let element = v.to_le_bytes();
+            for i in 0..n {
+                self.store_shared(addr + i * bytes, &element[..bytes as usize])?;
+            }
+            return Ok(());
+        }
         let at = self.host(addr);
         unsafe {
             match bytes {
@@ -563,6 +639,10 @@ impl Mem {
         }
         if let Err(f) = self.check(from, len, Access::Read).and_then(|()| self.check(to, len, Access::Write)) {
             return Some(Err(f));
+        }
+        if self.shared.is_some() {
+            let held = unsafe { std::slice::from_raw_parts(self.host(from), len as usize) }.to_vec();
+            return Some(self.store_shared(to, &held));
         }
         unsafe { ptr::copy(self.host(from), self.host(to), len as usize) };
         Some(Ok(()))

@@ -191,6 +191,10 @@ fn main() {
     let count = option("--count");
     let jit_check = option("--jit-check");
     let jit_stats = option("--jit-stats");
+    // Each system call said as it is made and as it answers (src/sys.rs).
+    if option("--calls") {
+        sys::SAY_CALLS.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     // Where r64m's own time goes: a sampler (src/profile.rs).
     let profile = option("--profile");
     // What the interpreter still ran, by instruction: for deciding what to translate.
@@ -223,7 +227,7 @@ fn main() {
             mem.size().trailing_zeros(),
             mem.host_page() / 1024
         );
-        println!("usage: r64m [--count] [--jit | --jit-check] [--jit-now] [--jit-stats] [--profile] [--trace | --trace-xmm] program [arguments]");
+        println!("usage: r64m [--count] [--jit | --jit-check] [--jit-now] [--jit-stats] [--calls] [--profile] [--trace | --trace-xmm] program [arguments]");
         return;
     };
 

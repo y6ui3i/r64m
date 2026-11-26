@@ -1017,11 +1017,13 @@ impl Run<'_> {
         let (a, b, c, d): (u64, u64, u64, u64) = match self.c.reg[RAX] as u32 {
             // "GenuineIntel"
             0 => (1, 0x756e_6547, 0x6c65_746e, 0x4965_6e69),
-            // FPU TSC CX8 CMOV MMX FXSR SSE SSE2; POPCNT. (MMX is said because every
+            // FPU TSC CX8 CMOV CLFLUSH MMX FXSR SSE SSE2; POPCNT; and in EBX the size of
+            // what CLFLUSH flushes, 64 bytes. (CLFLUSH, which does nothing here, is
+            // said because a JVM will not start without it: R047.) (MMX is said because every
             // x86-64 CPU has it and glibc will not start without: its registers and
             // instructions are not written yet, and are owed when a program uses
             // them. R032.)
-            1 => (0x0003_06a9, 0, 0x0080_0000, 0x0780_8111),
+            1 => (0x0003_06a9, 0x0000_0800, 0x0080_0000, 0x0788_8111),
             0x8000_0000 => (0x8000_0001, 0, 0, 0),
             // long mode, SYSCALL; LAHF
             0x8000_0001 => (0, 0, 1, 0x2000_0800),
@@ -1348,6 +1350,9 @@ impl Run<'_> {
                 next = Some(self.ip.wrapping_add(d));
             }
             0xd8..=0xdf => self.x87(op)?,
+            // HLT is the kernel's: for a program, a general protection fault (musl's
+            // `abort` ends with one when the signal did not end the process).
+            0xf4 => return Err(Stop::Protection),
             0xf5 => self.c.rflags ^= CF,
             0xf8 => self.c.rflags &= !CF,
             0xf9 => self.c.rflags |= CF,

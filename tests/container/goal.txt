@@ -1,4 +1,4 @@
-#! needs /usr/sbin/nginx
+#! needs /usr/local/lib/python3.13/site-packages/fastapi
 # The goal (ADR 0011), as one command given to the shell of an x86-64 container: a
 # FastAPI app served by uvicorn, nginx (a master and a worker) taking TLS on 8443 and
 # passing to it, twenty requests from a Python client that checks the certificate, the

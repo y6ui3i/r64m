@@ -3791,3 +3791,69 @@ The card, written before the run.
 - **Cut-off**: each image tried; the small fixes made; the list of what runs and
   what does not, with reasons. Not in this experiment: speed, the network under
   load, memory.
+
+The result so far (2026-11-26; the Linux container on the Mac, `--jit`; the downloads
+were the six images, 69, 13, 168, 214, 298 and 246 MB as Docker counts them unpacked).
+
+**Four of the six run and print what the real machine prints: nginx, memcached, Node
+and the JVM. Go and PostgreSQL stop at the same thing, memory shared through a
+mapping, which is a decision and not built.** My guesses: nginx and memcached right;
+Node, the JVM, Go and PostgreSQL each stopped for a reason I had not guessed.
+
+| image | what it was asked | result | what stopped it on the way |
+|---|---|---|---|
+| `nginx:alpine` | a page over HTTP, a 404, quit | as hal | nothing |
+| `memcached:alpine` | set, get, incr, delete over TCP | as hal | nothing |
+| `node:22-alpine` | arithmetic, a hash, JSON; an HTTP server and client; four worker threads | as hal | `mremap` |
+| `eclipse-temurin:21-jre-alpine` | its version; `keytool` makes an RSA key and lists it | as hal | `getcpu`, CPUID, and a fault of r64m's own |
+| `golang:1.23-alpine` | `go run` of a program with goroutines | compiles; the linker stops | a shared writable mapping of its output file |
+| `postgres:17-alpine` | `initdb`, start, a query, stop | stops in `initdb` | `signalfd` (added); then shared memory (not tried) |
+
+What was found and mended, each the smallest thing:
+
+- **`mremap` of an address that is not mapped answered ENOMEM; the kernel says
+  EFAULT.** musl finds the end of the first thread's stack by asking to grow one
+  page after another downwards until EFAULT, and V8 asks musl. Node went round for
+  ever, one call a page. Found with `--calls`, which was added for this: every
+  system call said as it is made, and what it answered on a line of its own.
+- **`getcpu` was refused**, and a JVM that is refused it calls the old fixed page of
+  system calls at FFFFFFFFFF600800h, which no process of r64m's has. Handed on.
+- **CPUID did not say CLFLUSH**, which a JVM will not start without. Said, with
+  the line's size; the instruction was there already and does nothing.
+- **HLT was "not written"**; it is a protection fault, as it is for any program
+  (musl's `abort` ends on one when the signal has not ended the process, which is
+  the case for the first process of a container).
+- **A fault of r64m's own, in about four runs of ten of `keytool`**: a store by the
+  interpreter into the guest's memory, refused by the host. One thread of the JVM
+  writes new methods into the pages another is running from; that other's blocks
+  are made from the page, the page is marked as holding translated code and the
+  host made to refuse stores to it (ADR 0016); and the writing thread, which
+  looked at the list a moment before, stores. Not a rare window: the writer is
+  always between its look and its store. Bringing the list up to date before every
+  store changed nothing (tried first, and taken out). Now a store into memory
+  that other threads share is made by a routine that can be refused: the handler
+  of faults sends it on at an ending that answers "refused", the list is looked at
+  again, and the caller meets the answer as it meets any store beside code. Twenty
+  runs of twenty since. (For the exchange that LOCK instructions make, the host is
+  asked first by an addition of nothing; between the asking and the exchange the
+  window is still there, and is not closed.) r64m now says where a fault of its
+  own was before it ends, which is how this one was placed.
+- `signalfd` and `signalfd4` handed on (the host already blocks what the guest
+  blocks). Not yet seen working: PostgreSQL stops later.
+
+The cases are `tests/container/{nginx,memcached,node,java}.txt`, with hal's lines;
+`goal.txt` now asks for FastAPI's own files and not for nginx, which the official
+image has too.
+
+**What needs a decision: mappings that are shared.** r64m gives a file's pages as
+memory of its own, read in when mapped (R025): right for a mapping that is private,
+which is what loaders and compilers make. Go's linker maps its output file to write
+it (`MAP_SHARED`, writable); PostgreSQL shares memory between its processes
+(`MAP_SHARED` with no file, kept across `fork`, and POSIX shared memory, which is a
+file in `/dev/shm` mapped the same way). On Linux, where the host's pages are the
+guest's size, the host's own shared mapping can be put at the place in the guest's
+memory; on macOS (16 KB pages) it cannot in general. It is a change to what the
+memory is (ADR 0008, 0013), and so is asked.
+
+Still to do in this experiment: the JVM's case three ways (running); Go and
+PostgreSQL after the decision.

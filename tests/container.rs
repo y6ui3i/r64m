@@ -94,6 +94,10 @@ fn main() {
         ("python", include_str!("container/python.txt")),
         ("redis", include_str!("container/redis.txt")),
         ("goal", include_str!("container/goal.txt")),
+        ("nginx", include_str!("container/nginx.txt")),
+        ("memcached", include_str!("container/memcached.txt")),
+        ("node", include_str!("container/node.txt")),
+        ("java", include_str!("container/java.txt")),
     ];
     for (file, text) in files {
         // Only where the file's programs are.

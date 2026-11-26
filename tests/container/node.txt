@@ -1,0 +1,13 @@
+#! needs /usr/local/bin/node
+# Node 22 in its Alpine image (`node:22-alpine`): V8 makes code and runs it. Arithmetic, a hash,
+# JSON, floats and a big number; an HTTP server and its client in one process; four worker threads.
+# What the real machine printed (hal, the same image copied to it; 2026-11-26).
+$$ node -e 'const c=require("crypto"); let s=0; for(let i=0;i<3e6;i++) s+=i%7; console.log("Hello, world", [1,2,3].map(x=>x*2), s, c.createHash("sha256").update("r64m").digest("hex").slice(0,16), JSON.stringify({a:[1,2.5,null]}), 0.1+0.2, Math.sqrt(2), (123456789n**5n).toString().length)'
+Hello, world [ 2, 4, 6 ] 8999994 35e42e8d8413d3df {"a":[1,2.5,null]} 0.30000000000000004 1.4142135623730951 41
+? 0
+$$ node -e 'const h=require("http"); const s=h.createServer((q,r)=>r.end("Hello, world")).listen(8099,()=>h.get("http://127.0.0.1:8099/",r=>{let b="";r.on("data",d=>b+=d);r.on("end",()=>{console.log(r.statusCode,b);s.close()})}))'
+200 Hello, world
+? 0
+$$ node -e 'const {Worker,isMainThread,parentPort}=require("worker_threads"); if(isMainThread){let n=0,sum=0;for(let i=0;i<4;i++){const w=new Worker(process.argv[1]?__filename:"const {parentPort}=require(\"worker_threads\");let s=0;for(let i=0;i<1e6;i++)s+=i%5;parentPort.postMessage(s)",{eval:true});w.on("message",m=>{sum+=m;if(++n==4)console.log("workers",sum)})}}'
+workers 8000000
+? 0

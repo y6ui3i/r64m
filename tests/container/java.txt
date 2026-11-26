@@ -1,0 +1,12 @@
+#! needs /opt/java/openjdk/bin/java
+# A JVM (`eclipse-temurin:21-jre-alpine`): its version, and `keytool` making an RSA key and a
+# certificate and listing the store. Many threads, one of them writing methods into pages the
+# others run from (R047).
+# What the real machine printed (hal, the same image copied to it; 2026-11-26).
+$$ java -version 2>&1 | head -1
+openjdk version "21.0.13.1" 2026-11-17 LTS
+? 0
+$$ cd /tmp && rm -f k.p12 && keytool -genkeypair -alias a -keyalg RSA -keysize 2048 -dname CN=r64m -keystore k.p12 -storepass changeit -validity 30 2>&1 | head -1; keytool -list -keystore k.p12 -storepass changeit 2>&1 | grep -c PrivateKeyEntry
+Generating 2,048 bit RSA key pair and self-signed certificate (SHA384withRSA) with a validity of 30 days
+1
+? 0

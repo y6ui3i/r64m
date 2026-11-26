@@ -380,6 +380,15 @@ unsafe fn saved<'a>(context: *mut libc::c_void) -> (&'a mut [u64; 31], &'a mut u
     (&mut state.regs, &mut state.pc)
 }
 
+/// Sixteen hexadecimal digits, without anything a handler may not use.
+fn hex(v: usize) -> [u8; 16] {
+    let mut out = [0u8; 16];
+    for (i, digit) in out.iter_mut().enumerate() {
+        *digit = b"0123456789abcdef"[v >> (60 - 4 * i) & 15];
+    }
+    out
+}
+
 /// A fault while generated code ran is made into that code leaving (ADR 0014, point
 /// 7): where it was is written to the `Cpu`, and the thread goes on at the way out,
 /// which stores the guest's registers as they were at the faulting instruction. What
@@ -387,11 +396,30 @@ unsafe fn saved<'a>(context: *mut libc::c_void) -> (&'a mut [u64; 31], &'a mut u
 ///
 /// A fault anywhere else is r64m's own: the handler steps aside, and the fault happens
 /// again and ends the process as it would have.
-extern "C" fn on_fault(signal: libc::c_int, _info: *mut libc::siginfo_t, context: *mut libc::c_void) {
+extern "C" fn on_fault(signal: libc::c_int, info: *mut libc::siginfo_t, context: *mut libc::c_void) {
     let (regs, pc) = unsafe { saved(context) };
     let at = *pc as usize;
+    // A store of r64m's own into the guest's memory that the host refused: one of
+    // the two routines made to be refused (src/mem.rs), which then answers so.
+    if let Some(on) = crate::mem::refused_store(at) {
+        *pc = on as u64;
+        return;
+    }
     if !is_generated(at) {
-        unsafe { libc::signal(signal, libc::SIG_DFL) };
+        // Said first, with what can be written from a handler: where r64m was, the
+        // address it could not have, and where `on_fault` itself is (to place the
+        // first against the names in the file r64m was built as).
+        let address = if info.is_null() { 0 } else { unsafe { (*info).si_addr() as usize } };
+        let mut line = [0u8; 120];
+        let mut n = 0;
+        for part in [&b"r64m: a fault of r64m's own at "[..], &hex(at), b", address ", &hex(address), b"; on_fault is at ", &hex(on_fault as *const () as usize), b"\n"] {
+            line[n..n + part.len()].copy_from_slice(part);
+            n += part.len();
+        }
+        unsafe {
+            libc::write(2, line.as_ptr() as *const libc::c_void, n);
+            libc::signal(signal, libc::SIG_DFL);
+        }
         return;
     }
     let cpu = regs[CPU as usize] as *mut Cpu;

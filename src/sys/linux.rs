@@ -588,6 +588,10 @@ pub fn call(c: &mut Cpu, m: &mut Mem, s: &mut Sys, n: u64, a: [u64; 6]) -> Optio
         286 => same(m, libc::SYS_timerfd_settime, 0b1100),
         287 => same(m, libc::SYS_timerfd_gettime, 0b10),
         288 => same(m, libc::SYS_accept4, 0b110),
+        // signalfd, signalfd4: the signals the guest has blocked are blocked on the
+        // host too (`block_on_host`), so they wait where the descriptor finds them.
+        282 => p(m, a[1]).and_then(|set| raw(libc::SYS_signalfd4, [a[0], set, a[2], 0, 0, 0])),
+        289 => p(m, a[1]).and_then(|set| raw(libc::SYS_signalfd4, [a[0], set, a[2], a[3], 0, 0])),
         290 => same(m, libc::SYS_eventfd2, 0),
         291 => same(m, libc::SYS_epoll_create1, 0),
 
@@ -620,6 +624,9 @@ pub fn call(c: &mut Cpu, m: &mut Mem, s: &mut Sys, n: u64, a: [u64; 6]) -> Optio
             Ok(0)
         }),
         96 => same(m, libc::SYS_gettimeofday, 0b11),
+        // (A JVM that is refused this goes to the old fixed page of calls for it,
+        // which no process of r64m's has: R047.)
+        309 => same(m, libc::SYS_getcpu, 0b11),
         97 => p(m, a[1]).and_then(|to| raw(libc::SYS_prlimit64, [0, a[0], 0, to, 0, 0])),
         98 => same(m, libc::SYS_getrusage, 0b10),
         99 => same(m, libc::SYS_sysinfo, 1),
