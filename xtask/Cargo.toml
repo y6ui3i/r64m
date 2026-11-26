@@ -1,0 +1,9 @@
+# r64m's tools: what builds for another target, stages files and starts containers
+# for the tests. No dependencies: it is built before anything else is.
+[package]
+name = "xtask"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]

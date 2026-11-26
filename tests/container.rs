@@ -108,6 +108,12 @@ fn main() {
         for case in cases(text) {
             let case = std::sync::Arc::new(case);
             for (way, options) in WAYS {
+                // Only some of the ways, where asked (`R64M_WAYS=jit`, or several
+                // with commas): the interpreter and the checker take many times
+                // as long, and a push is not held up for them (`cargo xtask`).
+                if std::env::var("R64M_WAYS").is_ok_and(|ways| ways != "all" && !ways.split(',').any(|w| w == way)) {
+                    continue;
+                }
                 let said: String = case.command[1..].join("_").chars().take(48).map(|c| if c.is_alphanumeric() || "-.".contains(c) { c } else { '_' }).collect();
                 let name = format!("{file}::{said}::{way}");
                 let case = case.clone();

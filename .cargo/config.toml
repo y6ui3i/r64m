@@ -1,0 +1,4 @@
+# `cargo xtask ...`: the one way in to everything that is not `cargo build` or
+# `cargo test` by themselves (ADR 0012: the tools are Rust too). See xtask/src/main.rs.
+[alias]
+xtask = "run --quiet --manifest-path xtask/Cargo.toml --"

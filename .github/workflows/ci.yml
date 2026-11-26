@@ -1,0 +1,95 @@
+# What a push is held to. Every step is `cargo xtask ...` (xtask/src/main.rs), so
+# that the same thing can be run by hand.
+#
+# A push: the unit tests, the primitives and traces (g64m's, from its public
+# repository), the guest's own programs, and the programs of x86-64 images by the
+# JIT, on arm64 Linux. Once a week, and when asked for by hand: the same three ways
+# (the interpreter, the JIT, the JIT checked block by block), and the host's tests
+# on macOS. (While the repository is private a minute of macOS counts as about
+# twelve of arm64 Linux: docs/ci.md.)
+name: CI
+
+on:
+  push:
+    branches: [main, port]
+    paths-ignore: ["docs/**", "**.md", "LICENSE"]
+  pull_request:
+    paths-ignore: ["docs/**", "**.md", "LICENSE"]
+  schedule:
+    - cron: "17 18 * * 6"
+  workflow_dispatch:
+    inputs:
+      full:
+        description: "Three ways, and macOS too"
+        type: boolean
+        default: true
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # g64m as it was when r64m's tests last passed against it.
+  G64M_REF: d13b5d5b999b2fca31d62e1d0fecee96b931ca58
+  FULL: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.full) }}
+
+jobs:
+  # The two images that are built, not pulled: built on x86-64, where their own
+  # programs run, and kept until a Dockerfile changes.
+  images:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - id: kept
+        uses: actions/cache@v4
+        with:
+          path: target/images
+          key: images-${{ hashFiles('tools/images/**') }}
+      - if: steps.kept.outputs.cache-hit != 'true'
+        run: cargo xtask images build target/images
+
+  linux:
+    needs: images
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: y6ui3i/g64m
+          ref: ${{ env.G64M_REF }}
+          path: g64m
+      - run: sudo apt-get update -q && sudo apt-get install -y -q nasm
+      - run: rustup target add aarch64-unknown-linux-musl x86_64-unknown-linux-musl
+      - name: Unit tests, primitives, traces
+        run: R64M_G64M=$GITHUB_WORKSPACE/g64m cargo xtask test
+      - name: The guest's own programs
+        run: cargo xtask guest
+      - uses: actions/cache/restore@v4
+        with:
+          path: target/images
+          key: images-${{ hashFiles('tools/images/**') }}
+          fail-on-cache-miss: true
+      - run: cargo xtask images load target/images
+      - name: Programs of x86-64 images
+        run: cargo xtask container --ways ${{ env.FULL == 'true' && 'all' || 'jit' }}
+
+  macos:
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.full)
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: y6ui3i/g64m
+          ref: ${{ env.G64M_REF }}
+          path: g64m
+      - run: brew install nasm
+      - name: Unit tests, primitives, traces
+        run: R64M_G64M=$GITHUB_WORKSPACE/g64m cargo xtask test
