@@ -5671,3 +5671,35 @@ from the kernel's clock):
   away; the table's is `make` of one object in the built tree.
 - For what r64m is for: a build that takes a minute natively takes under four
   under r64m, and ten under QEMU (R031: 590 s).
+
+## R070: where a compilation's time goes (2026-11-28)
+
+The owner: 「早速やるか」. R068 and R069 left two numbers that do not agree: tight
+loops 1.52 times native, GCC compiling one file 3.0 times. The difference is
+r64m's to explain before anything is changed for it.
+
+The card, written before the run.
+
+- **Hypothesis**: one of three, and the three ask for different work. (a) Making
+  blocks: a compiler goes through a great deal of code a few times each, and the
+  translating is a large part of the 3.2 seconds. (b) The interpreter: some
+  instruction GCC uses much is not translated, and each one leaves a block and
+  comes back. (c) Leaving generated code for r64m's own: jumps and calls
+  through registers looked up, blocks not joined, the calls that manage memory.
+- **What is changed from before**: nothing in r64m. One compilation (`apply.c`,
+  as `make` runs it in the built tree) is run three times more with r64m
+  saying of itself: `--jit-stats` (blocks made, time making them, time in
+  generated code, instructions in blocks and out), `--profile` (where the
+  host's time is, by r64m's own functions), `--jit-why` (what the interpreter
+  ran, by instruction).
+- **Next move for each result**:
+  - Making blocks is a quarter of the time or more → the translator's own speed,
+    or keeping translations (per process they are made anew), in a card
+  - An instruction or a few are most of what the interpreter runs, and the
+    interpreter is a tenth of the time or more → they are translated, in a card
+  - Most of the time is in generated code and in finding blocks → the lookups
+    and the joining, by the profile's names
+  - None of the three stands out → the generated code itself is slower per
+    instruction on this program than on the primitives: one hot function of
+    GCC's read beside what was made of it
+- **Cut-off**: the three runs; no change to r64m in this card.
