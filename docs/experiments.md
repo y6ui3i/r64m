@@ -5751,10 +5751,19 @@ The profile (3,009 samples, a millisecond each):
   (57,000), REP STOSQ (39,000). Small beside the rest; each is a block left.
 - The guest's memory at 7%: GCC asks for and gives back memory constantly, and
   each call changes r64m's list and the host's mapping.
-- Found on the way, and not put right here: a program under r64m cannot start a
-  program that is the host's own (an arm64 one): r64m takes `execve` for itself
-  and says "not an x86-64 ELF", where the kernel would run it. (The profile was
-  taken by making r64m the container's first program instead.)
+- Met on the way: a program under r64m cannot start a program that is the host's
+  own (an arm64 one). I first wrote this down as a gap. The owner: 「穴ではなく仕様
+  では？ 実行できてしまったら一つのことうまくやるが別のこともできちゃわない？」.
+  It is as it should be: r64m behaves as x86-64, and an x86-64 machine does not
+  run an arm64 program either (ADR 0018). Asked of the real machine: `execve`
+  comes back with ENOEXEC, and a shell then takes the file for a script and
+  fails. What differs under r64m is only the manner: `execve` does not come
+  back; r64m is started again for the file, says "not an x86-64 ELF" and ends
+  with 2. A program that looks at what `execve` answered sees the difference
+  (it never gets its answer); a shell ends with 2 either way. To be put right
+  as its own small change: ENOEXEC from `execve`, while there is still a program
+  to tell. (The profile was taken by making r64m the container's first
+  program.)
 
 What follows, each a card of its own, in the order I would take them:
 
