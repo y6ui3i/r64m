@@ -115,3 +115,15 @@ $$ (trap 'echo inner; exit 4' HUP; kill -HUP $(exec sh -c 'echo $PPID'); sleep 1
 inner
 4
 ? 0
+# A program writing to a pipe nobody reads any more is ended by SIGPIPE (R065: r64m
+# is a Rust program, whose runtime has that signal ignored from its start; the
+# guest was told EPIPE and went on). And the owner of a symbolic link itself
+# (lchown, which dpkg uses for every link it unpacks). What the real machine printed
+# (hal, 2026-11-27).
+$$ (yes; echo "yes ended with $?" > /tmp/r64m-y) | head -1; cat /tmp/r64m-y; rm -f /tmp/r64m-y
+y
+yes ended with 141
+? 0
+$$ cd /tmp && ln -s nowhere r64m-l && chown -h 1234:5678 r64m-l && stat -c '%u:%g %N' r64m-l; rm -f r64m-l
+1234:5678 'r64m-l' -> 'nowhere'
+? 0

@@ -37,6 +37,50 @@ thread_local! {
     };
 }
 
+/// A call of the host's kernel that is not made if a signal has been noted for the
+/// thread: the thread's word is looked at and the call entered in one stretch of
+/// code, and the handler, finding the thread in that stretch with the call not yet
+/// entered, sends it on to the ending that answers "not made" (`NOT_MADE`). So a
+/// signal that comes after r64m's own look and before the kernel has the call is not
+/// slept through: on Linux a signal that is there before a call waits is taken
+/// first (R066: a thread that had just said it was ready and went to wait for a
+/// semaphore was sent a signal in that moment, and waited for ever).
+///
+/// `word` is the thread's "look" word; `a` the call's six arguments.
+#[unsafe(naked)]
+pub unsafe extern "C" fn call_unless_noted(word: *const u32, number: u64, a: *const [u64; 6]) -> i64 {
+    core::arch::naked_asm!(
+        "mov x9, x0",
+        "mov x8, x1",
+        "mov x10, x2",
+        "ldp x0, x1, [x10]",
+        "ldp x2, x3, [x10, #16]",
+        "ldp x4, x5, [x10, #32]",
+        // The stretch: from here to the call itself.
+        "ldr w11, [x9]",
+        "cbnz w11, 2f",
+        "svc #0",
+        "ret",
+        "2: mov x0, #-0x8000000000000000",
+        "ret",
+    )
+}
+
+/// What `call_unless_noted` answers when it did not make the call.
+pub const NOT_MADE: i64 = i64::MIN;
+
+/// Where the stretch begins and where the call is, from the routine's start, and
+/// where its other ending is.
+const STRETCH: std::ops::RangeInclusive<usize> = 24..=32;
+const OTHER_ENDING: usize = 40;
+
+/// The thread's "look" word, or a word that is always nothing before the thread
+/// has one.
+pub fn look_word() -> *const u32 {
+    static NOTHING: u32 = 0;
+    WAITING.with(|w| if w.kick.get().is_null() { &NOTHING as *const u32 } else { w.kick.get() as *const u32 })
+}
+
 /// The host's handler: the signal is noted for this thread, and its blocks are told
 /// to leave. Nothing else is done here.
 extern "C" fn arrived(signal: libc::c_int, info: *mut libc::siginfo_t, context: *mut libc::c_void) {
@@ -45,6 +89,11 @@ extern "C" fn arrived(signal: libc::c_int, info: *mut libc::siginfo_t, context: 
     let registers = unsafe { &mut (*(context as *mut libc::ucontext_t)).uc_mcontext };
     if crate::jit::runs_blocks(registers.pc as usize) {
         registers.regs[27] |= 1 << 63;
+    }
+    // About to make a call that waits, and not yet in it: the call is not made.
+    let routine = call_unless_noted as *const () as usize;
+    if STRETCH.contains(&(registers.pc as usize).wrapping_sub(routine)) {
+        registers.pc = (routine + OTHER_ENDING) as u64;
     }
     WAITING.with(|w| {
         if (1..=64).contains(&signal) {
@@ -79,22 +128,50 @@ pub fn disposition(signal: u64, handler: u64) {
     if signal == libc::SIGSEGV as u64 || signal == libc::SIGBUS as u64 {
         return;
     }
-    unsafe {
-        let mut act: libc::sigaction = std::mem::zeroed();
-        match handler {
-            0 => act.sa_sigaction = libc::SIG_DFL,
-            1 => act.sa_sigaction = libc::SIG_IGN,
-            _ => {
-                act.sa_sigaction = arrived as *const () as usize;
-                // No restart by the kernel: a call cut short comes back, the handler
-                // is entered, and r64m starts the call again if the guest asked for
-                // that (`restarts`). While r64m's handler runs nothing else arrives.
-                act.sa_flags = libc::SA_SIGINFO;
-                libc::sigfillset(&mut act.sa_mask);
-            }
+    // No restart by the kernel: a call cut short comes back, the handler is
+    // entered, and r64m starts the call again if the guest asked for that
+    // (`restarts`). While r64m's handler runs nothing else arrives.
+    let (handler, flags, mask) = match handler {
+        0 => (libc::SIG_DFL, 0, 0),
+        1 => (libc::SIG_IGN, 0, 0),
+        _ => (arrived as *const () as usize, libc::SA_SIGINFO as u64, !0u64),
+    };
+    host_action(signal, handler, flags, mask);
+}
+
+/// The host's kernel asked directly, not through the C library r64m is built with:
+/// that library keeps the signals 32 to 34 for itself (its own cancelling of threads
+/// and its timers) and refuses to give them handlers or to block them. They are the
+/// guest's C library's for the same uses, and r64m uses none of them (R065: a thread
+/// cancelled by `pthread_cancel` ended the whole process, by signal 33 with musl
+/// and 32 with glibc, which had no handler on the host).
+///
+/// What the kernel takes for a handler on arm64: the handler, the flags, a restorer
+/// (none: the kernel's own is used), the signals blocked while it runs.
+pub fn host_action(signal: u64, handler: usize, flags: u64, mask: u64) {
+    let act: [u64; 4] = [handler as u64, flags, 0, mask];
+    unsafe { libc::syscall(libc::SYS_rt_sigaction, signal, act.as_ptr(), 0usize, 8usize) };
+}
+
+/// The thread's set of blocked signals, by the kernel's own call: `how` as
+/// `sigprocmask` has it, a bit for each signal (its number less one).
+pub fn host_mask(how: i32, mask: u64) {
+    unsafe { libc::syscall(libc::SYS_rt_sigprocmask, how, &mask as *const u64, 0usize, 8usize) };
+}
+
+/// One of the signals in `set` that has been noted for this thread and not yet
+/// delivered, taken: its number and what the kernel said of it. For
+/// `rt_sigtimedwait`, which takes a signal without a handler being entered.
+pub fn take_noted(set: u64) -> Option<(u64, [u8; 128])> {
+    WAITING.with(|w| {
+        let pending = w.pending.load(Ordering::Acquire) & set;
+        if pending == 0 {
+            return None;
         }
-        libc::sigaction(signal as i32, &act, std::ptr::null_mut());
-    }
+        let signal = pending.trailing_zeros() as u64 + 1;
+        w.pending.fetch_and(!(1 << (signal - 1)), Ordering::AcqRel);
+        Some((signal, unsafe { (*w.info.get())[signal as usize] }))
+    })
 }
 
 /// Is a signal waiting whose handler asked for calls it cuts short to be started
@@ -294,12 +371,9 @@ pub fn fault(c: &mut Cpu, m: &mut Mem, s: &mut Sys, stop: &Stop) -> Option<bool>
 /// The process ends as `signal` ends one that does nothing about it.
 pub fn die_of(signal: i32) -> ! {
     unsafe {
-        libc::signal(signal, libc::SIG_DFL);
-        let mut set: libc::sigset_t = std::mem::zeroed();
-        libc::sigemptyset(&mut set);
-        libc::sigaddset(&mut set, signal);
-        libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
-        libc::raise(signal);
+        host_action(signal as u64, libc::SIG_DFL, 0, 0);
+        host_mask(libc::SIG_UNBLOCK, 1 << (signal - 1));
+        libc::syscall(libc::SYS_tgkill, libc::getpid(), libc::syscall(libc::SYS_gettid), signal);
     }
     std::process::exit(128 + signal)
 }

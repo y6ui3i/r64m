@@ -9,9 +9,9 @@ port of its code; what g64m found out is used, and the design begins again
 (`docs/adr/`).
 
 **Where it stands (2026-11-27).** Official images run unchanged by `docker run` alone:
-Alpine's busybox and GCC, Python 3.13, redis, nginx, memcached, Node.js, a JVM
-(Temurin 21), Go, PostgreSQL, and nginx over TLS in front of FastAPI. About ninety
-cases from those ten images are held to what a real x86-64 machine printed for the same
+Alpine's busybox and GCC, Debian's GCC with glibc (`apt-get install` runs), Python 3.13, redis, nginx, memcached, Node.js, a JVM
+(Temurin 21), Go, PostgreSQL, and nginx over TLS in front of FastAPI. About a hundred
+cases from those eleven images are held to what a real x86-64 machine printed for the same
 commands, by the interpreter, by the JIT, and by the JIT with every block checked
 against the interpreter ([docs/ci.md](docs/ci.md)).
 
@@ -173,6 +173,9 @@ real CPU does.
    A child of `fork` no longer waits for a lock that a thread of its parent
    held, and a store the interpreter makes is whole to other threads (R064: Go's
    `go build` stood, or its compiler was stopped, a few times in a thousand).
+   Threads and `fork` are held to the real machine by the book, with musl and
+   with glibc (R065: cancelling a thread, `sigwait`, SIGPIPE and `apt-get
+   install` were not as Linux has them; robust mutexes still are not).
    The tests are run by a CI on every push
    ([docs/ci.md](docs/ci.md)): `cargo xtask ci` is the same by hand.
 

@@ -5275,3 +5275,156 @@ How it went, with what I got wrong:
   without LOCK is two acts on x86 as well.
 - Tests with both fixes: 123 unit tests; every suite by the JIT; the three
   suites with new cases (GCC's, Python's, Go's) by all three ways.
+
+## R065: threads and fork by the book, with musl and with glibc (2026-11-27)
+
+The owner: 「forkパターンもそうだけどpthread周りもちゃんとテストするか」, and to
+whether glibc too, which needs an image fetched: 「glibcももちろんやろう」. For ADR
+0020's point 3. R064's hang was met by a case that forked from a second thread,
+which no case had done; what else no case does is not known until it is done.
+
+The card, written before the run.
+
+- **Hypothesis**: r64m does what Linux does for the whole of what a C program
+  can ask of threads and of `fork`, by either C library. Where it does not, a
+  program built for the purpose says so in a line that differs from the real
+  machine's. The parts: how a thread ends (its value, detached, cancelled at a
+  point and at any moment, cleanup handlers, the first thread ending before the
+  others); what is a thread's own (`__thread`, keys and their destructors,
+  `pthread_once`, a stack of a size asked for); waiting with a limit of time
+  (a condition, a mutex, a semaphore) and the kinds of mutex (recursive,
+  checked, tried); signals and threads (one sent to a thread, masks, `sigwait`,
+  a stack overrun caught on another stack); `fork` (from a second thread, a
+  child that makes threads, `pthread_atfork`, a lock held across it,
+  `posix_spawn` and `vfork` beside threads, a grandchild, SIGCHLD, a child
+  stopped and continued, a child ended by a signal).
+- **What is changed from before**: five programs in one new file of cases
+  (`tests/container/threads.txt`), run in two images: Alpine's with musl (the one
+  there is) and a new one, Debian 12 with GCC and glibc
+  (`tools/images/glibc`; Debian's packages fetched, by the owner's word). The
+  lines are the real machine's (hal), which must be the same for both libraries
+  or the program is at fault and is changed.
+- **Next move for each result**:
+  - A line differs under r64m → a fault found: put right here if it is small (a
+    call's answer), its own card if it is not (a mechanism missing); the case
+    goes in when it passes, and what does not pass is listed as not done
+  - hal's two libraries print different lines for a program → the program
+    depends on the library and is changed until they agree
+  - All the same → the cases go in, by three ways, in both images
+- **Cut-off**: the five programs; each fault put right or listed. Robust mutexes
+  (the kernel walks a list the library registers, `set_robust_list`, which r64m
+  does not have) are tried apart and expected not to work: listed, not fixed
+  here.
+
+**Result (2026-11-27): six things r64m did not do as Linux does, five put right;
+the five programs print the real machine's lines with musl and with glibc, by
+all three ways. Robust mutexes do not work and are listed.**
+
+Found before the first program was written, by making the image:
+
+- **`apt-get install` failed under r64m.** The Debian image is built on the Mac by
+  whatever runs x86-64 there, which is r64m. dpkg could not set the owner of the
+  symbolic links it unpacked: `lchown` was not known. Added, with `prctl` (a
+  thread's name, the numbers that go to the kernel as they are; a filter of calls
+  is refused) and the two `ioctl`s of a pseudo-terminal's first side (`ptsname`,
+  `unlockpt`: apt makes one for dpkg). With them `apt-get install gcc libc6-dev`
+  ends well under r64m, and the GCC it installs compiles and its program runs:
+  the image the glibc cases run in was made by r64m.
+- **SIGPIPE was ignored.** `yes | head -1`: on the real machine `yes` is ended by
+  the signal (141); under r64m it was told EPIPE, said "Broken pipe" and ended
+  with 1. A Rust program's runtime sets that signal to be ignored before `main`;
+  r64m now notes what it was given before the runtime starts (a function the C
+  library calls first) and gives the guest that.
+
+Found by the programs (the real machine printed the same lines with both
+libraries at the first try; r64m differed in two of five):
+
+- **A cancelled thread ended the process.** `pthread_cancel` is a signal of the
+  C library's own (33 with musl, 32 with glibc). r64m is built with musl, whose
+  `sigaction` refuses those three numbers, so the host's signal got no handler
+  and its default ended everything. r64m now asks the kernel itself for handlers
+  and masks, and uses none of the three.
+- **`sigwait` gave nothing.** `rt_sigtimedwait` was not known. Added: the host's
+  kernel holds the signal back as the guest blocked it, and the same call there
+  takes it.
+- **Robust mutexes** (a lock whose holder ended is given to the next with
+  EOWNERDEAD): the real machine, both libraries, as said; r64m does not end. The
+  kernel does that for a thread that ends, by a list the library registers
+  (`set_robust_list`), and r64m has neither. Listed, not done here.
+
+What passed as it was: a thread's own variables, keys and their destructors,
+`pthread_once`, stacks of a size asked for; every wait with a limit of time and
+every kind of lock; signals to particular threads, masks, a stack overrun caught
+on another stack; and all of `fork`'s: from a second thread, `pthread_atfork`,
+a lock across it, 150 programs started beside threads that map memory, a
+grandchild, SIGCHLD, stop and continue, a child ended by a signal.
+
+- The cases: `tests/container/threads.txt` (five programs), run in Alpine's image
+  and in the new Debian one; two in `shell.txt` (the pipe, a link's owner), one in
+  `python.txt` (`prctl`).
+- Tests: 123 unit tests; the five programs by the interpreter, the JIT and the
+  JIT checked in both images (30 runs, all the real machine's lines); every
+  suite by the JIT.
+- Not done: robust mutexes; `prctl`'s other requests (a filter of calls
+  answers EINVAL, where Linux says EFAULT for the null filter the trial gave it);
+  `clone3`, `rseq` and `set_robust_list` answer ENOSYS, which both libraries
+  take as an older kernel's answer.
+
+## R066: a signal between r64m's look and the kernel's call (2026-11-27)
+
+Found by R065's case of signals, after it was in: on the CI its first form did
+not end (a race of the program's own: a signal before `pause`; rewritten with
+semaphores, the real machine six of six), and the second form did not end once in
+ten runs with glibc on the Mac. The threads then (`cargo xtask waits`): the first
+in a sleep, waiting to see the handler's count; the one thread that lets the
+signal in, in `futex` (glibc's `sem_wait`). A signal sent to the process, which
+only that thread could take, was never handled.
+
+The card, written before the run.
+
+- **Hypothesis**: the window `sys::call` names itself ("between this look and the
+  kernel taking the call a signal can still slip in and wait out the call: a few
+  instructions wide, and not closed yet"). The signal arrived after r64m had
+  looked for one and before the host's `futex` was entered: r64m's handler noted
+  it, and the call then waited for a wake nobody would send. On Linux a signal
+  that is there before a call is entered is taken first. The program makes the
+  window likely: the thread tells the first it is ready and waits at once, and
+  the first sends at once.
+- **What is changed from before**: the window is closed for the calls that
+  wait: they are entered by a routine of r64m's own that looks at the thread's
+  word and makes the call in one stretch of code; the handler, finding the
+  thread in that stretch before the call, sends it on to the routine's other
+  ending, which says "not made"; the guest's call is then begun again after the
+  signal's handler, as if the signal had come first. (musl does the same for a
+  cancellation.)
+- **Next move for each result**:
+  - The program ends 40 of 40 in each image by the JIT, and the suites pass →
+    kept
+  - It still does not end → the thread's state again (`waits`): another way a
+    signal is lost, by the call it waits in
+  - Something that passed fails → the calls given the routine are too many (one
+    that is not safe to begin again): named and taken out
+- **Cut-off**: 40 runs in each image, 60 seconds a run.
+
+**Result (2026-11-27): the hypothesis held as far as it can be shown: with the
+window closed the program ends 40 of 40 in each image, where it did not end 1 of
+10 with glibc. Kept.**
+
+- The calls that wait (twenty-one of the guest's, each one call of the host's)
+  are entered through `call_unless_noted`: the thread's word looked at and the
+  call made in one stretch of nine instructions' reach; r64m's handler of
+  signals, finding the thread in that stretch with the call not entered, sends
+  it to the ending that answers "not made"; `sys::call` then puts the guest
+  back on its SYSCALL instruction, the signal's handler is entered, and the call
+  is made after it.
+- The program by the JIT, 60 seconds a run: 40 of 40 as the real machine in
+  Alpine's image, 40 of 40 in Debian's. Before: 9 of 10 with glibc (the one that
+  stood had its only signal-taking thread in `futex` and the signal unhandled),
+  10 of 10 with musl.
+- The one that stood was not looked at closely enough to say the signal arrived
+  in exactly those instructions; what is shown is that closing them ends it.
+- 123 unit tests; every suite by the JIT.
+- Not covered: calls that wait and are more than one call of the host's (a
+  write that r64m makes in pieces, `recvmmsg`), which are not begun again
+  safely and are left as they were: a signal in their window is still handled
+  only when the call comes back.

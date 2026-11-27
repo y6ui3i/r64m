@@ -337,6 +337,14 @@ pub fn call(c: &mut Cpu, m: &mut Mem, s: &mut Sys) -> Option<Exit> {
             }
         },
     };
+    // A call that waits and was not made, a signal having been noted for the thread
+    // since the look above (R066): the guest comes back to its SYSCALL instruction
+    // after the signal's handler, as if the signal had come first.
+    #[cfg(target_os = "linux")]
+    if result == Err(linux::NOT_MADE) {
+        c.rip = c.rip.wrapping_sub(2);
+        return None;
+    }
     // A call that a signal cut short is started again after the signal's handler,
     // if the handler asked for that and the call is one that can be: the guest comes
     // back to the SYSCALL instruction with the call's number in the A register.
@@ -753,17 +761,7 @@ fn sigprocmask(m: &mut Mem, s: &mut Sys, how: u64, new: u64, old: u64, size: u64
 /// its number less one, on both.
 #[cfg(target_os = "linux")]
 fn block_on_host(blocked: u64) {
-    let host = blocked & !(1 << 6 | 1 << 10);
-    unsafe {
-        let mut set: libc::sigset_t = std::mem::zeroed();
-        libc::sigemptyset(&mut set);
-        for signal in 1..=64 {
-            if host >> (signal - 1) & 1 != 0 {
-                libc::sigaddset(&mut set, signal);
-            }
-        }
-        libc::pthread_sigmask(libc::SIG_SETMASK, &set, std::ptr::null_mut());
-    }
+    signal::host_mask(libc::SIG_SETMASK, blocked & !(1 << 6 | 1 << 10));
 }
 
 #[cfg(not(target_os = "linux"))]

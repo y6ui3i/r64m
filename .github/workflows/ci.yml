@@ -39,7 +39,7 @@ env:
   FULL: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.full) }}
 
 jobs:
-  # The two images that are built, not pulled: built on x86-64, where their own
+  # The three images that are built, not pulled: built on x86-64, where their own
   # programs run, and kept until a Dockerfile changes.
   images:
     runs-on: ubuntu-24.04
