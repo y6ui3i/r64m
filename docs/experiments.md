@@ -5058,3 +5058,20 @@ The card, written before the run.
   - A case fails that passes alone → fewer at once (2), and the case named
 - **Cut-off**: the pull request's own run and one re-run; R060's limit of time
   holds each case.
+
+**Result (2026-11-27): the container cases 135 → 82 seconds on the runner, the
+job 4 minutes → 3 minutes 16. Kept. Not the 50 to 60 I said.**
+
+- On the Mac (images at hand): 64 seconds one at a time, 33 four at once, all
+  suites passing both ways.
+- On the runner, this pull request's own run: the step 82 seconds, every suite
+  passing; the job 3 minutes 16 seconds (it was 4 minutes 0 to 4 minutes 13 in
+  the five runs before).
+- Why not 50 to 60: a step cannot be shorter than its longest suite with its
+  pull, and the JVM's alone is 40 seconds of cases (R060's log) after its image
+  is pulled; the staging build is in the step too. My number took the Mac's
+  ratio for the runner's.
+- What is left of the job: setting up 30 seconds, the tests' build and run 70,
+  the cases 82, loading images 10. The two long steps do not need each other:
+  as two jobs side by side the wait would be about two minutes. That needs
+  `main`'s required check to become two, which is the owner's to say.

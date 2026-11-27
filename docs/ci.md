@@ -35,6 +35,14 @@ and loaded on the arm64 runner. g64m is checked out at a fixed commit.
 The expected lines of every case are the real machine's and stay so: the CI runs
 r64m against them; it does not make them.
 
+## How long a pull request waits
+
+Measured on 2026-11-27 (R061), the job `linux`: 3 minutes 16 seconds. Setting up
+(checkouts, `nasm`, `rustup`) 30 seconds; the unit tests, primitives and traces 70,
+mostly their build; the container cases 82, four suites at once (135 one at a time);
+loading the two built images 10. A container case that does not end fails after 300
+seconds with every thread's call (R060); the job itself has 120 minutes.
+
 ## What it cost while the repository was private
 
 The repository is public since 2026-11-27, and standard runners cost nothing for
