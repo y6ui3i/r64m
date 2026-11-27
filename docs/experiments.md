@@ -5804,3 +5804,48 @@ The card, written before the run.
   - A block's beginning is a tenth or more → that first: it is paid 4.9 million
     times in this compilation whatever the block holds
 - **Cut-off**: the tool, one run on the compilation of R070, the table.
+
+(A block's last instruction is counted to where the next block begins, so what
+stands after it is in its number: that is why RET, CALL and the jumps show 30 to
+50.)
+
+Read in the code of the blocks with most samples:
+
+- An ordinary instruction is what it should be: a move 1.4 to 2.1, a test 1.1, a
+  conditional jump 1.3 to 1.8.
+- A RET is ten instructions on its way: the return address loaded and the stack
+  pointer moved, the count, the address made into a place in the table of
+  16,384, two loads from it, a compare, and the host's own `ret` to the block
+  (R046). A jump through memory is twelve, ending in `br`.
+- **Every way out of a block has nine instructions standing after the block**:
+  the count added, a branch (to the next block once the two are joined, which
+  they nearly all are), and seven more that hand the address to r64m when they
+  are not joined, never run again after the joining. A block with eight ways out
+  has 63 instructions after its last one. A conditional jump taken goes by two
+  of them (the count and the branch) on its way to the next block.
+- So of the 7.35 million instructions made, the larger part is these: the code
+  that runs is about a third of the 29 MB, with the rest between its pieces.
+
+What the samples at blocks' beginnings are, I do not know and say so: 37% of
+the time on what is one or two instructions (the look for a signal, where a
+block has one). A sample lands on the instruction the processor was waiting to
+run: after a branch it had guessed wrongly, or for code it had to fetch. Both
+are costs of arriving at a block; which of the two it is, this machine's VM
+gives no counter to say. My reading: with the code that runs spread over three
+times the memory it needs, fetching it is a large part. That is a guess until
+something is changed and timed.
+
+By the card's lines, two hold: a block's beginning is far more than a tenth, and
+a few kinds hold more than half. What follows, each its own card:
+
+1. The seven instructions of a way out that are not run after joining go out
+   of the way: one place for them all, or a short form (a call to a shared
+   piece with the address after it), so that the code that runs lies together.
+   Timed on this compilation and on the whole build; this is the test of the
+   guess above.
+2. A conditional jump taken to a joined block goes straight there, the count
+   kept some other way than by two instructions on the way.
+3. Then calls and returns, by what is left of them in the table.
+
+- The tool stays: `--profile` prints the table (`r64m: cost:` lines).
+- Unit tests 123; the profile is not run by any case (it prints addresses).

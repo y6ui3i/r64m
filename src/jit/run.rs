@@ -420,6 +420,38 @@ impl Jit {
         Some((block.first, block.at(i), word))
     }
 
+    /// For `--profile`: of a host address in this thread's generated code, the kind
+    /// of the guest's instruction it is in (as `key_of` names kinds), or nothing
+    /// named where it is in a block's own beginning, before its first instruction.
+    pub fn kind_at(&self, pc: usize, m: &Mem) -> Option<Vec<u8>> {
+        let block = &self.blocks[self.blocks.partition_point(|b| b.code as usize <= pc).checked_sub(1)?];
+        let word = ((pc - block.code as usize) / 4) as u32;
+        let i = block.starts.partition_point(|&(start, _)| start <= word);
+        Some(if i == 0 { Vec::new() } else { key_of(m, block.at(i - 1)) })
+    }
+
+    /// For `--profile`: every kind of instruction that was translated, how often,
+    /// and into how many of the host's instructions in all. A block's last
+    /// instruction is counted to where the next block begins, so the way out of the
+    /// block is in it; the very last block made is left out for having no end known.
+    /// With them, under no name, the blocks' own beginnings.
+    pub fn costs(&self, m: &Mem) -> HashMap<Vec<u8>, (u64, u64)> {
+        let mut all: HashMap<Vec<u8>, (u64, u64)> = HashMap::new();
+        for pair in self.blocks.windows(2) {
+            let (block, next) = (&pair[0], &pair[1]);
+            let end = ((next.code as usize).wrapping_sub(block.code as usize) / 4) as u32;
+            let Some(&(first, _)) = block.starts.first() else { continue };
+            let entry = all.entry(Vec::new()).or_default();
+            *entry = (entry.0 + 1, entry.1 + first as u64);
+            for (i, &(start, _)) in block.starts.iter().enumerate() {
+                let until = block.starts.get(i + 1).map_or(end, |&(next, _)| next);
+                let kind = all.entry(key_of(m, block.at(i))).or_default();
+                *kind = (kind.0 + 1, kind.1 + until.saturating_sub(start) as u64);
+            }
+        }
+        all
+    }
+
     /// And a block's code as it stands (to the next block's start, or 400
     /// instructions), with where each of the guest's instructions begins.
     pub fn code_of(&self, rip: u64) -> Option<(Vec<u32>, Vec<(u32, u64)>)> {
