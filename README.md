@@ -170,6 +170,9 @@ real CPU does.
    Every call is held to the real machine with the registers it does not use
    filled (R059: two more calls looked at what the kernel ignores, and the last
    address of all brought r64m itself down).
+   A child of `fork` no longer waits for a lock that a thread of its parent
+   held, and a store the interpreter makes is whole to other threads (R064: Go's
+   `go build` stood, or its compiler was stopped, a few times in a thousand).
    The tests are run by a CI on every push
    ([docs/ci.md](docs/ci.md)): `cargo xtask ci` is the same by hand.
 

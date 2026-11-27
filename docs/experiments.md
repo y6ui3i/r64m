@@ -5217,3 +5217,61 @@ The card, written before the run.
     for: Go's compiler started alone in a loop (thousands of starts in the time
     of sixty builds) is the condition instead
 - **Cut-off**: 60 runs, 150 seconds each; then the last move, once.
+
+**Result (2026-11-27): two faults, both r64m's, both fixed. The write was Go's own
+through a pointer half written: r64m stored a byte at a time. On the way a hang
+was met and explained: a child of `fork` waited for a lock nobody in it held.
+With both fixed, 960 builds of the package, eight at once: none stands, none
+fails, no fault is said. (Before: 2 of 320 stood, and 1 start in several
+thousand was stopped.)**
+
+How it went, with what I got wrong:
+
+- The card's order was changed before the first run: sixty whole runs of the
+  case would have met one or two of several thousand processes in 17 minutes;
+  the compiler started alone, or the one package built again and again, makes
+  thousands in a minute. `compile -V=full` 2,000 times: nothing. `go build -a
+  internal/runtime/atomic` 320 times, eight at once: it did not end.
+- **The hang.** Two of the 320 stood for good: `go`'s child, made to start a
+  tool, had not started it; its one thread waited in `futex` on an address of
+  r64m's own, and its parent waited for it (the pipe by which r64m knows that a
+  `vfork`'s child has started its program). The child is a copy of a process
+  with several threads, and has one: a lock of r64m's that another thread held
+  as the copy was made (the list of regions, held for every `mmap`, `munmap` and
+  mark of code) is held in the child for ever. **Very likely R060's hang**: the
+  CI's Go suite stood the same way; it was not seen there, so it is not shown.
+- The fix: the thread that forks holds r64m's own locks while the copy is made
+  (the process's, the list of regions, standard error) and lets go in parent and
+  child, as the C library does for its own.
+- **My first form of the fix hung every time**, at Go's first child: it took
+  standard output's lock too, which r64m's first thread holds for as long as it
+  runs, so any other thread that forked waited for ever. An hour went by before
+  the owner asked why Go took so long; the run had no limit that could end it
+  (`timeout` before `docker run` ends the client and not the container: the
+  detached container with `docker wait` is the form that works, as R054 had
+  already taught). The case I had written forked from the first thread only and
+  passed. It now forks from two threads, 1,000 children each, beside three
+  threads that map and unmap; the first form does not end it, the second does in
+  a second, and the real machine prints the same line.
+- **The write.** With the hang gone and `--faults` on, the 320 builds ended in 65
+  seconds and one said it: `Write of 0x7e000000b9`, nothing mapped there, and
+  Go's own report: `runtime.preemptone`, from `sysmon`, its register holding
+  0x7e00000000 where a pointer to a goroutine should be: the high half of a
+  pointer and a low half of zeros. Another thread was setting that pointer to
+  nothing at that moment.
+- r64m's interpreter, in a memory more than one thread has, made every store by
+  a routine that copies **a byte at a time** (so that a store the host refuses
+  can be stepped out of). A store of eight bytes was eight stores, and a reader
+  between them saw half a pointer. On x86 it is one store. The JIT's stores were
+  always one; this is the interpreter's, which every block falls back to.
+- The fix: the routine stores eight bytes at a time, then four, two, one. A
+  test of two threads (`a_store_seen_by_another_thread_is_whole`) fails with the
+  old routine at once ("eight bytes read as 0x33") and passes with the new.
+- After both: three rounds of 320 builds, eight at once, each ended in under 170
+  seconds with no build failed and no fault said.
+- Not looked at: what else reads memory in pieces. The interpreter's loads go by
+  the compiler's copy, which for two, four and eight bytes is one load (not
+  checked in the built code). An instruction that reads, changes and writes
+  without LOCK is two acts on x86 as well.
+- Tests with both fixes: 123 unit tests; every suite by the JIT; the three
+  suites with new cases (GCC's, Python's, Go's) by all three ways.
