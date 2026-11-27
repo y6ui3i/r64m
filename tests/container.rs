@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The three ways each case is run.
-const WAYS: [(&str, &[&str]); 3] = [("interpreter", &[]), ("jit", &["--jit"]), ("jit_check", &["--jit-check"])];
+const WAYS: [(&str, &[&str]); 3] = [("interpreter", &["--interpret"]), ("jit", &[]), ("jit_check", &["--jit-check"])];
 
 /// One case: a program with its arguments, what it prints, and how it ends.
 struct Case {
@@ -72,7 +72,7 @@ static FILES: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// another limit).
 fn most(way: &[&str]) -> std::time::Duration {
     let asked = std::env::var("R64M_CASE_SECONDS").ok().and_then(|s| s.parse().ok());
-    std::time::Duration::from_secs(asked.unwrap_or(if way == ["--jit"] { 300 } else { 1800 }))
+    std::time::Duration::from_secs(asked.unwrap_or(if way.is_empty() { 300 } else { 1800 }))
 }
 
 /// Every process there is (the container's: the cases run in one) and every thread

@@ -55,9 +55,9 @@ const PRIMITIVES: [Primitive; 23] = [
 /// The four ways the JIT is run: blocks made when an address is hot or at once, and
 /// each block held to the interpreter as it runs or not.
 const JIT_MODES: [(&str, &[&str]); 4] = [
-    ("jit", &["--jit"]),
+    ("jit", &[]),
     ("jit_check", &["--jit-check"]),
-    ("jit_now", &["--jit", "--jit-now"]),
+    ("jit_now", &["--jit-now"]),
     ("jit_check_now", &["--jit-check", "--jit-now"]),
 ];
 
@@ -81,7 +81,7 @@ fn run(dir: &Path, p: &Primitive, mode: &[&str]) -> Result<Output, Failed> {
 /// The interpreter prints what the program printed where it was compiled for.
 fn interpreter_is_right(dir: &Path, p: &Primitive) -> Result<(), Failed> {
     let expected = std::fs::read(dir.join(format!("{}.out", p.name))).map_err(|e| format!("{}.out: {e}", p.name))?;
-    let out = run(dir, p, &[])?;
+    let out = run(dir, p, &["--interpret"])?;
     if out.stdout == expected && out.status.code() == Some(0) {
         return Ok(());
     }
@@ -100,7 +100,7 @@ fn interpreter_is_right(dir: &Path, p: &Primitive) -> Result<(), Failed> {
 /// The JIT in one of its ways does what the interpreter does: the same output, the
 /// same end, and (in what it says at the end) the same count of instructions.
 fn jit_is_the_interpreter(dir: &Path, p: &Primitive, mode: &[&str]) -> Result<(), Failed> {
-    let (alone, jit) = (run(dir, p, &[])?, run(dir, p, mode)?);
+    let (alone, jit) = (run(dir, p, &["--interpret"])?, run(dir, p, mode)?);
     if alone.stdout == jit.stdout && alone.status == jit.status && alone.stderr == jit.stderr {
         return Ok(());
     }

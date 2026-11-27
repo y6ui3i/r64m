@@ -5428,3 +5428,14 @@ window closed the program ends 40 of 40 in each image, where it did not end 1 of
   write that r64m makes in pieces, `recvmmsg`), which are not begun again
   safely and are left as they were: a signal in their window is still handled
   only when the call comes back.
+
+### The JIT with nothing said (2026-11-27)
+
+The owner: 「デフォルトJITにしてオプションなしでJITにするか」. Not an experiment.
+r64m runs a program by its JIT unless told otherwise; `--interpret` asks for the
+interpreter alone; a trace (`--trace`, `--trace-xmm`) is the interpreter's, as it
+was; `--jit` is still taken and changes nothing; `--jit-check` as before. Started
+by the kernel (under Docker) it was the JIT already. The tests name the
+interpreter where they mean it. A program that starts another hands its options
+on, so `--interpret` holds for a whole tree of processes, and without it they are
+all by the JIT.

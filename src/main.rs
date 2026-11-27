@@ -199,13 +199,13 @@ fn main() {
     // Started by the kernel for an x86-64 program (registered with `binfmt_misc`
     // under this name, with the flag that keeps the program's own first argument:
     // R049): what follows is the program's path, the first argument it was given,
-    // and the rest. No option can be given this way, so this is the way with the
-    // JIT.
+    // and the rest. No option can be given this way: it is the JIT, as with
+    // nothing said, and quiet.
     let by_kernel = std::path::Path::new(&args.remove(0)).file_name().is_some_and(|n| n == "r64m-binfmt");
     if by_kernel && args.len() >= 2 {
         let path = args.remove(0);
         let name = args.remove(0);
-        args.splice(0..0, ["--jit".to_string(), "--quiet".to_string(), "--argv0".to_string(), name, path]);
+        args.splice(0..0, ["--quiet".to_string(), "--argv0".to_string(), name, path]);
     }
     // The options as they were given, for a program that starts another (`execve`
     // is r64m started again with them, ADR 0017).
@@ -247,12 +247,24 @@ fn main() {
     // For measuring: every block with ordered loads and stores, as a process with
     // more than one thread has them.
     let jit_ordered = option("--jit-ordered");
-    let jit = option("--jit") || jit_check;
+    // The JIT is what r64m runs a program by, with nothing said (since 2026-11-27:
+    // until then it was asked for with `--jit`, which is still taken). The
+    // interpreter alone is asked for with `--interpret`; a trace is the
+    // interpreter's.
+    let asked_jit = option("--jit") || jit_check;
+    let interpret = option("--interpret");
     let trace_xmm = args.first().is_some_and(|a| a == "--trace-xmm");
     let trace = trace_xmm || args.first().is_some_and(|a| a == "--trace");
     if trace {
         args.remove(0);
     }
+    if asked_jit && interpret {
+        fail(format_args!("--interpret and --jit: one or the other"));
+    }
+    if asked_jit && trace {
+        fail(format_args!("a trace is of the interpreter: not with --jit"));
+    }
+    let jit = !interpret && !trace;
     // The name the program is given for itself, if it is not to be its path: as
     // `execve` hands it on.
     let mut argv0 = None;
@@ -270,7 +282,7 @@ fn main() {
             mem.size().trailing_zeros(),
             mem.host_page() / 1024
         );
-        println!("usage: r64m [--count] [--jit | --jit-check] [--jit-now] [--jit-stats] [--jit-memory] [--calls] [--faults] [--quiet] [--profile] [--trace | --trace-xmm] program [arguments]");
+        println!("usage: r64m [--count] [--interpret | --jit-check] [--jit-now] [--jit-stats] [--jit-memory] [--calls] [--faults] [--quiet] [--profile] [--trace | --trace-xmm] program [arguments]");
         return;
     };
 
@@ -325,9 +337,6 @@ fn main() {
     system.options = own_options;
     system.program = std::fs::canonicalize(path).map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| path.clone());
     let mut lines = std::io::BufWriter::new(std::io::stdout().lock());
-    if jit && trace {
-        fail(format_args!("a trace is of the interpreter: not with --jit"));
-    }
     let mut blocks = if jit {
         // With the check every repetition is a step, as the check counts them.
         c.rep_whole = !jit_check;
