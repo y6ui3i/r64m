@@ -5805,6 +5805,33 @@ The card, written before the run.
     times in this compilation whatever the block holds
 - **Cut-off**: the tool, one run on the compilation of R070, the table.
 
+**Result (2026-11-28): the cost is in going from one block to another, not in
+the instructions. Of the time in generated code, 37 in a hundred is at blocks'
+beginnings and another 24 in calls, returns and jumps; an ordinary instruction is
+one to two of the host's. The 5.5 of R070 is mostly code that is not run: nine
+instructions kept beside every way out of every block.**
+
+The compilation of R070 again, with the new table (`--profile`): 2352 samples in
+generated code. The kinds with most:
+
+| kind | samples | share | translated | the host's instructions for each |
+|---|---|---|---|---|
+| a block's own beginning | 877 | 37.3% | 117,431 | 1.6 |
+| RET (`c3`) | 228 | 9.7% | 15,497 | 35.8 |
+| CALL (`e8`) | 205 | 8.7% | 59,733 | 44.4 |
+| MOV r64, r/m64 (`48 8b`) | 126 | 5.4% | 146,667 | 2.1 |
+| MOV r/m64, r64 (`48 89`) | 75 | 3.2% | 133,697 | 1.4 |
+| MOV r32, r/m32 (`8b`) | 53 | 2.3% | 42,453 | 2.3 |
+| CALL through a register or memory (`ff fa`) | 49 | 2.1% | 3,377 | 53.6 |
+| CMP r/m8, imm8 (`80 ff`) | 41 | 1.7% | 21,974 | 7.0 |
+| MOVZX from a byte (`0f b6`) | 32 | 1.4% | 18,271 | 2.1 |
+| JMP short (`eb`) | 30 | 1.3% | 9,046 | 30.7 |
+| JMP (`e9`) | 27 | 1.1% | 21,766 | 28.9 |
+| JMP through a register or memory (`ff fc`) | 27 | 1.1% | 1,429 | 48.4 |
+| MOVZX from a word (`0f b7`) | 27 | 1.1% | 17,002 | 1.7 |
+| JE short (`74`) | 25 | 1.1% | 43,908 | 1.8 |
+| JNE short (`75`) | 24 | 1.0% | 29,805 | 4.2 |
+
 (A block's last instruction is counted to where the next block begins, so what
 stands after it is in its number: that is why RET, CALL and the jumps show 30 to
 50.)
