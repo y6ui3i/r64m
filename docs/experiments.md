@@ -5405,3 +5405,26 @@ The card, written before the run.
   - Something that passed fails → the calls given the routine are too many (one
     that is not safe to begin again): named and taken out
 - **Cut-off**: 40 runs in each image, 60 seconds a run.
+
+**Result (2026-11-27): the hypothesis held as far as it can be shown: with the
+window closed the program ends 40 of 40 in each image, where it did not end 1 of
+10 with glibc. Kept.**
+
+- The calls that wait (twenty-one of the guest's, each one call of the host's)
+  are entered through `call_unless_noted`: the thread's word looked at and the
+  call made in one stretch of nine instructions' reach; r64m's handler of
+  signals, finding the thread in that stretch with the call not entered, sends
+  it to the ending that answers "not made"; `sys::call` then puts the guest
+  back on its SYSCALL instruction, the signal's handler is entered, and the call
+  is made after it.
+- The program by the JIT, 60 seconds a run: 40 of 40 as the real machine in
+  Alpine's image, 40 of 40 in Debian's. Before: 9 of 10 with glibc (the one that
+  stood had its only signal-taking thread in `futex` and the signal unhandled),
+  10 of 10 with musl.
+- The one that stood was not looked at closely enough to say the signal arrived
+  in exactly those instructions; what is shown is that closing them ends it.
+- 123 unit tests; every suite by the JIT.
+- Not covered: calls that wait and are more than one call of the host's (a
+  write that r64m makes in pieces, `recvmmsg`), which are not begun again
+  safely and are left as they were: a signal in their window is still handled
+  only when the call comes back.

@@ -37,6 +37,50 @@ thread_local! {
     };
 }
 
+/// A call of the host's kernel that is not made if a signal has been noted for the
+/// thread: the thread's word is looked at and the call entered in one stretch of
+/// code, and the handler, finding the thread in that stretch with the call not yet
+/// entered, sends it on to the ending that answers "not made" (`NOT_MADE`). So a
+/// signal that comes after r64m's own look and before the kernel has the call is not
+/// slept through: on Linux a signal that is there before a call waits is taken
+/// first (R066: a thread that had just said it was ready and went to wait for a
+/// semaphore was sent a signal in that moment, and waited for ever).
+///
+/// `word` is the thread's "look" word; `a` the call's six arguments.
+#[unsafe(naked)]
+pub unsafe extern "C" fn call_unless_noted(word: *const u32, number: u64, a: *const [u64; 6]) -> i64 {
+    core::arch::naked_asm!(
+        "mov x9, x0",
+        "mov x8, x1",
+        "mov x10, x2",
+        "ldp x0, x1, [x10]",
+        "ldp x2, x3, [x10, #16]",
+        "ldp x4, x5, [x10, #32]",
+        // The stretch: from here to the call itself.
+        "ldr w11, [x9]",
+        "cbnz w11, 2f",
+        "svc #0",
+        "ret",
+        "2: mov x0, #-0x8000000000000000",
+        "ret",
+    )
+}
+
+/// What `call_unless_noted` answers when it did not make the call.
+pub const NOT_MADE: i64 = i64::MIN;
+
+/// Where the stretch begins and where the call is, from the routine's start, and
+/// where its other ending is.
+const STRETCH: std::ops::RangeInclusive<usize> = 24..=32;
+const OTHER_ENDING: usize = 40;
+
+/// The thread's "look" word, or a word that is always nothing before the thread
+/// has one.
+pub fn look_word() -> *const u32 {
+    static NOTHING: u32 = 0;
+    WAITING.with(|w| if w.kick.get().is_null() { &NOTHING as *const u32 } else { w.kick.get() as *const u32 })
+}
+
 /// The host's handler: the signal is noted for this thread, and its blocks are told
 /// to leave. Nothing else is done here.
 extern "C" fn arrived(signal: libc::c_int, info: *mut libc::siginfo_t, context: *mut libc::c_void) {
@@ -45,6 +89,11 @@ extern "C" fn arrived(signal: libc::c_int, info: *mut libc::siginfo_t, context: 
     let registers = unsafe { &mut (*(context as *mut libc::ucontext_t)).uc_mcontext };
     if crate::jit::runs_blocks(registers.pc as usize) {
         registers.regs[27] |= 1 << 63;
+    }
+    // About to make a call that waits, and not yet in it: the call is not made.
+    let routine = call_unless_noted as *const () as usize;
+    if STRETCH.contains(&(registers.pc as usize).wrapping_sub(routine)) {
+        registers.pc = (routine + OTHER_ENDING) as u64;
     }
     WAITING.with(|w| {
         if (1..=64).contains(&signal) {

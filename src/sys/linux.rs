@@ -27,8 +27,25 @@ pub fn errno() -> u64 {
     std::io::Error::last_os_error().raw_os_error().unwrap_or(5) as u64
 }
 
+thread_local! {
+    /// Whether the guest's call being answered is one that waits (`call`).
+    static WAITS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// What `raw` answers for a call that waits and was not made because a signal had
+/// been noted for the thread since r64m last looked (R066): not an error of the
+/// kernel's. The guest's call is begun again after the signal's handler.
+pub const NOT_MADE: u64 = u64::MAX;
+
 /// One call of the host's kernel by its own number.
 fn raw(number: c_long, a: [u64; 6]) -> Result<u64, u64> {
+    if WAITS.get() {
+        return match unsafe { super::signal::call_unless_noted(super::signal::look_word(), number as u64, &a) } {
+            super::signal::NOT_MADE => Err(NOT_MADE),
+            n if (-4095..0).contains(&n) => Err(n.unsigned_abs()),
+            n => Ok(n as u64),
+        };
+    }
     match unsafe { libc::syscall(number, a[0], a[1], a[2], a[3], a[4], a[5]) } {
         n if n < 0 => Err(errno()),
         n => Ok(n as u64),
@@ -515,6 +532,18 @@ fn execve(m: &Mem, s: &Sys, path: u64, argv: u64, envp: u64) -> Result<u64, u64>
 
 /// Answers call `n` of x86-64's numbering if it is one handed to the host's kernel.
 pub fn call(c: &mut Cpu, m: &mut Mem, s: &mut Sys, n: u64, a: [u64; 6]) -> Option<Result<u64, u64>> {
+    // The calls that wait, each one call of the host's: read, poll, readv, select,
+    // pause, nanosleep, connect, accept, recvfrom, recvmsg, wait4, rt_sigtimedwait,
+    // rt_sigsuspend, futex, clock_nanosleep, epoll_wait, waitid, pselect6, ppoll,
+    // epoll_pwait, accept4. They are not made over a signal noted since r64m looked.
+    struct Waits;
+    impl Drop for Waits {
+        fn drop(&mut self) {
+            WAITS.set(false);
+        }
+    }
+    WAITS.set(matches!(n, 0 | 7 | 19 | 23 | 34 | 35 | 42 | 43 | 45 | 47 | 61 | 128 | 130 | 202 | 230 | 232 | 247 | 270 | 271 | 281 | 288));
+    let _waits = Waits;
     // A call whose arguments mean the same to both kernels, with those among the
     // first that are pointers named by a mask (bit 0: the first argument).
     let same = |m: &Mem, number: libc::c_long, pointers: u8| -> Result<u64, u64> {

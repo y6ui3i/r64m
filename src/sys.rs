@@ -337,6 +337,14 @@ pub fn call(c: &mut Cpu, m: &mut Mem, s: &mut Sys) -> Option<Exit> {
             }
         },
     };
+    // A call that waits and was not made, a signal having been noted for the thread
+    // since the look above (R066): the guest comes back to its SYSCALL instruction
+    // after the signal's handler, as if the signal had come first.
+    #[cfg(target_os = "linux")]
+    if result == Err(linux::NOT_MADE) {
+        c.rip = c.rip.wrapping_sub(2);
+        return None;
+    }
     // A call that a signal cut short is started again after the signal's handler,
     // if the handler asked for that and the call is one that can be: the guest comes
     // back to the SYSCALL instruction with the call's number in the A register.
