@@ -44,7 +44,9 @@ once by the JIT) 1 minute 58, after `images` has looked up its cache. As one job
 was 3 minutes 16 (R061), and 4 minutes with the suites one at a time.
 
 A container case that does not end fails after 300 seconds with every thread's call
-(R060). The job `tests` has ten minutes at most, `cases` twenty (two hours for the
+(R060). `cargo xtask test` has seven minutes for its tests and, past them, says
+every process and thread with the call each is in before it ends them (R058's kind).
+The job `tests` has ten minutes at most, `cases` twenty (two hours for the
 weekly three ways).
 
 ## What it cost while the repository was private
