@@ -1,40 +1,53 @@
 # r64m
 
-An x86-64 emulator with a JIT for arm64 hosts, in Rust: a rebuild of
-[g64m](https://github.com/y6ui3i/g64m), which is written in Goose. Not a port of its
-code: what g64m found out is used, and the design begins again (`docs/adr/`).
+An x86-64 emulator with a JIT for arm64 hosts, in Rust. It runs the programs of x86-64
+container images as processes on an arm64 Linux kernel: under Docker it takes the place
+QEMU's user mode has, with nothing in the `docker` command that names it
+([Running x86-64 images with Docker](#running-x86-64-images-with-docker)). It is a
+rebuild of [g64m](https://github.com/y6ui3i/g64m), which is written in Goose: not a
+port of its code; what g64m found out is used, and the design begins again
+(`docs/adr/`).
 
-**Static programs run, interpreted.** This repository was started on 2026-11-24. So
-far: the guest's memory (`src/mem.rs`), the loader of a static program with its first
-stack (`src/elf.rs`), an interpreter for the integer instructions, SSE and SSE2 and the
-x87 (`src/cpu.rs`, `src/cpu/sse.rs`, `src/cpu/x87.rs`) and three system calls
-(`src/sys.rs`). All 39 of g64m's cases with a trace from the real CPU give that trace,
-and all 23 of its primitives print what they should, on macOS and on arm64 Linux
-(R003). The interpreter runs 72 million instructions a second on a MacBook Air (Apple
-M1), 1.27 times g64m's interpreter and ahead of it on every primitive (R007); QEMU,
-which is a JIT, runs the same primitives at 1,267 million. r64m's own JIT
-([0014](docs/adr/0014-the-jit.md)) translates blocks of integer instructions (moves,
-arithmetic and logic on 8 to 64 bits, with and without the carry, multiplication and
-division, shifts, rotations, bit scans, conditional moves and sets, the stack, jumps)
-and of the scalar SSE instructions ([0015](docs/adr/0015-sse-in-blocks.md): moves,
-arithmetic, comparisons and conversions of floats and doubles, and the packed
-instructions of whole numbers; the XMM registers in the host's vector registers),
-joins them to one another, finds a return's block without leaving generated code, and
-checks each block against the interpreter when asked (`--jit-check`). It is asked for
-with `--jit` and is not yet what r64m does by itself. Of the 23 primitives (named, with what each is made of, in `tests/prim.rs`) twenty-two are
-past QEMU on this Mac (1.06 to 8.56 times), thirteen of them at twice QEMU or past it,
-and on nineteen r64m's JIT is level with g64m's or ahead (R023). The one behind QEMU
-is long double's: the x87 is interpreted, by soft arithmetic of 80 bits. Translated
-code is guarded against writes only where the guest may write it
-([0016](docs/adr/0016-only-writable-code-is-guarded.md)). On a Linux host a dynamically
-linked program runs with its files and its child processes: busybox's shell and its
-programs in an x86-64 Alpine container (R026), GCC there (R027), and Python 3.13 on
-Debian with its threads (R033). Between threads memory is ordered as x86 orders it
-([0019](docs/adr/0019-threads-and-signals.md), point D; R034): where the host's processor can
-keep that order itself and the kernel lets a thread ask (an Apple processor under
-this Mac's Docker VM: R035) every thread asks and nothing more is paid; elsewhere a
-process's blocks are made with ordered loads and stores from its second thread on,
-which costs such a program half again and more. There is no machine.
+**Where it stands (2026-11-27).** Official images run unchanged by `docker run` alone:
+Alpine's busybox and GCC, Python 3.13, redis, nginx, memcached, Node.js, a JVM
+(Temurin 21), Go, PostgreSQL, and nginx over TLS in front of FastAPI. About ninety
+cases from those ten images are held to what a real x86-64 machine printed for the same
+commands, by the interpreter, by the JIT, and by the JIT with every block checked
+against the interpreter ([docs/ci.md](docs/ci.md)).
+
+Beside QEMU 9.2.2's user mode in the same Docker VM, on a MacBook Air (Apple M1), by
+the clock of whoever waits:
+
+| work | r64m against QEMU |
+|---|---|
+| NetHack 3.6.7 built by `make` with GCC, one job (590 s under QEMU, 203 s) | 2.9 times as fast |
+| nginx over TLS in front of FastAPI: the container's start to its first answer | 3.0 |
+| the same: a request on a new connection | 2.3 |
+| the same: a request on a connection kept open | 1.8 |
+
+The aim is twice QEMU; the kept connection is under it (and has not been raced again
+since r64m's side of it was made 13.5% shorter). Rosetta, where there is one, is faster
+than both: it builds NetHack in 168 s. r64m is for where there is none.
+
+**How it is made, in short.** An interpreter for the integer instructions, SSE and SSE2
+and the x87 (`src/cpu.rs`, `src/cpu/sse.rs`, `src/cpu/x87.rs`), and a JIT
+([0014](docs/adr/0014-the-jit.md), `src/jit/`) that translates blocks of the integer
+instructions, the scalar SSE instructions and the packed instructions of whole numbers
+([0015](docs/adr/0015-sse-in-blocks.md)), joins blocks to one another, and can check
+each against the interpreter (`--jit-check`). The x87 is interpreted, by soft
+arithmetic of 80 bits: the one place r64m is behind QEMU. A program's memory is the
+host's, at an offset ([0008](docs/adr/0008-a-programs-memory-is-the-hosts.md)); its
+system calls are the host kernel's, translated
+([0017](docs/adr/0017-the-containers-way.md)); its threads are host threads, with
+memory ordered between them as x86 orders it
+([0019](docs/adr/0019-threads-and-signals.md)): by the processor itself where it can
+(an Apple processor, when the kernel lets a thread ask), by ordered loads and stores
+elsewhere, which costs a program with threads half again and more. There is no
+machine: no kernel is booted, no device is emulated.
+
+Every result is held to the real CPU before it is timed, and every experiment has a
+card in [docs/experiments.md](docs/experiments.md) before it runs, with its result
+after, whether it worked or not.
 
 ## The principle, the aim, the goal
 
