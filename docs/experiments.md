@@ -5626,3 +5626,48 @@ The card, written before the run.
   - The native build fails where the x86-64 one does not → the image differs:
     put right, not measured around
 - **Cut-off**: three builds of each.
+
+**Result (2026-11-27): the whole build takes r64m 3.85 times as long as the host's
+own: 200 seconds where the native build takes 52. One large compilation alone: 3.0
+times. The guess of three to six held.**
+
+NetHack 3.6.7, `make all` with one job, Alpine 3.22.8 and GCC 14.2.0 on both
+sides, three builds of each taking turns (seconds; the clock in the image counts
+whole seconds):
+
+| | 1 | 2 | 3 | the least |
+|---|---|---|---|---|
+| native arm64 | 54 | 52 | 52 | 52 |
+| x86-64 under r64m | 202 | 200 | 202 | 200 |
+
+Each build made 284 files; between two builds of one side three differ, the
+three with the date in them.
+
+Beside it, in the built tree (the least of three, hundredths of a second read
+from the kernel's clock):
+
+| | native | r64m | r64m / native |
+|---|---|---|---|
+| `apply.c` compiled alone (125 KB of source) | 1.06 s | 3.21 s | 3.0 |
+| `monst.c` compiled alone (tables, little code) | 0.06 s | 0.25 s | 4.2 |
+| 200 starts of `/bin/true` | 0.03 s | 0.27 s | 9 |
+| 20 starts of `gcc --version` | under 0.01 s | 0.09 s | |
+
+- So there are two measures now, and they say different things: tight loops
+  1.52 times native (R068), a compiler at work 3.0, a whole build 3.85.
+- Where the difference between 1.5 and 3 is, is not shown here. The compiler is
+  a large program that goes through a great deal of its own code a few times
+  each (blocks made and little used, calls through tables, the interpreter for
+  what is not translated), where a primitive is a few blocks run a billion
+  times. That is my reading, not a finding: `--profile` and `--jit-stats` of
+  one compilation are the next look, in a card of its own.
+- Where the difference between 3.0 and 3.85 is, the table says in part: a
+  process that does nothing costs r64m 1.3 ms to start where it costs the host
+  0.15, and a small compilation is 4.2 times and not 3.0. The build starts some
+  six hundred processes, which is under a second of the 150 that r64m is
+  behind; the short compilations and the linking are the rest.
+- A first try at timing one compilation used a file that had not been
+  preprocessed rightly (2,000 lines, a hundredth of a second) and is thrown
+  away; the table's is `make` of one object in the built tree.
+- For what r64m is for: a build that takes a minute natively takes under four
+  under r64m, and ten under QEMU (R031: 590 s).

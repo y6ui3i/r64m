@@ -31,8 +31,9 @@ than both: it builds NetHack in 168 s. r64m is for where there is none.
 
 Beside the host's own code (R068): the same C compiled for arm64 runs the primitives
 (tight loops of one kind of instruction each) in two thirds of r64m's time: r64m takes
-1.52 times as long on their sum, from 0.98 to 4.8 by primitive. A whole build has not
-been measured that way yet.
+1.52 times as long on their sum, from 0.98 to 4.8 by primitive. A whole build (R069):
+NetHack, which the host's own compiler builds in 52 s, is built by the x86-64 compiler
+under r64m in 200 s, 3.85 times as long; one large compilation alone 3.0 times.
 
 **How it is made, in short.** An interpreter for the integer instructions, SSE and SSE2
 and the x87 (`src/cpu.rs`, `src/cpu/sse.rs`, `src/cpu/x87.rs`), and a JIT
