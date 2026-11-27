@@ -230,9 +230,13 @@ fn message(m: &mut Mem, number: c_long, fd: u64, header: u64, flags: u64) -> Res
 /// `epoll_ctl`: the event is 12 bytes on x86-64 (the kinds, then the word given
 /// back, with nothing between) and 16 on arm64.
 fn epoll_ctl(m: &Mem, epoll: u64, op: u64, fd: u64, event: u64) -> Result<u64, u64> {
+    // Taking a descriptor out (EPOLL_CTL_DEL) names no event: the kernel does not
+    // look at the pointer, and neither is it looked at here (R059).
+    const EPOLL_CTL_DEL: u64 = 2;
+    let event = if op == EPOLL_CTL_DEL { 0 } else { event };
     let mut host = [0u64; 2];
     if event != 0 {
-        host = [m.read_u32(event).map_err(|_| EFAULT)? as u64, m.read_u64(event + 4).map_err(|_| EFAULT)?];
+        host = [m.read_u32(event).map_err(|_| EFAULT)? as u64, m.read_u64(event.wrapping_add(4)).map_err(|_| EFAULT)?];
     }
     raw(libc::SYS_epoll_ctl, [epoll, op, fd, if event == 0 { 0 } else { host.as_ptr() as u64 }, 0, 0])
 }
@@ -698,6 +702,9 @@ pub fn call(c: &mut Cpu, m: &mut Mem, s: &mut Sys, n: u64, a: [u64; 6]) -> Optio
         // same on both); attached and detached where the guest's memory is kept.
         277 => raw(libc::SYS_sync_file_range, a),
         29 => raw(libc::SYS_shmget, a),
+        // shmctl: removing a segment, locking and unlocking it (IPC_RMID, SHM_LOCK,
+        // SHM_UNLOCK) have nothing to say or be told: the third is not looked at.
+        31 if matches!(a[1], 0 | 11 | 12) => raw(libc::SYS_shmctl, [a[0], a[1], 0, 0, 0, 0]),
         31 => p(m, a[2]).and_then(|about| raw(libc::SYS_shmctl, [a[0], a[1], about, 0, 0, 0])),
         // msync: the pages are the host's, and where they are a file's the host
         // knows which.

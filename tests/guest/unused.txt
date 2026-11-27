@@ -1,0 +1,60 @@
+# What `guest/src/bin/unused.rs`, built for x86-64 Linux, printed on the real machine
+# (hal, run as it is: the program is statically linked; 2026-11-27), and the code it
+# ended with after "? ". Each call twice: the registers it does not use holding zero,
+# then all ones (R059).
+read of nothing: ok ok
+write: ok ok
+open: ok ok
+close of no descriptor: -9 -9
+fstat: ok ok
+lseek: ok ok
+mprotect: ok ok
+brk: ok ok
+rt_sigprocmask: ok ok
+access: ok ok
+sched_yield: ok ok
+madvise: ok ok
+dup: ok ok
+nanosleep: ok ok
+getpid: ok ok
+socket: ok ok
+wait4 with no child: -10 -10
+kill with no signal: ok ok
+uname: ok ok
+fsync: -22 -22
+getcwd: ok ok
+umask: ok ok
+gettimeofday: ok ok
+getrusage: ok ok
+sysinfo: ok ok
+times: ok ok
+getuid: ok ok
+getgid: ok ok
+geteuid: ok ok
+getegid: ok ok
+getppid: ok ok
+getpgid: ok ok
+getsid: ok ok
+sigaltstack: ok ok
+gettid: ok ok
+time: ok ok
+sched_getaffinity: ok ok
+clock_gettime: ok ok
+clock_getres: ok ok
+tgkill with no signal: ok ok
+openat: ok ok
+eventfd2: ok ok
+epoll_create1: ok ok
+pipe2: ok ok
+prlimit64: ok ok
+getrandom: ok ok
+open, no mode: ok ok
+ioctl FIOCLEX: ok ok
+fcntl F_GETFD: ok ok
+fcntl F_GETFL: ok ok
+mremap in place: ok ok
+futex wake: ok ok
+futex wait on another value: -11 -11
+epoll_ctl, taken out: ok ok ok ok
+shmctl, removed: ok ok ok ok
+? 7

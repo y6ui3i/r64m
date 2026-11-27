@@ -789,7 +789,13 @@ impl Mem {
     fn search(&self, addr: u64, len: u64, access: Access) -> Result<(), Fault> {
         let near = &self.near[access as usize];
         // No region reaches past the reservation, so an end that would wrap is cut off
-        // at the top and faults there like any other unmapped byte.
+        // at the top and faults there like any other unmapped byte. (The last address
+        // of all leaves nothing to cut to: it is refused here. R059: taken for an
+        // access of no bytes it was allowed, and r64m read from before the guest's
+        // memory and died of it, where the guest should have been told.)
+        if len != 0 && addr == u64::MAX {
+            return Err(Fault { addr, access });
+        }
         let end = addr.saturating_add(len);
         if let Some(at) = self.walk(addr, end, |prot| allows(prot, access)) {
             return Err(Fault { addr: at, access });
@@ -1027,6 +1033,17 @@ mod tests {
             let mut status = 0;
             assert_eq!(libc::waitpid(pid, &mut status, 0), pid);
             libc::WIFSIGNALED(status)
+        }
+    }
+
+    #[test]
+    fn the_highest_addresses_are_refused_and_not_wrapped() {
+        let mut m = mem();
+        m.map(A, PAGE, RW).unwrap();
+        for addr in [u64::MAX, u64::MAX - 1, u64::MAX - 7, 1 << 63, m.size(), m.size() - 1] {
+            assert_eq!(m.read_u8(addr), Err(fault(addr, Access::Read)));
+            assert_eq!(m.read_u64(addr), Err(fault(addr, Access::Read)));
+            assert_eq!(m.write_u32(addr, 1), Err(fault(addr, Access::Write)));
         }
     }
 

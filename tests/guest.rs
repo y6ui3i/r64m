@@ -21,7 +21,7 @@ use std::process::Command;
 const WAYS: [(&str, &[&str]); 3] = [("interpreter", &[]), ("jit", &["--jit"]), ("jit_check", &["--jit-check"])];
 
 /// The programs, and what the real machine printed for each.
-const PROGRAMS: [(&str, &str); 1] = [("signals", include_str!("guest/signals.txt"))];
+const PROGRAMS: [(&str, &str); 2] = [("signals", include_str!("guest/signals.txt")), ("unused", include_str!("guest/unused.txt"))];
 
 fn programs() -> PathBuf {
     match std::env::var_os("R64M_GUEST") {

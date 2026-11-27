@@ -154,6 +154,9 @@ real CPU does.
    fixed), and its SIGSEGV one run in a hundred a store refused while another
    thread had the page closed (R057: fixed): 96 of 96 runs of eight at once
    end well.
+   Every call is held to the real machine with the registers it does not use
+   filled (R059: two more calls looked at what the kernel ignores, and the last
+   address of all brought r64m itself down).
    The tests are run by a CI on every push
    ([docs/ci.md](docs/ci.md)): `cargo xtask ci` is the same by hand.
 

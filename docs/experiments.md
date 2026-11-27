@@ -4933,3 +4933,34 @@ The card, written before the run.
   - No line differs beyond the two found by reading → those two are put right
     and the program stays as the case for the kind
 - **Cut-off**: one program, one run on hal, one on r64m three ways; no waiting.
+
+**Result (2026-11-27): three faults, one of them not of the kind looked for. All
+put right; r64m prints the real machine's 55 lines by the interpreter, the JIT
+and the JIT checked.**
+
+- The real machine: 55 lines, every call ending the same with zero and with all
+  ones in the registers it does not use; the process ends with its code. So the
+  table of what each call uses is right as far as it goes.
+- r64m, before: the first 53 lines the same, and then r64m itself died of a
+  fault (139), by all three ways, at `epoll_ctl`.
+  1. **The last address of all was allowed** (`Mem::search`): an access at
+     FFFF_FFFF_FFFF_FFFFh had its end cut off at the top, which left a range of
+     no bytes, which nothing refuses; r64m then read at one byte before the
+     guest's memory and on into it, and the host's fault was r64m's own. Any
+     access of the guest's own to that address did the same by the interpreter.
+     Not the kind looked for; found because the pointer that points nowhere was
+     that address. A unit test now holds the highest addresses to a fault.
+  2. **`epoll_ctl`, EPOLL_CTL_DEL**: the event was read through the fourth
+     argument, which the kernel ignores for that command. Now not looked at.
+  3. **`shmctl`, IPC_RMID (and SHM_LOCK, SHM_UNLOCK)**: the third argument was
+     taken for an address. Now not looked at.
+- The two that reading had found were the two the run found; reading had not
+  found the first, and the run had no other.
+- The program stays as a case (`tests/guest/unused.txt`), run three ways with the
+  guest's other program.
+- What it does not cover: the calls it does not make (about 120 of the 173
+  arms, most of which hand all six registers to the host's kernel untouched);
+  `clone`'s arguments under its flags; and the calls that have the kernel write
+  the guest's memory where a page is closed for translated code (R057's note).
+- Tests: 122 unit tests; six container suites by the JIT (PostgreSQL, which
+  removes its segment, among them).
