@@ -5116,3 +5116,16 @@ The card, written before the run.
 - From 4 minutes this morning: 3 minutes 16 by four suites at once (R061), 2
   minutes 17 by two jobs. What is left is the runner's start, `rustup`, and two
   builds of r64m; not looked at further.
+
+### What R058 and R060 left owed: the tests' own limit of time (2026-11-27)
+
+Not an experiment. `cargo xtask test` now gives its tests 420 seconds
+(`R64M_TEST_SECONDS` says another) and, past them, says every process of its user
+with every thread's name, state and call, and ends the lot: R058's two tests would
+have shown their children, and what those waited in, after seven minutes and not
+stood for twenty-four. `cargo xtask waits` says the same list at any time (the
+thing done by a shell script three times today). Tried: on the Mac with a limit of
+2 seconds (ended, nothing left running; there is no `/proc` to read there); on
+arm64 Linux `waits` beside the unit tests as they ran. A thread's name is cut to
+15 letters by the kernel, which is the test's module and not the test; the
+harness's own "has been running for over 60 seconds" names the test.

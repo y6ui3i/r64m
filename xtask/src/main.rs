@@ -10,6 +10,7 @@
 //!   cargo xtask install                r64m made Docker's runner of x86-64 images here
 //!   cargo xtask uninstall              and taken away again
 //!   cargo xtask status                 whether it is, and what else is registered
+//!   cargo xtask waits                  every process and thread here, and the call each is in
 //!
 //! The same commands are what the CI runs (.github/workflows/ci.yml): what passes
 //! here passes there.
@@ -96,7 +97,67 @@ fn for_linux() -> &'static [&'static str] {
 /// and a compiler of its own would take the host's programs for the image's (the
 /// CI's first run did), nor the guest's, which `guest` builds first.
 fn test(more: &[String]) -> bool {
-    ran(cargo().args(["test", "--release", "--bin", "r64m", "--test", "prim", "--test", "trace"]).args(for_linux()).args(more))
+    let limit = std::env::var("R64M_TEST_SECONDS").ok().and_then(|s| s.parse().ok()).unwrap_or(420);
+    ran_within(cargo().args(["test", "--release", "--bin", "r64m", "--test", "prim", "--test", "trace"]).args(for_linux()).args(more), limit)
+}
+
+/// Runs the command, in a group of its own, for `limit` seconds at most. Past them
+/// it has not ended and is taken for one that will not (R058: two unit tests stood
+/// on the CI for 24 minutes and nothing said where): every process of this user's
+/// that the kernel shows is said with its threads, each by its name (the test
+/// harness names a thread by its test), its state and the call it is in; then the
+/// group is ended. `R64M_TEST_SECONDS` says another limit. (The kernel keeps 15
+/// letters of a thread's name: the module of its test, not which test. Which tests
+/// had not ended the harness has said itself by then, each after its first minute.)
+fn ran_within(c: &mut Command, limit: u64) -> bool {
+    use std::os::unix::process::CommandExt;
+    eprintln!("xtask: {c:?} ({limit} seconds at most)");
+    let mut child = c.process_group(0).spawn().unwrap_or_else(|e| fail(format_args!("{c:?}: {e}")));
+    let begun = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if begun.elapsed().as_secs() > limit => break,
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
+            Err(e) => fail(format_args!("{c:?}: {e}")),
+        }
+    }
+    eprintln!("xtask: not ended in {limit} seconds. Every process and thread then, with the call each was in:");
+    eprint!("{}", who_waits());
+    // The group: the leader's id, negated, to `kill`, which is in every system's
+    // own tools (this crate has no dependencies to make the call with).
+    let _ = Command::new("kill").args(["-KILL", "--", &format!("-{}", child.id())]).status();
+    let _ = child.wait();
+    false
+}
+
+/// Every process the kernel lets this one read (`/proc`; nothing where there is
+/// none, as on macOS) and every thread of each: its name, its state, and the call it
+/// is in with the call's arguments.
+fn who_waits() -> String {
+    let numbers = |dir: String| -> Vec<u32> {
+        let mut all: Vec<u32> = std::fs::read_dir(dir).into_iter().flatten().flatten().filter_map(|e| e.file_name().to_str()?.parse().ok()).collect();
+        all.sort();
+        all
+    };
+    let mut said = String::new();
+    for process in numbers("/proc".to_string()) {
+        let read = |file: &str| std::fs::read_to_string(format!("/proc/{process}/{file}")).unwrap_or_default();
+        // Only what can be read to the end: this user's own processes.
+        let call = read(&format!("task/{process}/syscall"));
+        if call.is_empty() {
+            continue;
+        }
+        said += &format!("  process {process}: {}\n", read("cmdline").replace('\0', " ").chars().take(140).collect::<String>());
+        for thread in numbers(format!("/proc/{process}/task")) {
+            let state = read(&format!("task/{thread}/stat")).rsplit(')').next().and_then(|rest| rest.split_whitespace().next().map(str::to_string)).unwrap_or_default();
+            said += &format!("    thread {thread} {:<16} {state} {}\n", read(&format!("task/{thread}/comm")).trim_end(), read(&format!("task/{thread}/syscall")).trim_end());
+        }
+    }
+    if said.is_empty() {
+        said = "  (nothing to read here: no /proc)\n".to_string();
+    }
+    said
 }
 
 /// The guest's programs built for x86-64 Linux, and the tests that run them. Only
@@ -347,7 +408,7 @@ fn in_the_container(command: &str) {
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
-        fail("test | guest | images | container | ci | install | uninstall | status (see xtask/src/main.rs)");
+        fail("test | guest | images | container | ci | install | uninstall | status | waits (see xtask/src/main.rs)");
     }
     let command = args.remove(0);
     let ok = match command.as_str() {
@@ -361,6 +422,10 @@ fn main() {
         "install" => in_the_kernels_world("registers"),
         "uninstall" => in_the_kernels_world("unregisters"),
         "status" => in_the_kernels_world("says"),
+        "waits" => {
+            print!("{}", who_waits());
+            true
+        }
         "registers" | "unregisters" | "says" => {
             in_the_container(&command);
             true
