@@ -5876,3 +5876,37 @@ a few kinds hold more than half. What follows, each its own card:
 
 - The tool stays: `--profile` prints the table (`r64m: cost:` lines).
 - Unit tests 123; the profile is not run by any case (it prints addresses).
+
+## R072: the ways out that are not run, set aside (2026-11-28)
+
+The owner: 「マージして進める」. R071 found every way out of a block written as a
+branch and seven instructions after it that hand the address to r64m; once the
+branch is joined to the next block (as nearly all are) the seven are never run
+again, and they lie between the pieces of code that are. Of a compilation's time
+in generated code 37 in a hundred was at blocks' beginnings, and what it is was
+not known: branches guessed wrongly, or code fetched from far apart.
+
+The card, written before the run.
+
+- **Hypothesis**: it is code fetched from far apart. With the seven set aside
+  (written after the block's last instruction, past its ways to the
+  interpreter, the branch going there until it is joined) the code that runs
+  lies together: about a third of the memory it took. Then a compilation is
+  faster by a tenth or more, and the samples at blocks' beginnings fall by more
+  than that.
+- **What is changed from before**: `leave_counted` writes the branch alone and
+  notes it; the block's end writes, for each, the seven, with `adr` pointing back
+  at the branch, as before. A join is undone by pointing the branch back at its
+  own seven (it pointed at the next word), which r64m learns from the branch
+  before the join. Nothing else of what is generated changes.
+- **Next move for each result**:
+  - The compilation is faster by a tenth or more, and the whole build by a good
+    part of that → kept; the beginnings were fetching
+  - Faster by under a twentieth → it was not fetching: what is left is the
+    branches (the look for a signal, the count, a block's entry by the table),
+    and the next card is those
+  - Slower → the seven far from their branch cost when a block is new (each is
+    run once): taken back, said
+- **Cut-off**: the unit tests, the 62 programs four ways, the container suites
+  three ways; then the compilation of R070 and the build of R069, three each,
+  beside the build before.
