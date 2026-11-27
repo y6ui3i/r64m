@@ -55,10 +55,17 @@ jobs:
       - if: steps.kept.outputs.cache-hit != 'true'
         run: cargo xtask images build target/images
 
-  linux:
-    needs: images
+  # Two jobs side by side (R062): neither needs the other, and a pull request waits
+  # for the longer of them, not for their sum. `main` takes a pull request only
+  # when both have passed.
+  #
+  # The tests that need no image: the unit tests, the primitives and traces
+  # (g64m's, from its public repository), the guest's own programs.
+  tests:
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 120
+    # The tests take a minute and a half; a test that does not end (R058) fails the
+    # job in ten, not in two hours.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
@@ -76,6 +83,16 @@ jobs:
         run: R64M_G64M=$GITHUB_WORKSPACE/g64m cargo xtask test
       - name: The guest's own programs
         run: cargo xtask guest
+
+  # The programs of x86-64 images, held to what the real machine printed.
+  cases:
+    needs: images
+    runs-on: ubuntu-24.04-arm
+    # Each case has its own limit (R060); the weekly three ways take an hour or so.
+    timeout-minutes: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 120 || 20 }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup target add aarch64-unknown-linux-musl
       - uses: actions/cache/restore@v4
         with:
           path: target/images

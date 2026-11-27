@@ -5075,3 +5075,29 @@ job 4 minutes → 3 minutes 16. Kept. Not the 50 to 60 I said.**
   the cases 82, loading images 10. The two long steps do not need each other:
   as two jobs side by side the wait would be about two minutes. That needs
   `main`'s required check to become two, which is the owner's to say.
+
+## R062: the CI as two jobs side by side (2026-11-27)
+
+The owner: 「2ジョブに分ける」. What R061 left: of the job's 3 minutes 16, the
+tests (70 seconds, with 30 of setting up) and the container cases (82, with
+loading images) do not need each other.
+
+The card, written before the run.
+
+- **Hypothesis**: as two jobs a pull request waits for the longer one: about two
+  minutes (the cases: runner start, `rustup`, images, a build of r64m and the
+  test, 82 seconds of cases), where it waits 3 minutes 16 now.
+- **What is changed from before**: the job `linux` becomes `tests` and `cases`;
+  `main`'s required check becomes those two (the owner's word, with the
+  question). The tests' job gets ten minutes at most and the cases' twenty (two
+  hours for the weekly three ways), where there were two hours for all: R058's
+  kind of hang ends the job in ten minutes.
+- **Next move for each result**:
+  - Both pass and the longer is under 2 minutes 30 → kept; the protection is
+    changed to the two before the merge
+  - The cases' job is no shorter than the one job was → its own setting up (it
+    builds r64m again, which the tests' job had built) is the wait: what is
+    built is kept between runs
+  - A job waits for a runner while the other runs → said with the time; that is
+    GitHub's queue and not to be cut here
+- **Cut-off**: the pull request's own run and one re-run.
