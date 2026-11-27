@@ -4964,3 +4964,35 @@ and the JIT checked.**
   the guest's memory where a page is closed for translated code (R057's note).
 - Tests: 122 unit tests; six container suites by the JIT (PostgreSQL, which
   removes its segment, among them).
+
+## R060: the Go case never ends, once, on the CI (2026-11-27)
+
+The pull request that carries R059: its CI run stood for 41 minutes after the JVM's
+suite had passed, in the suite that comes next, Go's (`go version`, then `go run`
+of a program with goroutines), and was cancelled. The same code had passed that
+suite on the Mac. Go's toolchain is many processes with many threads each; it
+makes its own `futex`, `epoll` and `clone` calls, without a C library.
+
+The card, written before the run.
+
+- **Hypothesis**: one of two. (a) R059's change is at fault: Go takes a
+  descriptor out of its `epoll` with a pointer to an event, as it always did, and
+  something in the three changes answers it differently. (b) It was there before:
+  a wake lost or a signal not delivered under load, of R056's kind but by a
+  path the JVM does not take, met now by chance on a runner with four cores.
+- **What is changed from before**: nothing was looked for before. The condition is
+  made on the Mac: the case's `go run` in the same image, four at once in
+  containers held to four cores together, 60 seconds each at most, with R059's
+  build and with the build before it (R057's); a run that passes its time is
+  asked for every process and thread of its container and the call each waits
+  in, and the words those calls wait on (R056's way).
+- **Next move for each result**:
+  - Hangs with R059's build and none in as many runs with R057's → (a): the three
+    changes are taken out one at a time, by the call the hung threads wait in
+  - Hangs with both → (b): the state read says which wake or signal; the fix is
+    made where it is, and R059 is not held back by it longer than that takes
+  - No hang in 48 runs of each → the runner is the condition missing (four
+    cores, its kernel): the suite is run there by hand with a limit of time on
+    each case and the same asking, and until then the CI's cases get a limit so
+    that a hang is a failure in minutes, not a job that stands
+- **Cut-off**: 48 runs of each build, 60 seconds a run.
