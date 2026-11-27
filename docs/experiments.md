@@ -5504,3 +5504,96 @@ Three launches, the two side by side; milliseconds by the client's clock:
 - Owed, as the card says, in a card of its own: where a kept request's 1.9 ms
   goes now (the profile, R054's way), and R054's build beside today's for that
   one measure, to say whether anything was lost.
+
+## R068: r64m beside the host's own code (2026-11-27)
+
+The owner, of what r64m is for (「Armだから重いエミュレータ入れないとダメだ、諦めよう、
+作り直そう、サーバ借りようってパターンを弾きたい」), and of how far it is from the
+machine it runs on: 「それは測ったほうがいいかもな 最適化の指標になるし」. Every
+measure so far is against QEMU, which says who is ahead; none says how much is
+left to gain.
+
+The card, written before the run.
+
+- **Hypothesis**: on the primitives r64m takes between two and five times as
+  long as the same C compiled for arm64 and run as it is, on the same core; the
+  ones that are memory and branches nearer two, the ones that are arithmetic of
+  floats and calls through tables further off. (A guess with nothing under it:
+  that is why it is measured.)
+- **What is changed from before**: a second column. The 23 primitives' sources
+  (g64m's `tests/prim64`), with their one header given the arm64 calls for
+  writing and ending, compiled for arm64 by the same compiler version that made
+  the x86-64 ones (GCC 15.2 both) with the same flags, each with its work done
+  many times over; timed in the VM beside r64m running the x86-64 ones, each less
+  a program that does nothing. Two are left out: the one made of x86's string
+  instructions written by hand, and long double's (80 bits on x86, 128 in
+  software on arm64: not the same work).
+- **Next move for each result**:
+  - The ratios are had → written as a table, per primitive and for the sum: the
+    measure to optimise by from now on, beside QEMU's
+  - A primitive at ten times or more → named as the first place to look
+  - r64m at 1.5 times or under on the sum → the primitives say little more; a
+    whole build (NetHack natively, which needs packages fetched for arm64: the
+    owner's word) is the measure that would
+- **Cut-off**: one round of timing, three runs of each, the least taken; nothing
+  else running.
+
+**Result (2026-11-27): on the primitives r64m takes 1.52 times as long as the same
+C compiled for arm64 and run as it is. My two to five was wrong, and by a lot.
+Two primitives stand out: the conversions of doubles (4.8) and the packed
+arithmetic (3.2).**
+
+Both sides: the same sources, GCC 15.2 (Ubuntu's on hal for x86-64, Alpine's for
+arm64), the same flags, each program's work done 300 times; in the Mac's Linux VM,
+one run timed three times and the least taken, to a hundredth of a second; a
+program that does nothing takes under a hundredth by either.
+
+| primitive | native arm64 | r64m | r64m / native |
+|---|---|---|---|
+| p_dbl_conv | 810 ms | 3900 ms | 4.81 |
+| p_simd | 210 ms | 670 ms | 3.19 |
+| p_dbl_cmp | 930 ms | 2190 ms | 2.35 |
+| p_bytes | 600 ms | 1200 ms | 2.00 |
+| p_bitfield | 810 ms | 1550 ms | 1.91 |
+| p_index | 560 ms | 980 ms | 1.75 |
+| p_funcptr | 2790 ms | 4490 ms | 1.61 |
+| p_loop | 330 ms | 510 ms | 1.55 |
+| p_recursion | 1080 ms | 1650 ms | 1.53 |
+| p_switch | 2920 ms | 4420 ms | 1.51 |
+| p_ternary | 740 ms | 1110 ms | 1.50 |
+| p_pixel | 480 ms | 690 ms | 1.44 |
+| p_float | 2650 ms | 3760 ms | 1.42 |
+| p_bignum | 1250 ms | 1690 ms | 1.35 |
+| p_dbl_arith | 3040 ms | 4050 ms | 1.33 |
+| p_pointer | 1260 ms | 1640 ms | 1.30 |
+| p_muldiv | 1030 ms | 1310 ms | 1.27 |
+| p_if | 1520 ms | 1840 ms | 1.21 |
+| p_sha | 360 ms | 390 ms | 1.08 |
+| p_rotate | 4240 ms | 4570 ms | 1.08 |
+| p_shift | 1090 ms | 1070 ms | 0.98 |
+| **the sum of 21** | 28700 ms | 43680 ms | **1.52** |
+
+- What the number is and is not: the x86-64 program is what GCC makes for
+  x86-64 and the arm64 one what it makes for arm64, which are not the same
+  quality of code everywhere (one primitive, the shifts, is faster under r64m
+  than native: 0.98). It is the ratio a user meets, not r64m's cost alone.
+- 19 of the 21 native programs print in their first round what the x86-64 ones
+  print; the two of floats do not (the processors differ in what a conversion
+  out of range gives, and arm64's compiler may join a multiplication to an
+  addition), and do the same amount of work.
+- Left out as the card said: the x86 string instructions written by hand, and
+  long double.
+- Where to look first, by this measure: `p_dbl_conv` (4.81), `p_simd` (3.19),
+  `p_dbl_cmp` (2.35), `p_bytes` (2.00), `p_bitfield` (1.91).
+- By the card: at 1.5 on the sum the primitives have little more to say. They
+  are tight loops in which nearly every instruction is in a block. What a user
+  waits for is a build or a server, where the calls, the making of blocks and
+  the starting of many processes count: NetHack built natively beside its
+  x86-64 build under r64m is that measure, and needs `make` and `ncurses-dev`
+  fetched for the arm64 image: the owner's word.
+- What I did badly: a first round sized at sixty runs of each program would
+  have taken three quarters of an hour (the owner: 「チョロで終わると思ったら時間
+  掛かってんな」), and it used x86-64 programs already at hand whose count of
+  rounds I had not checked (it was not the 30 I took it for): its numbers were
+  thrown away. One run of each, both built anew with the same count, took four
+  minutes.
