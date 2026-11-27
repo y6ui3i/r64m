@@ -4894,3 +4894,42 @@ known.**
   footing.
 - If it happens again with this in: the card's last move (the tests run on the
   runner by hand, with a limit and the processes listed).
+
+### R058, what the runner said (2026-11-27)
+
+The step added to the CI printed, on the pull request that carried it:
+`|/usr/lib/systemd/systemd-coredump %P %u %g %s %t 9223372036854775808 %h %d`, and a
+limit of 0. So on the runner a process that dies of a fault is piped to a program,
+whatever the limit (my understanding of the kernel: a limit of 0 does not stop a
+pipe; not tried). The guess has a footing; that this is what stood for 24 minutes
+is still not shown. With R058's change the children are not dumped at all.
+
+## R059: arguments a call does not use, every call (2026-11-27)
+
+The owner: 「総点検を始める」; the second of the three things R056 names. For ADR
+0020's point 3. R056's fault was one of a kind: r64m looked at a register the
+kernel does not look at for that call, and refused the call by it.
+
+The card, written before the run.
+
+- **Hypothesis**: there are more of the kind. Read through, the calls' table
+  (`src/sys.rs`, `src/sys/linux.rs`, 173 arms) shows two: `epoll_ctl` reads the
+  event its fourth argument points at for EPOLL_CTL_DEL too, where the kernel
+  ignores the pointer, and `shmctl` takes its third for an address for IPC_RMID,
+  which has none. Everything else either hands all six registers to the host's
+  kernel as they are (which ignores what it ignores) or reads an argument only
+  under the flag or command that gives it meaning. Reading can miss one.
+- **What is changed from before** (R056): not one call found by a hang, but all
+  of them asked at once: a program of the guest's (`guest/src/bin/unused.rs`)
+  makes each call twice, the registers the call does not use holding zero and
+  then all ones, and says whether the two answers are the same; the calls whose
+  arguments depend on a command are made with that command and a pointer that
+  points nowhere. What the real machine prints (hal) is what is right.
+- **Next move for each result**:
+  - r64m differs from hal on a line → that call is put right (the argument is
+    looked at only where the kernel looks at it), and the line stays as a case
+  - hal itself says "differs" for a call → my table of what the call uses is
+    wrong there: put right, not r64m
+  - No line differs beyond the two found by reading → those two are put right
+    and the program stays as the case for the kind
+- **Cut-off**: one program, one run on hal, one on r64m three ways; no waiting.
