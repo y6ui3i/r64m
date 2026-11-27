@@ -18,7 +18,7 @@ use libtest_mimic::{Arguments, Failed, Trial};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const WAYS: [(&str, &[&str]); 3] = [("interpreter", &[]), ("jit", &["--jit"]), ("jit_check", &["--jit-check"])];
+const WAYS: [(&str, &[&str]); 3] = [("interpreter", &["--interpret"]), ("jit", &[]), ("jit_check", &["--jit-check"])];
 
 /// The programs, and what the real machine printed for each.
 const PROGRAMS: [(&str, &str); 2] = [("signals", include_str!("guest/signals.txt")), ("unused", include_str!("guest/unused.txt"))];

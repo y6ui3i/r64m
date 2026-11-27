@@ -34,7 +34,8 @@ and the x87 (`src/cpu.rs`, `src/cpu/sse.rs`, `src/cpu/x87.rs`), and a JIT
 ([0014](docs/adr/0014-the-jit.md), `src/jit/`) that translates blocks of the integer
 instructions, the scalar SSE instructions and the packed instructions of whole numbers
 ([0015](docs/adr/0015-sse-in-blocks.md)), joins blocks to one another, and can check
-each against the interpreter (`--jit-check`). The x87 is interpreted, by soft
+each against the interpreter (`--jit-check`). The JIT is what runs a program unless
+the interpreter alone is asked for (`--interpret`). The x87 is interpreted, by soft
 arithmetic of 80 bits: the one place r64m is behind QEMU. A program's memory is the
 host's, at an offset ([0008](docs/adr/0008-a-programs-memory-is-the-hosts.md)); its
 system calls are the host kernel's, translated
@@ -194,9 +195,16 @@ commit messages, branch names, pull requests. An experiment gets a card in
 ```sh
 cargo build --release
 cargo test
-target/release/r64m program            # run a static x86-64 program
-target/release/r64m --trace program    # print the registers after every instruction
+target/release/r64m program               # run an x86-64 program, by the JIT
+target/release/r64m --interpret program   # by the interpreter alone
+target/release/r64m --jit-check program   # by the JIT, every block checked against the interpreter
+target/release/r64m --trace program       # the registers after every instruction (the interpreter)
 ```
+
+With nothing said r64m runs a program by its JIT (since 2026-11-27; `--jit`, which
+asked for it until then, is still taken). Programs that need files of their own, a
+dynamic linker among them, are run where those files are: in the image's container,
+as the next section has it.
 
 Everything here is Rust; nothing is added in another language (0012). The toolchain's
 version is fixed in `rust-toolchain.toml`, and the versions of the two crates from
