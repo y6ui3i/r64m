@@ -29,6 +29,11 @@ The aim is twice QEMU; the kept connection is under it (raced again on 2026-11-2
 R067: 1.92, in a measure that moves by a quarter from one launch to the next). Rosetta, where there is one, is faster
 than both: it builds NetHack in 168 s. r64m is for where there is none.
 
+Beside the host's own code (R068): the same C compiled for arm64 runs the primitives
+(tight loops of one kind of instruction each) in two thirds of r64m's time: r64m takes
+1.52 times as long on their sum, from 0.98 to 4.8 by primitive. A whole build has not
+been measured that way yet.
+
 **How it is made, in short.** An interpreter for the integer instructions, SSE and SSE2
 and the x87 (`src/cpu.rs`, `src/cpu/sse.rs`, `src/cpu/x87.rs`), and a JIT
 ([0014](docs/adr/0014-the-jit.md), `src/jit/`) that translates blocks of the integer
