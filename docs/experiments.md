@@ -5439,3 +5439,32 @@ by the kernel (under Docker) it was the JIT already. The tests name the
 interpreter where they mean it. A program that starts another hands its options
 on, so `--interpret` holds for a whole tree of processes, and without it they are
 all by the JIT.
+
+## R067: the goal beside QEMU again (2026-11-27)
+
+The owner: 「あとは上から順にやるか」; the last of that list. For ADR 0020's point
+2, whose fourth measure was under its aim when last raced (R046: a kept
+connection 1.84 times QEMU) and has not been raced since R054 made r64m's side of
+it 13.5% shorter. Since then also: R055 to R066, none of them for speed, some of
+them in every call that waits (R066) and every `fork` (R064).
+
+The card, written before the run.
+
+- **Hypothesis**: a kept connection is now at twice QEMU or past it (1.84 by
+  1/0.865 is 2.13, if nothing since has cost it), and the other three measures
+  are where they were (the start 2.98, a new connection 2.34), R066's routine
+  for the calls that wait costing nothing that shows.
+- **What is changed from before** (R046): r64m as it is on `main` today (the JIT
+  with nothing said); the same script, images, client and counts (three launches
+  of the two side by side; the start timed; 300 requests to warm; then 300 on
+  new connections and 1,000 on one kept open; the least of the three for each).
+  r64m is now the kernel's runner of x86-64, so its entry is taken out for the
+  minutes of the race (QEMU's side is started by the kernel) and put back.
+- **Next move for each result**:
+  - A kept connection at 2 or past, the others where they were → ADR 0020's
+    point 2 holds in all four; said in the ADR and the README
+  - Under 2 → said as it is; where a kept request's time goes now is looked at
+    by the profile (R054's way) in a card of its own, not here
+  - A measure that was past 2 is under it → something since R046 cost it: the
+    builds between are raced for that measure alone (R054's, R064's, R066's)
+- **Cut-off**: three launches; nothing else running on the Mac meanwhile.
