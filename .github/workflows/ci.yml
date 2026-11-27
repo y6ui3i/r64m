@@ -83,7 +83,9 @@ jobs:
           fail-on-cache-miss: true
       - run: cargo xtask images load target/images
       - name: Programs of x86-64 images
-        run: cargo xtask container --ways ${{ env.FULL == 'true' && 'all' || 'jit' }}
+        # Four suites at once by the JIT (R061); the weekly three ways one at a
+        # time, where a case that times itself has failed in company.
+        run: cargo xtask container --ways ${{ env.FULL == 'true' && 'all' || 'jit' }} --jobs ${{ env.FULL == 'true' && '1' || '4' }}
 
   macos:
     if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.full)

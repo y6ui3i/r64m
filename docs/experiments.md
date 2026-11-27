@@ -5023,3 +5023,38 @@ passes it fails with every thread's call.**
   `futex` and `epoll_pwait` as they stood.
 - Owed: the same limit for the unit tests' step (R058's kind), which has only
   the job's 120 minutes.
+
+## R061: the CI's four minutes (2026-11-27)
+
+The owner: 「CI時間かかりすぎだな 時間削れる？」, and to the plan: 「そうしよう」. Not
+for a point of ADR 0020: for the work itself, now that every change waits for
+the job `linux` before it can be merged.
+
+Where the four minutes go (the last run that passed on `main`): setting up 30
+seconds (checkouts, `nasm`, `rustup`); unit tests, primitives and traces 69
+(building, mostly); the guest's programs 2; loading the two built images 9; the
+container cases 135, ten suites one after another, eight of them pulling their
+image first.
+
+The card, written before the run.
+
+- **Hypothesis**: the container cases take 135 seconds because they wait for
+  one another; the runner has four cores and the suites share nothing but the
+  two built images. Four at once (`--jobs 4`, which `cargo xtask container` has
+  had since it was made) brings the step to 50 or 60 seconds and the job to
+  under three minutes.
+- **What is changed from before**: one word in the workflow's step, for a push
+  and a pull request (the JIT alone). The weekly run of three ways stays one at
+  a time: a case of Python's that times 50 milliseconds failed once under the
+  checker when many suites ran together (R054), and the weekly run is not waited
+  for.
+- **Next move for each result**:
+  - The step is under 70 seconds and passes on the pull request's own run → kept;
+    the next cut (the tests and the cases as two jobs side by side, which needs
+    `main`'s required check changed to two) is put to the owner with this number
+  - It is not faster by a third or more → pulls or the runner's disk are the
+    wait, not the cores: the step's log says which, and the images are kept
+    between runs instead
+  - A case fails that passes alone → fewer at once (2), and the case named
+- **Cut-off**: the pull request's own run and one re-run; R060's limit of time
+  holds each case.
