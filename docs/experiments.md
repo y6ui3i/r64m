@@ -5275,3 +5275,43 @@ How it went, with what I got wrong:
   without LOCK is two acts on x86 as well.
 - Tests with both fixes: 123 unit tests; every suite by the JIT; the three
   suites with new cases (GCC's, Python's, Go's) by all three ways.
+
+## R065: threads and fork by the book, with musl and with glibc (2026-11-27)
+
+The owner: 「forkパターンもそうだけどpthread周りもちゃんとテストするか」, and to
+whether glibc too, which needs an image fetched: 「glibcももちろんやろう」. For ADR
+0020's point 3. R064's hang was met by a case that forked from a second thread,
+which no case had done; what else no case does is not known until it is done.
+
+The card, written before the run.
+
+- **Hypothesis**: r64m does what Linux does for the whole of what a C program
+  can ask of threads and of `fork`, by either C library. Where it does not, a
+  program built for the purpose says so in a line that differs from the real
+  machine's. The parts: how a thread ends (its value, detached, cancelled at a
+  point and at any moment, cleanup handlers, the first thread ending before the
+  others); what is a thread's own (`__thread`, keys and their destructors,
+  `pthread_once`, a stack of a size asked for); waiting with a limit of time
+  (a condition, a mutex, a semaphore) and the kinds of mutex (recursive,
+  checked, tried); signals and threads (one sent to a thread, masks, `sigwait`,
+  a stack overrun caught on another stack); `fork` (from a second thread, a
+  child that makes threads, `pthread_atfork`, a lock held across it,
+  `posix_spawn` and `vfork` beside threads, a grandchild, SIGCHLD, a child
+  stopped and continued, a child ended by a signal).
+- **What is changed from before**: five programs in one new file of cases
+  (`tests/container/threads.txt`), run in two images: Alpine's with musl (the one
+  there is) and a new one, Debian 12 with GCC and glibc
+  (`tools/images/glibc`; Debian's packages fetched, by the owner's word). The
+  lines are the real machine's (hal), which must be the same for both libraries
+  or the program is at fault and is changed.
+- **Next move for each result**:
+  - A line differs under r64m → a fault found: put right here if it is small (a
+    call's answer), its own card if it is not (a mechanism missing); the case
+    goes in when it passes, and what does not pass is listed as not done
+  - hal's two libraries print different lines for a program → the program
+    depends on the library and is changed until they agree
+  - All the same → the cases go in, by three ways, in both images
+- **Cut-off**: the five programs; each fault put right or listed. Robust mutexes
+  (the kernel walks a list the library registers, `set_robust_list`, which r64m
+  does not have) are tried apart and expected not to work: listed, not fixed
+  here.

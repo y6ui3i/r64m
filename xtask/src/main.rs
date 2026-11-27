@@ -38,8 +38,10 @@ enum Image {
 
 /// The files of cases (`tests/container/*.txt`) and the image each was taken in.
 /// A file is chosen by its name as a filter of the tests' names.
-const SUITES: [(&str, Image, &[&str]); 10] = [
-    ("gcc", Image::Built("gcc"), &["busybox::", "shell::", "gcc::"]),
+const SUITES: [(&str, Image, &[&str]); 11] = [
+    ("gcc", Image::Built("gcc"), &["busybox::", "shell::", "gcc::", "threads::"]),
+    // The same programs of threads and fork with the GNU C library (R065).
+    ("glibc", Image::Built("glibc"), &["threads::"]),
     ("python", Image::Hub("python@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90"), &["python::"]),
     ("redis", Image::Hub("redis@sha256:7958cfbb9d152f87dadfbc89f1b0b15938f0b81ff8982feb327476f4911935c3"), &["redis::"]),
     ("goal", Image::Built("goal"), &["goal::"]),
