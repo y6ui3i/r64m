@@ -5159,3 +5159,61 @@ The card, written before the run.
   - A case takes more than ten seconds by the JIT → made smaller: the CI is not
     to be slowed by it
 - **Cut-off**: forty runs of each by the JIT, 60 seconds a run; no more.
+
+**Result (2026-11-27): the three programs print the real machine's lines by all
+three ways; the C and the Python ones forty times of forty under load. Go's forty
+say nothing about waiting (my limit again), and one of them found another fault.**
+
+- The real machine (hal), each program twice: the same lines both times.
+- r64m, each by the interpreter, the JIT and the JIT checked: the same lines.
+  By the JIT: the C program 1 second, Python's under 1, Go's 21 (nearly all of it
+  `go run` compiling). So Go's is not a case of its own: it is put into the
+  program the Go suite compiled already, which now prints two lines.
+- Forty runs by the JIT, four at once, 60 seconds each: C 40 of 40 as the real
+  machine, Python 40 of 40.
+- Go: 39 of 40 had not ended at 60 seconds and were not hung: four `go run` at
+  once, each compiling Go's library on all the cores, do not finish in a minute
+  (the processes listed were compilers at work). The same wrong condition as
+  R060's first round, by me again; the count says nothing of Go's waiting. Two
+  at once with 150 seconds (R060) is the condition that works.
+- The fortieth ended at once and wrong: Go's compiler, started for
+  `internal/runtime/atomic`, was stopped 991,106 instructions into its life by
+  `Write of 0x7e000000b9 that is not allowed`: a fault r64m handed a process that
+  had no handler for it yet. One in the several thousand processes those forty
+  runs started. Not of this card's making (the existing case runs the same
+  compiler). Its own card: R064.
+- The three cases are in the suites (`gcc.txt`, `python.txt`, and Go's program in
+  `go.txt`).
+
+## R064: Go's compiler stopped by a write that is not allowed, once (2026-11-27)
+
+Found by R063. For ADR 0020's point 3. One process of several thousand: Go's
+`compile`, early in its start, a write to 0x7e000000b9, no handler in place yet,
+so r64m ended it and said so. `go run` then says the package's name and fails. On
+the CI this would be a case with another output, not a hang; whether it has to do
+with R060's hang is not known.
+
+The card, written before the run.
+
+- **Hypothesis**: the write is one the guest may make, and r64m refused it: of
+  R055's and R057's kind (a page closed for translated code, or a list that is
+  behind), by a way those two fixes do not cover. The address is odd for Go
+  (its heap is at 0xc000000000; this is in the range r64m gives to `mmap`), which
+  fits a page r64m itself is handling. The other possibility: the address is
+  wrong because a register or a value was, which is a fault of translation.
+- **What is changed from before**: nothing was known but the line. The condition
+  is R063's (the Go case, by the JIT), two at once with 150 seconds, and r64m
+  says each fault it hands the guest with what both lists say of the address
+  (`--faults`, which the processes it starts inherit), until one is caught or
+  60 runs have passed.
+- **Next move for each result**:
+  - The lists allow the write (mapped, writable) → r64m's refusal: the path by
+    which a fault reaches `Event::Stop` without R057's question is found and
+    closed, and a test made for it
+  - The lists say nothing is there, or read only → the address or the mapping is
+    wrong: the calls of that process (`--calls`) for where 0x7e00000000 came
+    from, and the block that made the write checked against the interpreter
+  - Not caught in 60 runs → 1 in several thousand processes is not to be waited
+    for: Go's compiler started alone in a loop (thousands of starts in the time
+    of sixty builds) is the condition instead
+- **Cut-off**: 60 runs, 150 seconds each; then the last move, once.
