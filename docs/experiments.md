@@ -5775,3 +5775,32 @@ What follows, each a card of its own, in the order I would take them:
    returns, operands in memory with an index).
 3. Blocks kept between processes (a build starts the same compiler 143 times
    and translates it anew each time: 8% here, more for small files).
+
+## R071: what each kind of instruction costs (2026-11-28)
+
+The owner: 「マージして進める」. R070 left an average: 5.5 of the host's
+instructions for each of the guest's, and 70% of a compilation's time in
+generated code with no hot place. An average cannot be optimised.
+
+The card, written before the run.
+
+- **Hypothesis**: a few kinds of instruction are most of the cost: by time, the
+  conditional jumps and what sets the flags before them, calls and returns, and
+  loads and stores with an index; and what stands at a block's beginning and end
+  for every block (the look for a signal, the count, the way out) is a tenth or
+  more by itself. A guess: the table is to say.
+- **What is changed from before**: a tool, no change to what is generated. With
+  `--profile` r64m now also says, for the time in generated code, which of the
+  guest's instructions each sample was in, by kind (prefixes and opcode, as
+  `--jit-why` names them; a block's own beginning apart), and for each kind how
+  often it was translated and into how many of the host's instructions on
+  average.
+- **Next move for each result**:
+  - A few kinds hold half the samples or more → those, by what they are made
+    into (their code read), in the order of samples times what could be saved
+  - The samples are as flat by kind as they are by block → the saving is in what
+    every instruction pays (how registers and flags are kept), not in kinds: the
+    conventions are looked at
+  - A block's beginning is a tenth or more → that first: it is paid 4.9 million
+    times in this compilation whatever the block holds
+- **Cut-off**: the tool, one run on the compilation of R070, the table.
