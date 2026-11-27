@@ -5129,3 +5129,149 @@ thing done by a shell script three times today). Tried: on the Mac with a limit 
 arm64 Linux `waits` beside the unit tests as they ran. A thread's name is cut to
 15 letters by the kernel, which is the test's module and not the test; the
 harness's own "has been running for over 60 seconds" names the test.
+
+## R063: contention, held to the real machine (2026-11-27)
+
+The owner: 「あとは上から順にやるか」; the third of the three things R056 names.
+For ADR 0020's point 3. R052, R056 and R057 were each found by a server under load
+and not by a case: the cases have threads, but hardly any that wait for one
+another.
+
+The card, written before the run.
+
+- **Hypothesis**: r64m is right where threads wait for one another by every way
+  the three worlds have: musl's (a C program: a mutex, a condition variable
+  taken in turns, a semaphore, a read-write lock, a barrier, 2,000 threads made
+  and ended), glibc's (Python: a queue between producers and consumers, a
+  condition in turns, a barrier), and Go's own (a mutex, a ring of channels,
+  sleeping goroutines; no C library). Each prints counts that are the same
+  wherever it is done rightly. If one is wrong it shows as another count, or as
+  a case that does not end, which R060's limit turns into a failure that says
+  where.
+- **What is changed from before**: three cases added, their lines the real
+  machine's (hal). Before they are added each is run under r64m by the three
+  ways, and then by the JIT forty times, four at once.
+- **Next move for each result**:
+  - All the same, none hangs → the cases go into the suites, and that is what is
+    known: these ways of waiting hold under this load
+  - A count differs or a run does not end → that is a fault found: its own card,
+    by the call the threads wait in; the case goes in when it passes
+  - A case takes more than ten seconds by the JIT → made smaller: the CI is not
+    to be slowed by it
+- **Cut-off**: forty runs of each by the JIT, 60 seconds a run; no more.
+
+**Result (2026-11-27): the three programs print the real machine's lines by all
+three ways; the C and the Python ones forty times of forty under load. Go's forty
+say nothing about waiting (my limit again), and one of them found another fault.**
+
+- The real machine (hal), each program twice: the same lines both times.
+- r64m, each by the interpreter, the JIT and the JIT checked: the same lines.
+  By the JIT: the C program 1 second, Python's under 1, Go's 21 (nearly all of it
+  `go run` compiling). So Go's is not a case of its own: it is put into the
+  program the Go suite compiled already, which now prints two lines.
+- Forty runs by the JIT, four at once, 60 seconds each: C 40 of 40 as the real
+  machine, Python 40 of 40.
+- Go: 39 of 40 had not ended at 60 seconds and were not hung: four `go run` at
+  once, each compiling Go's library on all the cores, do not finish in a minute
+  (the processes listed were compilers at work). The same wrong condition as
+  R060's first round, by me again; the count says nothing of Go's waiting. Two
+  at once with 150 seconds (R060) is the condition that works.
+- The fortieth ended at once and wrong: Go's compiler, started for
+  `internal/runtime/atomic`, was stopped 991,106 instructions into its life by
+  `Write of 0x7e000000b9 that is not allowed`: a fault r64m handed a process that
+  had no handler for it yet. One in the several thousand processes those forty
+  runs started. Not of this card's making (the existing case runs the same
+  compiler). Its own card: R064.
+- The three cases are in the suites (`gcc.txt`, `python.txt`, and Go's program in
+  `go.txt`).
+
+## R064: Go's compiler stopped by a write that is not allowed, once (2026-11-27)
+
+Found by R063. For ADR 0020's point 3. One process of several thousand: Go's
+`compile`, early in its start, a write to 0x7e000000b9, no handler in place yet,
+so r64m ended it and said so. `go run` then says the package's name and fails. On
+the CI this would be a case with another output, not a hang; whether it has to do
+with R060's hang is not known.
+
+The card, written before the run.
+
+- **Hypothesis**: the write is one the guest may make, and r64m refused it: of
+  R055's and R057's kind (a page closed for translated code, or a list that is
+  behind), by a way those two fixes do not cover. The address is odd for Go
+  (its heap is at 0xc000000000; this is in the range r64m gives to `mmap`), which
+  fits a page r64m itself is handling. The other possibility: the address is
+  wrong because a register or a value was, which is a fault of translation.
+- **What is changed from before**: nothing was known but the line. The condition
+  is R063's (the Go case, by the JIT), two at once with 150 seconds, and r64m
+  says each fault it hands the guest with what both lists say of the address
+  (`--faults`, which the processes it starts inherit), until one is caught or
+  60 runs have passed.
+- **Next move for each result**:
+  - The lists allow the write (mapped, writable) → r64m's refusal: the path by
+    which a fault reaches `Event::Stop` without R057's question is found and
+    closed, and a test made for it
+  - The lists say nothing is there, or read only → the address or the mapping is
+    wrong: the calls of that process (`--calls`) for where 0x7e00000000 came
+    from, and the block that made the write checked against the interpreter
+  - Not caught in 60 runs → 1 in several thousand processes is not to be waited
+    for: Go's compiler started alone in a loop (thousands of starts in the time
+    of sixty builds) is the condition instead
+- **Cut-off**: 60 runs, 150 seconds each; then the last move, once.
+
+**Result (2026-11-27): two faults, both r64m's, both fixed. The write was Go's own
+through a pointer half written: r64m stored a byte at a time. On the way a hang
+was met and explained: a child of `fork` waited for a lock nobody in it held.
+With both fixed, 960 builds of the package, eight at once: none stands, none
+fails, no fault is said. (Before: 2 of 320 stood, and 1 start in several
+thousand was stopped.)**
+
+How it went, with what I got wrong:
+
+- The card's order was changed before the first run: sixty whole runs of the
+  case would have met one or two of several thousand processes in 17 minutes;
+  the compiler started alone, or the one package built again and again, makes
+  thousands in a minute. `compile -V=full` 2,000 times: nothing. `go build -a
+  internal/runtime/atomic` 320 times, eight at once: it did not end.
+- **The hang.** Two of the 320 stood for good: `go`'s child, made to start a
+  tool, had not started it; its one thread waited in `futex` on an address of
+  r64m's own, and its parent waited for it (the pipe by which r64m knows that a
+  `vfork`'s child has started its program). The child is a copy of a process
+  with several threads, and has one: a lock of r64m's that another thread held
+  as the copy was made (the list of regions, held for every `mmap`, `munmap` and
+  mark of code) is held in the child for ever. **Very likely R060's hang**: the
+  CI's Go suite stood the same way; it was not seen there, so it is not shown.
+- The fix: the thread that forks holds r64m's own locks while the copy is made
+  (the process's, the list of regions, standard error) and lets go in parent and
+  child, as the C library does for its own.
+- **My first form of the fix hung every time**, at Go's first child: it took
+  standard output's lock too, which r64m's first thread holds for as long as it
+  runs, so any other thread that forked waited for ever. An hour went by before
+  the owner asked why Go took so long; the run had no limit that could end it
+  (`timeout` before `docker run` ends the client and not the container: the
+  detached container with `docker wait` is the form that works, as R054 had
+  already taught). The case I had written forked from the first thread only and
+  passed. It now forks from two threads, 1,000 children each, beside three
+  threads that map and unmap; the first form does not end it, the second does in
+  a second, and the real machine prints the same line.
+- **The write.** With the hang gone and `--faults` on, the 320 builds ended in 65
+  seconds and one said it: `Write of 0x7e000000b9`, nothing mapped there, and
+  Go's own report: `runtime.preemptone`, from `sysmon`, its register holding
+  0x7e00000000 where a pointer to a goroutine should be: the high half of a
+  pointer and a low half of zeros. Another thread was setting that pointer to
+  nothing at that moment.
+- r64m's interpreter, in a memory more than one thread has, made every store by
+  a routine that copies **a byte at a time** (so that a store the host refuses
+  can be stepped out of). A store of eight bytes was eight stores, and a reader
+  between them saw half a pointer. On x86 it is one store. The JIT's stores were
+  always one; this is the interpreter's, which every block falls back to.
+- The fix: the routine stores eight bytes at a time, then four, two, one. A
+  test of two threads (`a_store_seen_by_another_thread_is_whole`) fails with the
+  old routine at once ("eight bytes read as 0x33") and passes with the new.
+- After both: three rounds of 320 builds, eight at once, each ended in under 170
+  seconds with no build failed and no fault said.
+- Not looked at: what else reads memory in pieces. The interpreter's loads go by
+  the compiler's copy, which for two, four and eight bytes is one load (not
+  checked in the built code). An instruction that reads, changes and writes
+  without LOCK is two acts on x86 as well.
+- Tests with both fixes: 123 unit tests; every suite by the JIT; the three
+  suites with new cases (GCC's, Python's, Go's) by all three ways.

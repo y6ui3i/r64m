@@ -53,24 +53,44 @@ pub struct Region {
     pub prot: u8,
 }
 
-/// Copies `len` bytes to `to`, a byte at a time, and answers 1; or, if the host
-/// refuses a store, answers 0: the handler of faults sends the thread on at the
-/// routine's second ending (`refused_store`). Some of the bytes may have been
-/// written by then.
+/// Copies `len` bytes to `to` and answers 1; or, if the host refuses a store,
+/// answers 0: the handler of faults sends the thread on at the routine's second
+/// ending (`refused_store`). Some of the bytes may have been written by then.
+///
+/// By the widest stores that fit: eight bytes at a time, then four, two, one. A
+/// store of two, four or eight bytes is one store, as it is on x86, where another
+/// thread reads the old value or the new and never some bytes of each. (R064: it
+/// was a byte at a time. Go's runtime read a pointer that another thread was
+/// setting to nothing, half of it gone, and wrote through it: its compiler was
+/// stopped by that one start in several thousand.) Sixteen bytes are two stores of
+/// eight: each half whole, which is what a pair of pointers moved at once needs.
 #[unsafe(naked)]
 unsafe extern "C" fn store_or_not(to: *mut u8, from: *const u8, len: usize) -> u64 {
     core::arch::naked_asm!(
-        "cbz x2, 3f",
-        "2: ldrb w3, [x1], #1",
-        "strb w3, [x0], #1",
-        "subs x2, x2, #1",
-        "b.ne 2b",
-        "3: mov x0, #1",
+        "2: cmp x2, #8",
+        "b.lo 4f",
+        "ldr x3, [x1], #8",
+        "str x3, [x0], #8",
+        "sub x2, x2, #8",
+        "b 2b",
+        "4: tbz x2, #2, 5f",
+        "ldr w3, [x1], #4",
+        "str w3, [x0], #4",
+        "5: tbz x2, #1, 6f",
+        "ldrh w3, [x1], #2",
+        "strh w3, [x0], #2",
+        "6: tbz x2, #0, 7f",
+        "ldrb w3, [x1]",
+        "strb w3, [x0]",
+        "7: mov x0, #1",
         "ret",
         "mov x0, #0",
         "ret",
     )
 }
+
+/// How long `store_or_not` is up to its second ending: seventeen instructions.
+const STORE_OR_NOT: usize = 17 * 4;
 
 /// Adds nothing to the byte at `at`, as one act (`ldaddb wzr, w3, [x0]`), and
 /// answers 1; or 0 if the host refuses the store, as `store_or_not` does.
@@ -83,8 +103,8 @@ unsafe extern "C" fn may_store(at: *mut u8) -> u64 {
 /// routines above, where the thread is to go on (the ending that answers 0).
 pub fn refused_store(pc: usize) -> Option<usize> {
     let (copy, ask) = (store_or_not as *const () as usize, may_store as *const () as usize);
-    if (copy..copy + 28).contains(&pc) {
-        Some(copy + 28)
+    if (copy..copy + STORE_OR_NOT).contains(&pc) {
+        Some(copy + STORE_OR_NOT)
     } else if (ask..ask + 12).contains(&pc) {
         Some(ask + 12)
     } else {
@@ -309,6 +329,13 @@ impl Mem {
         if self.must_order() {
             std::sync::atomic::fence(Ordering::SeqCst);
         }
+    }
+
+    /// The list all threads share, held: for `fork`, which must not copy the process
+    /// while another thread is in the middle of changing the list (R064). Nothing
+    /// where there is one thread.
+    pub fn held(&self) -> Option<std::sync::MutexGuard<'_, Vec<Region>>> {
+        self.shared.as_ref().map(|shared| shared.regions.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
     #[cold]
@@ -1425,6 +1452,38 @@ mod tests {
         m.map(A, hp, RW).unwrap();
         assert_eq!(m.read_u64(A), Ok(0));
     }
+    #[test]
+    fn a_store_seen_by_another_thread_is_whole() {
+        // One thread stores two values in turn, of eight, four and two bytes; the
+        // other reads and must see one of the two and never some bytes of each
+        // (R064).
+        let mut first = mem();
+        first.map(A, PAGE, RW).unwrap();
+        let mut second = first.view();
+        let (x, y) = (0x7e9c_0067_0011_2233u64, 0u64);
+        first.write_u64(A, x).unwrap();
+        first.write_u32(A + 8, x as u32).unwrap();
+        first.write_u16(A + 16, x as u16).unwrap();
+        let done = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                for i in 0..400_000u64 {
+                    let v = if i % 2 == 0 { y } else { x };
+                    second.write_u64(A, v).unwrap();
+                    second.write_u32(A + 8, v as u32).unwrap();
+                    second.write_u16(A + 16, v as u16).unwrap();
+                }
+                done.store(true, std::sync::atomic::Ordering::Relaxed);
+            });
+            while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                let (a, b, c) = (first.read_u64(A).unwrap(), first.read_u32(A + 8).unwrap(), first.read_u16(A + 16).unwrap());
+                assert!(a == x || a == y, "eight bytes read as {a:#x}");
+                assert!(b == x as u32 || b == y as u32, "four bytes read as {b:#x}");
+                assert!(c == x as u16 || c == y as u16, "two bytes read as {c:#x}");
+            }
+        });
+    }
+
     #[test]
     fn two_handles_on_one_memory_see_each_others_changes() {
         let mut first = mem();

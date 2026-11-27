@@ -94,3 +94,9 @@ TLSv1.3 TLS_AES_256_GCM_SHA384 Hello, world
 $$ python3 -c 'import threading as T; n = [0]; f = lambda: n.__setitem__(0, n[0] + 1); [(t.start(), t.join()) for t in (T.Thread(target=f) for i in range(1200))]; print(n[0])'
 1200
 ? 0
+# Threads that wait for one another through glibc (R063): four producers and four
+# consumers on a queue of four places, four threads taking turns by a condition, four
+# meeting at a barrier 200 times. What the real machine printed (hal, 2026-11-27).
+$$ python3 -c 'import threading, queue; q = queue.Queue(4); got = []; c = threading.Condition(); turn = [0]; b = threading.Barrier(4); P = [threading.Thread(target=lambda k=k: [q.put(k * 1000 + i) for i in range(500)]) for k in range(4)]; C = [threading.Thread(target=lambda: [got.append(v) for v in iter(q.get, None)]) for _ in range(4)]; [t.start() for t in P + C]; [t.join() for t in P]; [q.put(None) for _ in C]; [t.join() for t in C]; T = [threading.Thread(target=lambda me=me: [(c.acquire(), c.wait_for(lambda: turn[0] % 4 == me), turn.__setitem__(0, turn[0] + 1), c.notify_all(), c.release()) for _ in range(300)]) for me in range(4)]; B = [threading.Thread(target=lambda: [b.wait() for _ in range(200)]) for _ in range(4)]; [t.start() for t in T + B]; [t.join() for t in T + B]; print("through a queue", len(got), sum(got), "turns", turn[0], "left at the barrier", b.n_waiting)'
+through a queue 2000 3499000 turns 1200 left at the barrier 0
+? 0

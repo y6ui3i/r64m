@@ -323,7 +323,25 @@ fn fork(c: &mut Cpu, m: &mut Mem, s: &mut Sys, flags: u64, stack: u64, parent_ti
             unsafe { libc::close(low[i]) };
         }
     }
-    match unsafe { libc::fork() } {
+    // The child is a copy of this process with this thread alone in it. What another
+    // thread held of r64m's own at that moment stays held in the child for ever:
+    // nobody is there to let go of it. So everything of r64m's that a thread can
+    // hold is held by this one while the copy is made, and let go in both (R064:
+    // Go's `go build` stood so, one run in a hundred and sixty of eight at once:
+    // its child waited for the list of regions, which a thread of the parent's was
+    // changing as it was copied, and never started its program; the parent waits
+    // for that). The C library does the same for its own locks.
+    let pid = {
+        let _process = s.proc();
+        let _regions = m.held();
+        // (Standard error too, which any thread may be in the middle of a line to.
+        // Not standard output: the first thread holds that for as long as r64m
+        // runs, and a second thread asking for it here would wait for ever: the
+        // first form of this did, at Go's first child.)
+        let _err = std::io::stderr().lock();
+        unsafe { libc::fork() }
+    };
+    match pid {
         pid if pid < 0 => {
             let e = errno();
             unsafe { (libc::close(wait[0]), libc::close(wait[1])) };
