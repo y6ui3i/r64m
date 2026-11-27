@@ -5504,3 +5504,36 @@ Three launches, the two side by side; milliseconds by the client's clock:
 - Owed, as the card says, in a card of its own: where a kept request's 1.9 ms
   goes now (the profile, R054's way), and R054's build beside today's for that
   one measure, to say whether anything was lost.
+
+## R068: r64m beside the host's own code (2026-11-27)
+
+The owner, of what r64m is for (「Armだから重いエミュレータ入れないとダメだ、諦めよう、
+作り直そう、サーバ借りようってパターンを弾きたい」), and of how far it is from the
+machine it runs on: 「それは測ったほうがいいかもな 最適化の指標になるし」. Every
+measure so far is against QEMU, which says who is ahead; none says how much is
+left to gain.
+
+The card, written before the run.
+
+- **Hypothesis**: on the primitives r64m takes between two and five times as
+  long as the same C compiled for arm64 and run as it is, on the same core; the
+  ones that are memory and branches nearer two, the ones that are arithmetic of
+  floats and calls through tables further off. (A guess with nothing under it:
+  that is why it is measured.)
+- **What is changed from before**: a second column. The 23 primitives' sources
+  (g64m's `tests/prim64`), with their one header given the arm64 calls for
+  writing and ending, compiled for arm64 by the same compiler version that made
+  the x86-64 ones (GCC 15.2 both) with the same flags, each with its work done
+  many times over; timed in the VM beside r64m running the x86-64 ones, each less
+  a program that does nothing. Two are left out: the one made of x86's string
+  instructions written by hand, and long double's (80 bits on x86, 128 in
+  software on arm64: not the same work).
+- **Next move for each result**:
+  - The ratios are had → written as a table, per primitive and for the sum: the
+    measure to optimise by from now on, beside QEMU's
+  - A primitive at ten times or more → named as the first place to look
+  - r64m at 1.5 times or under on the sum → the primitives say little more; a
+    whole build (NetHack natively, which needs packages fetched for arm64: the
+    owner's word) is the measure that would
+- **Cut-off**: one round of timing, three runs of each, the least taken; nothing
+  else running.
