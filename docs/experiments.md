@@ -5023,3 +5023,55 @@ passes it fails with every thread's call.**
   `futex` and `epoll_pwait` as they stood.
 - Owed: the same limit for the unit tests' step (R058's kind), which has only
   the job's 120 minutes.
+
+## R061: the CI's four minutes (2026-11-27)
+
+The owner: 「CI時間かかりすぎだな 時間削れる？」, and to the plan: 「そうしよう」. Not
+for a point of ADR 0020: for the work itself, now that every change waits for
+the job `linux` before it can be merged.
+
+Where the four minutes go (the last run that passed on `main`): setting up 30
+seconds (checkouts, `nasm`, `rustup`); unit tests, primitives and traces 69
+(building, mostly); the guest's programs 2; loading the two built images 9; the
+container cases 135, ten suites one after another, eight of them pulling their
+image first.
+
+The card, written before the run.
+
+- **Hypothesis**: the container cases take 135 seconds because they wait for
+  one another; the runner has four cores and the suites share nothing but the
+  two built images. Four at once (`--jobs 4`, which `cargo xtask container` has
+  had since it was made) brings the step to 50 or 60 seconds and the job to
+  under three minutes.
+- **What is changed from before**: one word in the workflow's step, for a push
+  and a pull request (the JIT alone). The weekly run of three ways stays one at
+  a time: a case of Python's that times 50 milliseconds failed once under the
+  checker when many suites ran together (R054), and the weekly run is not waited
+  for.
+- **Next move for each result**:
+  - The step is under 70 seconds and passes on the pull request's own run → kept;
+    the next cut (the tests and the cases as two jobs side by side, which needs
+    `main`'s required check changed to two) is put to the owner with this number
+  - It is not faster by a third or more → pulls or the runner's disk are the
+    wait, not the cores: the step's log says which, and the images are kept
+    between runs instead
+  - A case fails that passes alone → fewer at once (2), and the case named
+- **Cut-off**: the pull request's own run and one re-run; R060's limit of time
+  holds each case.
+
+**Result (2026-11-27): the container cases 135 → 82 seconds on the runner, the
+job 4 minutes → 3 minutes 16. Kept. Not the 50 to 60 I said.**
+
+- On the Mac (images at hand): 64 seconds one at a time, 33 four at once, all
+  suites passing both ways.
+- On the runner, this pull request's own run: the step 82 seconds, every suite
+  passing; the job 3 minutes 16 seconds (it was 4 minutes 0 to 4 minutes 13 in
+  the five runs before).
+- Why not 50 to 60: a step cannot be shorter than its longest suite with its
+  pull, and the JVM's alone is 40 seconds of cases (R060's log) after its image
+  is pulled; the staging build is in the step too. My number took the Mac's
+  ratio for the runner's.
+- What is left of the job: setting up 30 seconds, the tests' build and run 70,
+  the cases 82, loading images 10. The two long steps do not need each other:
+  as two jobs side by side the wait would be about two minutes. That needs
+  `main`'s required check to become two, which is the owner's to say.
