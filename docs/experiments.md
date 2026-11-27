@@ -5671,3 +5671,107 @@ from the kernel's clock):
   away; the table's is `make` of one object in the built tree.
 - For what r64m is for: a build that takes a minute natively takes under four
   under r64m, and ten under QEMU (R031: 590 s).
+
+## R070: where a compilation's time goes (2026-11-28)
+
+The owner: 「早速やるか」. R068 and R069 left two numbers that do not agree: tight
+loops 1.52 times native, GCC compiling one file 3.0 times. The difference is
+r64m's to explain before anything is changed for it.
+
+The card, written before the run.
+
+- **Hypothesis**: one of three, and the three ask for different work. (a) Making
+  blocks: a compiler goes through a great deal of code a few times each, and the
+  translating is a large part of the 3.2 seconds. (b) The interpreter: some
+  instruction GCC uses much is not translated, and each one leaves a block and
+  comes back. (c) Leaving generated code for r64m's own: jumps and calls
+  through registers looked up, blocks not joined, the calls that manage memory.
+- **What is changed from before**: nothing in r64m. One compilation (`apply.c`,
+  as `make` runs it in the built tree) is run three times more with r64m
+  saying of itself: `--jit-stats` (blocks made, time making them, time in
+  generated code, instructions in blocks and out), `--profile` (where the
+  host's time is, by r64m's own functions), `--jit-why` (what the interpreter
+  ran, by instruction).
+- **Next move for each result**:
+  - Making blocks is a quarter of the time or more → the translator's own speed,
+    or keeping translations (per process they are made anew), in a card
+  - An instruction or a few are most of what the interpreter runs, and the
+    interpreter is a tenth of the time or more → they are translated, in a card
+  - Most of the time is in generated code and in finding blocks → the lookups
+    and the joining, by the profile's names
+  - None of the three stands out → the generated code itself is slower per
+    instruction on this program than on the primitives: one hot function of
+    GCC's read beside what was made of it
+- **Cut-off**: the three runs; no change to r64m in this card.
+
+**Result (2026-11-28): none of the three. Seven tenths of the time is in generated
+code, spread evenly over the compiler, and that code is five and a half of the
+host's instructions for each of the guest's. The three guesses together are the
+other three tenths.**
+
+One compilation: GCC 14.2's `cc1 -O2` on `apply.c` preprocessed (10,831 lines), 3.1
+seconds under r64m, 1.06 natively (R069).
+
+r64m's own account (`--jit-stats`, `--jit-memory`):
+
+- 7,071 million instructions of the guest's, 7,049 million of them (99.7%) in
+  blocks. 117,432 blocks made, entered 4.9 million times (1,440 instructions for
+  each time generated code is entered: the joining works).
+- 0.36 s making blocks, 2.27 s in generated code.
+- 1.34 million of the guest's instructions translated into 29.4 MB of code: 7.35
+  million of the host's instructions, **5.5 for each of the guest's**, and 11.4
+  of the guest's to a block.
+
+The profile (3,009 samples, a millisecond each):
+
+| where | samples | share |
+|---|---|---|
+| generated code | 2,114 | 70% |
+| making blocks (reading instructions, translating, writing, joining) | 245 | 8% |
+| the guest's memory (`mmap`, `munmap`, `mprotect` and the list) | 210 | 7% |
+| the interpreter | 165 | 5.5% |
+| finding blocks and entering them (`Jit::run`, `enter`) | 151 | 5% |
+| the rest | 124 | 4% |
+
+- In generated code the samples fall in 1,736 blocks: the ten with most have 5%
+  of them, the hundred with most 17%, a thousand 65%. There is no hot place: the
+  compiler's time is its whole self, and r64m's code for it is evenly about
+  twice the host's own (2.27 s of 3.1 against 1.06 for everything natively).
+- So the card's fourth line: the generated code itself. The primitives are a
+  few blocks whose instructions translate one for one or nearly; a compiler is
+  calls, returns, compares and branches, loads through pointers, bytes. At 5.5
+  for one the question is which of the guest's instructions cost the most of
+  the host's, weighed by how often they run; r64m cannot say that yet (the
+  profile knows the guest's address of a sample, not what instruction it is).
+- What the interpreter ran (22 million, 0.3%), by `--jit-why`: mostly the first
+  four passes over an address before its block is made (conditional jumps and
+  moves lead the list). Not translated at all and met often: MOVS of a byte
+  alone and with REP (358,000), LOCK OR to memory (158,000), MOVLPS (164,000),
+  SHUFPD (161,000), a shift by one of a 64-bit register by the short form
+  (57,000), REP STOSQ (39,000). Small beside the rest; each is a block left.
+- The guest's memory at 7%: GCC asks for and gives back memory constantly, and
+  each call changes r64m's list and the host's mapping.
+- Met on the way: a program under r64m cannot start a program that is the host's
+  own (an arm64 one). I first wrote this down as a gap. The owner: 「穴ではなく仕様
+  では？ 実行できてしまったら一つのことうまくやるが別のこともできちゃわない？」.
+  It is as it should be: r64m behaves as x86-64, and an x86-64 machine does not
+  run an arm64 program either (ADR 0018). Asked of the real machine: `execve`
+  comes back with ENOEXEC, and a shell then takes the file for a script and
+  fails. What differs under r64m is only the manner: `execve` does not come
+  back; r64m is started again for the file, says "not an x86-64 ELF" and ends
+  with 2. A program that looks at what `execve` answered sees the difference
+  (it never gets its answer); a shell ends with 2 either way. To be put right
+  as its own small change: ENOEXEC from `execve`, while there is still a program
+  to tell. (The profile was taken by making r64m the container's first
+  program.)
+
+What follows, each a card of its own, in the order I would take them:
+
+1. The profile says what instruction a sample is in (its bytes), and the
+   translator says how many of the host's instructions each kind of the guest's
+   becomes: the table to optimise by.
+2. By that table, the commonest costly kinds (my guess, to be held to the
+   table: flags kept for a compare that a jump follows at once, calls and
+   returns, operands in memory with an index).
+3. Blocks kept between processes (a build starts the same compiler 143 times
+   and translates it anew each time: 8% here, more for small files).
