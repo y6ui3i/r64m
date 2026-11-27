@@ -5369,3 +5369,39 @@ grandchild, SIGCHLD, stop and continue, a child ended by a signal.
   answers EINVAL, where Linux says EFAULT for the null filter the trial gave it);
   `clone3`, `rseq` and `set_robust_list` answer ENOSYS, which both libraries
   take as an older kernel's answer.
+
+## R066: a signal between r64m's look and the kernel's call (2026-11-27)
+
+Found by R065's case of signals, after it was in: on the CI its first form did
+not end (a race of the program's own: a signal before `pause`; rewritten with
+semaphores, the real machine six of six), and the second form did not end once in
+ten runs with glibc on the Mac. The threads then (`cargo xtask waits`): the first
+in a sleep, waiting to see the handler's count; the one thread that lets the
+signal in, in `futex` (glibc's `sem_wait`). A signal sent to the process, which
+only that thread could take, was never handled.
+
+The card, written before the run.
+
+- **Hypothesis**: the window `sys::call` names itself ("between this look and the
+  kernel taking the call a signal can still slip in and wait out the call: a few
+  instructions wide, and not closed yet"). The signal arrived after r64m had
+  looked for one and before the host's `futex` was entered: r64m's handler noted
+  it, and the call then waited for a wake nobody would send. On Linux a signal
+  that is there before a call is entered is taken first. The program makes the
+  window likely: the thread tells the first it is ready and waits at once, and
+  the first sends at once.
+- **What is changed from before**: the window is closed for the calls that
+  wait: they are entered by a routine of r64m's own that looks at the thread's
+  word and makes the call in one stretch of code; the handler, finding the
+  thread in that stretch before the call, sends it on to the routine's other
+  ending, which says "not made"; the guest's call is then begun again after the
+  signal's handler, as if the signal had come first. (musl does the same for a
+  cancellation.)
+- **Next move for each result**:
+  - The program ends 40 of 40 in each image by the JIT, and the suites pass →
+    kept
+  - It still does not end → the thread's state again (`waits`): another way a
+    signal is lost, by the call it waits in
+  - Something that passed fails → the calls given the routine are too many (one
+    that is not safe to begin again): named and taken out
+- **Cut-off**: 40 runs in each image, 60 seconds a run.
