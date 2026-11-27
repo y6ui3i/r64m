@@ -5703,3 +5703,66 @@ The card, written before the run.
     instruction on this program than on the primitives: one hot function of
     GCC's read beside what was made of it
 - **Cut-off**: the three runs; no change to r64m in this card.
+
+**Result (2026-11-28): none of the three. Seven tenths of the time is in generated
+code, spread evenly over the compiler, and that code is five and a half of the
+host's instructions for each of the guest's. The three guesses together are the
+other three tenths.**
+
+One compilation: GCC 14.2's `cc1 -O2` on `apply.c` preprocessed (10,831 lines), 3.1
+seconds under r64m, 1.06 natively (R069).
+
+r64m's own account (`--jit-stats`, `--jit-memory`):
+
+- 7,071 million instructions of the guest's, 7,049 million of them (99.7%) in
+  blocks. 117,432 blocks made, entered 4.9 million times (1,440 instructions for
+  each time generated code is entered: the joining works).
+- 0.36 s making blocks, 2.27 s in generated code.
+- 1.34 million of the guest's instructions translated into 29.4 MB of code: 7.35
+  million of the host's instructions, **5.5 for each of the guest's**, and 11.4
+  of the guest's to a block.
+
+The profile (3,009 samples, a millisecond each):
+
+| where | samples | share |
+|---|---|---|
+| generated code | 2,114 | 70% |
+| making blocks (reading instructions, translating, writing, joining) | 245 | 8% |
+| the guest's memory (`mmap`, `munmap`, `mprotect` and the list) | 210 | 7% |
+| the interpreter | 165 | 5.5% |
+| finding blocks and entering them (`Jit::run`, `enter`) | 151 | 5% |
+| the rest | 124 | 4% |
+
+- In generated code the samples fall in 1,736 blocks: the ten with most have 5%
+  of them, the hundred with most 17%, a thousand 65%. There is no hot place: the
+  compiler's time is its whole self, and r64m's code for it is evenly about
+  twice the host's own (2.27 s of 3.1 against 1.06 for everything natively).
+- So the card's fourth line: the generated code itself. The primitives are a
+  few blocks whose instructions translate one for one or nearly; a compiler is
+  calls, returns, compares and branches, loads through pointers, bytes. At 5.5
+  for one the question is which of the guest's instructions cost the most of
+  the host's, weighed by how often they run; r64m cannot say that yet (the
+  profile knows the guest's address of a sample, not what instruction it is).
+- What the interpreter ran (22 million, 0.3%), by `--jit-why`: mostly the first
+  four passes over an address before its block is made (conditional jumps and
+  moves lead the list). Not translated at all and met often: MOVS of a byte
+  alone and with REP (358,000), LOCK OR to memory (158,000), MOVLPS (164,000),
+  SHUFPD (161,000), a shift by one of a 64-bit register by the short form
+  (57,000), REP STOSQ (39,000). Small beside the rest; each is a block left.
+- The guest's memory at 7%: GCC asks for and gives back memory constantly, and
+  each call changes r64m's list and the host's mapping.
+- Found on the way, and not put right here: a program under r64m cannot start a
+  program that is the host's own (an arm64 one): r64m takes `execve` for itself
+  and says "not an x86-64 ELF", where the kernel would run it. (The profile was
+  taken by making r64m the container's first program instead.)
+
+What follows, each a card of its own, in the order I would take them:
+
+1. The profile says what instruction a sample is in (its bytes), and the
+   translator says how many of the host's instructions each kind of the guest's
+   becomes: the table to optimise by.
+2. By that table, the commonest costly kinds (my guess, to be held to the
+   table: flags kept for a compare that a jump follows at once, calls and
+   returns, operands in memory with an index).
+3. Blocks kept between processes (a build starts the same compiler 143 times
+   and translates it anew each time: 8% here, more for small files).
