@@ -77,7 +77,7 @@ struct Block {
     /// 0016). Code the guest may not write does not change.
     guarded: bool,
     /// The jumps in other blocks (or in this one) that were rewritten to come here.
-    incoming: Vec<u64>,
+    incoming: Vec<(u64, u64)>,
     /// The landings of returns in it (R046): the guest's return address and the
     /// host's address of the landing.
     pads: Vec<(u64, u64)>,
@@ -462,11 +462,15 @@ impl Jit {
         Some((words, block.starts.iter().map(|&(word, after)| (word, block.first + after as u64)).collect()))
     }
 
-    /// Rewrites the jump at `site` to go to a block's code.
+    /// Rewrites the jump at `site` to go to a block's code. Where it went before (the
+    /// code that hands its address to r64m, after its own block's end: R072) is kept,
+    /// to point it back there if the block is forgotten.
     fn join(&mut self, site: u64, id: usize) {
+        let before = unsafe { (site as *const u32).read() };
+        let unjoined = site.wrapping_add((((before << 6) as i32 >> 6) as i64 * 4) as u64);
         let words = (self.blocks[id].code as i64 - site as i64) / 4;
         unsafe { self.code.rewrite(site as *const u8, a64::b(words as i32)) };
-        self.blocks[id].incoming.push(site);
+        self.blocks[id].incoming.push((site, unjoined));
         self.stats.joined += 1;
     }
 
@@ -656,7 +660,7 @@ impl Jit {
         let records = (self.blocks.capacity() * size_of::<Block>()) as u64;
         let starts: u64 = self.blocks.iter().map(|b| (b.starts.len() * size_of::<(u32, u32)>()) as u64).sum();
         let instructions: u64 = self.blocks.iter().map(|b| b.starts.len() as u64).sum();
-        let incoming: u64 = self.blocks.iter().map(|b| (b.incoming.capacity() * 8) as u64).sum();
+        let incoming: u64 = self.blocks.iter().map(|b| (b.incoming.capacity() * 16) as u64).sum();
         let pads: u64 = self.blocks.iter().map(|b| (b.pads.capacity() * 16) as u64).sum();
         // The allocator's own for each vector that holds anything: taken as 16 bytes.
         let pieces = self.blocks.iter().map(|b| (!b.starts.is_empty()) as u64 + (b.incoming.capacity() != 0) as u64 + (b.pads.capacity() != 0) as u64).sum::<u64>();
@@ -750,8 +754,8 @@ impl Jit {
             _ => *rip < start || *rip >= end,
         });
         for id in dropped {
-            for site in std::mem::take(&mut self.blocks[id].incoming) {
-                unsafe { self.code.rewrite(site as *const u8, a64::b(1)) };
+            for (site, unjoined) in std::mem::take(&mut self.blocks[id].incoming) {
+                unsafe { self.code.rewrite(site as *const u8, a64::b(((unjoined as i64 - site as i64) / 4) as i32)) };
             }
             // Its landings are of calls that are no longer there.
             for (next, pad) in std::mem::take(&mut self.blocks[id].pads) {

@@ -5910,3 +5910,30 @@ The card, written before the run.
 - **Cut-off**: the unit tests, the 62 programs four ways, the container suites
   three ways; then the compilation of R070 and the build of R069, three each,
   beside the build before.
+
+**Result (2026-11-28): the hypothesis was wrong. With the code that runs lying
+together, a compilation is 3 in a hundred faster by the median and the whole
+build not faster at all (203 s for 204); the samples at blocks' beginnings did
+not fall. It was not fetching. Kept, for doing no harm and some good.**
+
+- One compilation (R070's), the two builds in turn, eight rounds, hundredths of
+  a second: before 3.07 at least, 3.14 the median; after 3.02 and 3.04.
+- Its profile: samples at blocks' beginnings 670 before, 706 after (of 2,173 and
+  2,040 in generated code); time in generated code by r64m's own clock 2.42 s
+  and 2.25 s. The code made is the same in size (29.4 MB): its words are in
+  another order, nothing fewer.
+- The whole build, three of each in turn: 204, 205, 205 s before; 203, 203, 204
+  after.
+- Tests: 124 unit tests on Linux, the 62 programs four ways (248 runs as the
+  interpreter), every container suite by the JIT.
+- A first round of the builds measured nothing: they were run under `chroot`
+  into the x86-64 image's files from an arm64 shell (so that its clock times
+  them), and without `/proc` there r64m could not start another program
+  (`/proc/self/exe`): every build ended at its first `cp`. `/proc` mounted, the
+  second round is the table above.
+
+By the card, the next is the branches: what a block's beginning holds and what
+its arrival costs (the look for a signal, the count, entering by the table and
+by `ret`). The 37 in a hundred is still not explained; the profile cannot tell a
+branch guessed wrongly from anything else on this VM, so the next card changes
+one of them and times it.
