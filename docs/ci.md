@@ -7,7 +7,7 @@ command (`xtask/src/main.rs`), so what the CI runs can be run by hand:
 |---|---|---|
 | `cargo xtask test` | the unit tests, the primitives, the traces | g64m's checkout beside this one (or `R64M_G64M`), `nasm` |
 | `cargo xtask guest` | the guest's own programs (signals) | Linux |
-| `cargo xtask images build` | the two images that are built, not pulled (`tools/images/`) | Docker |
+| `cargo xtask images build` | the three images that are built, not pulled (`tools/images/`) | Docker |
 | `cargo xtask container [--ways jit] [--jobs N] [SUITE ...]` | programs of x86-64 images, held to what hal printed | Docker, the two targets of `rustup` |
 | `cargo xtask ci` | all of these that the host can run | |
 
@@ -25,10 +25,10 @@ to it, no forced push, no deletion, for the owner too. That is why a pull reques
 documents only is run as well.
 
 The images of the container cases are Docker Hub's by digest (the very images the
-cases were taken in on hal; `SUITES` in `xtask/src/main.rs`), but two that are
-built: Alpine with its compiler (packages named by version: the sums in
+cases were taken in on hal; `SUITES` in `xtask/src/main.rs`), but three that are
+built: Debian with its compiler and glibc (for the cases of threads and fork, R065), Alpine with its compiler (packages named by version: the sums in
 `tests/container/gcc.txt` are of what that compiler makes) and the goal's (Python
-with FastAPI and uvicorn, Debian's nginx). Those two are built on an x86-64 runner,
+with FastAPI and uvicorn, Debian's nginx). Those three are built on an x86-64 runner,
 where their own programs run, kept in the Actions cache by the Dockerfiles' hash,
 and loaded on the arm64 runner. g64m is checked out at a fixed commit.
 

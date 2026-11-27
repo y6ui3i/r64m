@@ -149,6 +149,7 @@ fn main() {
         ("busybox", include_str!("container/busybox.txt")),
         ("shell", include_str!("container/shell.txt")),
         ("gcc", include_str!("container/gcc.txt")),
+        ("threads", include_str!("container/threads.txt")),
         ("python", include_str!("container/python.txt")),
         ("redis", include_str!("container/redis.txt")),
         ("goal", include_str!("container/goal.txt")),

@@ -79,22 +79,50 @@ pub fn disposition(signal: u64, handler: u64) {
     if signal == libc::SIGSEGV as u64 || signal == libc::SIGBUS as u64 {
         return;
     }
-    unsafe {
-        let mut act: libc::sigaction = std::mem::zeroed();
-        match handler {
-            0 => act.sa_sigaction = libc::SIG_DFL,
-            1 => act.sa_sigaction = libc::SIG_IGN,
-            _ => {
-                act.sa_sigaction = arrived as *const () as usize;
-                // No restart by the kernel: a call cut short comes back, the handler
-                // is entered, and r64m starts the call again if the guest asked for
-                // that (`restarts`). While r64m's handler runs nothing else arrives.
-                act.sa_flags = libc::SA_SIGINFO;
-                libc::sigfillset(&mut act.sa_mask);
-            }
+    // No restart by the kernel: a call cut short comes back, the handler is
+    // entered, and r64m starts the call again if the guest asked for that
+    // (`restarts`). While r64m's handler runs nothing else arrives.
+    let (handler, flags, mask) = match handler {
+        0 => (libc::SIG_DFL, 0, 0),
+        1 => (libc::SIG_IGN, 0, 0),
+        _ => (arrived as *const () as usize, libc::SA_SIGINFO as u64, !0u64),
+    };
+    host_action(signal, handler, flags, mask);
+}
+
+/// The host's kernel asked directly, not through the C library r64m is built with:
+/// that library keeps the signals 32 to 34 for itself (its own cancelling of threads
+/// and its timers) and refuses to give them handlers or to block them. They are the
+/// guest's C library's for the same uses, and r64m uses none of them (R065: a thread
+/// cancelled by `pthread_cancel` ended the whole process, by signal 33 with musl
+/// and 32 with glibc, which had no handler on the host).
+///
+/// What the kernel takes for a handler on arm64: the handler, the flags, a restorer
+/// (none: the kernel's own is used), the signals blocked while it runs.
+pub fn host_action(signal: u64, handler: usize, flags: u64, mask: u64) {
+    let act: [u64; 4] = [handler as u64, flags, 0, mask];
+    unsafe { libc::syscall(libc::SYS_rt_sigaction, signal, act.as_ptr(), 0usize, 8usize) };
+}
+
+/// The thread's set of blocked signals, by the kernel's own call: `how` as
+/// `sigprocmask` has it, a bit for each signal (its number less one).
+pub fn host_mask(how: i32, mask: u64) {
+    unsafe { libc::syscall(libc::SYS_rt_sigprocmask, how, &mask as *const u64, 0usize, 8usize) };
+}
+
+/// One of the signals in `set` that has been noted for this thread and not yet
+/// delivered, taken: its number and what the kernel said of it. For
+/// `rt_sigtimedwait`, which takes a signal without a handler being entered.
+pub fn take_noted(set: u64) -> Option<(u64, [u8; 128])> {
+    WAITING.with(|w| {
+        let pending = w.pending.load(Ordering::Acquire) & set;
+        if pending == 0 {
+            return None;
         }
-        libc::sigaction(signal as i32, &act, std::ptr::null_mut());
-    }
+        let signal = pending.trailing_zeros() as u64 + 1;
+        w.pending.fetch_and(!(1 << (signal - 1)), Ordering::AcqRel);
+        Some((signal, unsafe { (*w.info.get())[signal as usize] }))
+    })
 }
 
 /// Is a signal waiting whose handler asked for calls it cuts short to be started
@@ -294,12 +322,9 @@ pub fn fault(c: &mut Cpu, m: &mut Mem, s: &mut Sys, stop: &Stop) -> Option<bool>
 /// The process ends as `signal` ends one that does nothing about it.
 pub fn die_of(signal: i32) -> ! {
     unsafe {
-        libc::signal(signal, libc::SIG_DFL);
-        let mut set: libc::sigset_t = std::mem::zeroed();
-        libc::sigemptyset(&mut set);
-        libc::sigaddset(&mut set, signal);
-        libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
-        libc::raise(signal);
+        host_action(signal as u64, libc::SIG_DFL, 0, 0);
+        host_mask(libc::SIG_UNBLOCK, 1 << (signal - 1));
+        libc::syscall(libc::SYS_tgkill, libc::getpid(), libc::syscall(libc::SYS_gettid), signal);
     }
     std::process::exit(128 + signal)
 }

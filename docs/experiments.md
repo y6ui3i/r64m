@@ -5315,3 +5315,57 @@ The card, written before the run.
   (the kernel walks a list the library registers, `set_robust_list`, which r64m
   does not have) are tried apart and expected not to work: listed, not fixed
   here.
+
+**Result (2026-11-27): six things r64m did not do as Linux does, five put right;
+the five programs print the real machine's lines with musl and with glibc, by
+all three ways. Robust mutexes do not work and are listed.**
+
+Found before the first program was written, by making the image:
+
+- **`apt-get install` failed under r64m.** The Debian image is built on the Mac by
+  whatever runs x86-64 there, which is r64m. dpkg could not set the owner of the
+  symbolic links it unpacked: `lchown` was not known. Added, with `prctl` (a
+  thread's name, the numbers that go to the kernel as they are; a filter of calls
+  is refused) and the two `ioctl`s of a pseudo-terminal's first side (`ptsname`,
+  `unlockpt`: apt makes one for dpkg). With them `apt-get install gcc libc6-dev`
+  ends well under r64m, and the GCC it installs compiles and its program runs:
+  the image the glibc cases run in was made by r64m.
+- **SIGPIPE was ignored.** `yes | head -1`: on the real machine `yes` is ended by
+  the signal (141); under r64m it was told EPIPE, said "Broken pipe" and ended
+  with 1. A Rust program's runtime sets that signal to be ignored before `main`;
+  r64m now notes what it was given before the runtime starts (a function the C
+  library calls first) and gives the guest that.
+
+Found by the programs (the real machine printed the same lines with both
+libraries at the first try; r64m differed in two of five):
+
+- **A cancelled thread ended the process.** `pthread_cancel` is a signal of the
+  C library's own (33 with musl, 32 with glibc). r64m is built with musl, whose
+  `sigaction` refuses those three numbers, so the host's signal got no handler
+  and its default ended everything. r64m now asks the kernel itself for handlers
+  and masks, and uses none of the three.
+- **`sigwait` gave nothing.** `rt_sigtimedwait` was not known. Added: the host's
+  kernel holds the signal back as the guest blocked it, and the same call there
+  takes it.
+- **Robust mutexes** (a lock whose holder ended is given to the next with
+  EOWNERDEAD): the real machine, both libraries, as said; r64m does not end. The
+  kernel does that for a thread that ends, by a list the library registers
+  (`set_robust_list`), and r64m has neither. Listed, not done here.
+
+What passed as it was: a thread's own variables, keys and their destructors,
+`pthread_once`, stacks of a size asked for; every wait with a limit of time and
+every kind of lock; signals to particular threads, masks, a stack overrun caught
+on another stack; and all of `fork`'s: from a second thread, `pthread_atfork`,
+a lock across it, 150 programs started beside threads that map memory, a
+grandchild, SIGCHLD, stop and continue, a child ended by a signal.
+
+- The cases: `tests/container/threads.txt` (five programs), run in Alpine's image
+  and in the new Debian one; two in `shell.txt` (the pipe, a link's owner), one in
+  `python.txt` (`prctl`).
+- Tests: 123 unit tests; the five programs by the interpreter, the JIT and the
+  JIT checked in both images (30 runs, all the real machine's lines); every
+  suite by the JIT.
+- Not done: robust mutexes; `prctl`'s other requests (a filter of calls
+  answers EINVAL, where Linux says EFAULT for the null filter the trial gave it);
+  `clone3`, `rseq` and `set_robust_list` answer ENOSYS, which both libraries
+  take as an older kernel's answer.

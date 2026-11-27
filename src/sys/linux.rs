@@ -135,8 +135,10 @@ fn vector(m: &Mem, number: c_long, fd: u64, list: u64, count: u64, offset: u64) 
 fn ioctl(m: &Mem, fd: u64, request: u64, arg: u64) -> Result<u64, u64> {
     match request {
         // TCGETS, TCSETS, TCSETSW, TCSETSF, TIOCGPGRP, TIOCSPGRP, TIOCGWINSZ,
-        // TIOCSWINSZ, FIONREAD, FIONBIO, FIOASYNC.
-        0x5401..=0x5404 | 0x540f | 0x5410 | 0x5413 | 0x5414 | 0x541b | 0x5421 | 0x5452 => raw(libc::SYS_ioctl, [fd, request, p(m, arg)?, 0, 0, 0]),
+        // TIOCSWINSZ, FIONREAD, FIONBIO, FIOASYNC; and of a pseudo-terminal's first
+        // side, TIOCGPTN and TIOCSPTLCK (its number, and its lock: `ptsname`,
+        // `unlockpt`; apt makes one for dpkg: R065).
+        0x5401..=0x5404 | 0x540f | 0x5410 | 0x5413 | 0x5414 | 0x541b | 0x5421 | 0x5452 | 0x8004_5430 | 0x4004_5431 => raw(libc::SYS_ioctl, [fd, request, p(m, arg)?, 0, 0, 0]),
         // FIONCLEX, FIOCLEX.
         0x5450 | 0x5451 => raw(libc::SYS_ioctl, [fd, request, 0, 0, 0, 0]),
         _ => Err(super::ENOTTY),
@@ -445,11 +447,7 @@ fn ask_x86_order() -> bool {
 /// No signal is taken by the thread from here: none of the guest's can be delivered
 /// to it any more, and the kernel will give those of the process to another.
 pub fn thread_ends(m: &mut Mem, s: &Sys) {
-    unsafe {
-        let mut all: libc::sigset_t = std::mem::zeroed();
-        libc::sigfillset(&mut all);
-        libc::pthread_sigmask(libc::SIG_SETMASK, &all, std::ptr::null_mut());
-    }
+    super::signal::host_mask(libc::SIG_SETMASK, !0);
     if s.clear_tid != 0 && m.write_u32(s.clear_tid, 0).is_ok() {
         // FUTEX_WAKE, one waiter.
         let _ = raw(libc::SYS_futex, [m.base() as u64 + s.clear_tid, 1, 1, 0, 0, 0]);
@@ -583,6 +581,9 @@ pub fn call(c: &mut Cpu, m: &mut Mem, s: &mut Sys, n: u64, a: [u64; 6]) -> Optio
         91 => same(m, libc::SYS_fchmod, 0),
         92 => p(m, a[0]).and_then(|path| raw(libc::SYS_fchownat, [AT_FDCWD, path, a[1], a[2], 0, 0])),
         93 => same(m, libc::SYS_fchown, 0),
+        // lchown: the link itself, not what it names (dpkg sets the owner of every
+        // symbolic link it unpacks so: R065).
+        94 => p(m, a[0]).and_then(|path| raw(libc::SYS_fchownat, [AT_FDCWD, path, a[1], a[2], libc::AT_SYMLINK_NOFOLLOW as u64, 0])),
         95 => same(m, libc::SYS_umask, 0),
         137 => same(m, libc::SYS_statfs, 0b11),
         138 => same(m, libc::SYS_fstatfs, 0b10),
@@ -746,6 +747,23 @@ pub fn call(c: &mut Cpu, m: &mut Mem, s: &mut Sys, n: u64, a: [u64; 6]) -> Optio
             raw(libc::SYS_futex, [p(m, a[0])?, a[1], a[2], fourth, fifth, a[5]])
         })(),
 
+        // prctl: what is asked of the process or the thread by a number alone goes to
+        // the host's kernel as it is, r64m being that process and thread; a thread's
+        // name is read and written through the guest's memory. Anything else (a
+        // filter of calls, a change of what memory means) is refused as a kernel
+        // without it would: nothing of r64m's own is handed to the guest to change.
+        157 => match a[0] {
+            // PR_SET_PDEATHSIG, PR_GET_DUMPABLE, PR_SET_DUMPABLE, PR_GET_KEEPCAPS,
+            // PR_SET_KEEPCAPS, PR_GET_TIMERSLACK, PR_SET_TIMERSLACK,
+            // PR_SET_NO_NEW_PRIVS, PR_GET_NO_NEW_PRIVS, PR_SET_CHILD_SUBREAPER.
+            1 | 3 | 4 | 7 | 8 | 29 | 30 | 36 | 38 | 39 => raw(libc::SYS_prctl, [a[0], a[1], a[2], a[3], a[4], 0]),
+            // PR_GET_PDEATHSIG and PR_GET_CHILD_SUBREAPER answer through a pointer to
+            // a number; PR_SET_NAME and PR_GET_NAME take sixteen bytes.
+            2 | 37 => buf(m, a[1], 4).and_then(|to| raw(libc::SYS_prctl, [a[0], to, 0, 0, 0, 0])),
+            15 | 16 => buf(m, a[1], 16).and_then(|name| raw(libc::SYS_prctl, [a[0], name, 0, 0, 0, 0])),
+            _ => Err(EINVAL),
+        },
+
         // ---- who the process is
         39 => same(m, libc::SYS_getpid, 0),
         102 => same(m, libc::SYS_getuid, 0),
@@ -784,16 +802,62 @@ pub fn call(c: &mut Cpu, m: &mut Mem, s: &mut Sys, n: u64, a: [u64; 6]) -> Optio
             m.write_u64(a[0], held | noted).map_err(|_| EFAULT)?;
             Ok(done)
         }),
+        // rt_sigtimedwait (`sigwait`, `sigwaitinfo`, `sigtimedwait`): one of the set
+        // is taken without a handler being entered. The set is blocked by whoever
+        // asks rightly, so the host's kernel holds such a signal back and the same
+        // call there takes it; one that r64m's own handler noted in the moment
+        // before it was blocked is taken first. What the kernel says of a signal is
+        // laid out the same on both.
+        128 => (|| {
+            let set = m.read_u64(a[0]).map_err(|_| EFAULT)?;
+            let (signal, about) = match super::signal::take_noted(set) {
+                Some(taken) => taken,
+                None => {
+                    let mut about = [0u8; 128];
+                    let signal = raw(libc::SYS_rt_sigtimedwait, [&set as *const u64 as u64, about.as_mut_ptr() as u64, p(m, a[2])?, 8, 0, 0])?;
+                    (signal, about)
+                }
+            };
+            if a[1] != 0 {
+                m.write_bytes(a[1], &about).map_err(|_| EFAULT)?;
+            }
+            Ok(signal)
+        })(),
         234 => same(m, libc::SYS_tgkill, 0),
         247 => same(m, libc::SYS_waitid, 0b1_0100),
         _ => return None,
     })
 }
 
+/// Whether SIGPIPE was ignored when the process was started. Rust's runtime sets it
+/// to be ignored before `main`, for its own programs' sake; the guest is to have
+/// what its parent gave it (R065: a program writing to a pipe nobody reads any more
+/// was told EPIPE and went on, where it is ended by the signal: `yes | head -1`
+/// said "Broken pipe" and `yes` ended with 1, not 141). So it is noted before the
+/// runtime starts, by a function the C library calls first.
+static PIPE_WAS_IGNORED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[used]
+#[unsafe(link_section = ".init_array")]
+static NOTES_THE_PIPE: extern "C" fn() = {
+    extern "C" fn note() {
+        unsafe {
+            let mut was: libc::sigaction = std::mem::zeroed();
+            if libc::sigaction(libc::SIGPIPE, std::ptr::null(), &mut was) == 0 {
+                PIPE_WAS_IGNORED.store(was.sa_sigaction == libc::SIG_IGN, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
+    note
+};
+
 /// What the process was given that a program started by `execve` keeps and r64m
 /// must know of: the signals that are ignored, and those that are blocked.
 pub fn inherited(s: &mut Sys) {
     unsafe {
+        if !PIPE_WAS_IGNORED.load(std::sync::atomic::Ordering::Relaxed) {
+            libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+        }
         let mut set: libc::sigset_t = std::mem::zeroed();
         libc::pthread_sigmask(libc::SIG_SETMASK, std::ptr::null(), &mut set);
         for signal in 1..=64 {
