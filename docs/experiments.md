@@ -5129,3 +5129,33 @@ thing done by a shell script three times today). Tried: on the Mac with a limit 
 arm64 Linux `waits` beside the unit tests as they ran. A thread's name is cut to
 15 letters by the kernel, which is the test's module and not the test; the
 harness's own "has been running for over 60 seconds" names the test.
+
+## R063: contention, held to the real machine (2026-11-27)
+
+The owner: 「あとは上から順にやるか」; the third of the three things R056 names.
+For ADR 0020's point 3. R052, R056 and R057 were each found by a server under load
+and not by a case: the cases have threads, but hardly any that wait for one
+another.
+
+The card, written before the run.
+
+- **Hypothesis**: r64m is right where threads wait for one another by every way
+  the three worlds have: musl's (a C program: a mutex, a condition variable
+  taken in turns, a semaphore, a read-write lock, a barrier, 2,000 threads made
+  and ended), glibc's (Python: a queue between producers and consumers, a
+  condition in turns, a barrier), and Go's own (a mutex, a ring of channels,
+  sleeping goroutines; no C library). Each prints counts that are the same
+  wherever it is done rightly. If one is wrong it shows as another count, or as
+  a case that does not end, which R060's limit turns into a failure that says
+  where.
+- **What is changed from before**: three cases added, their lines the real
+  machine's (hal). Before they are added each is run under r64m by the three
+  ways, and then by the JIT forty times, four at once.
+- **Next move for each result**:
+  - All the same, none hangs → the cases go into the suites, and that is what is
+    known: these ways of waiting hold under this load
+  - A count differs or a run does not end → that is a fault found: its own card,
+    by the call the threads wait in; the case goes in when it passes
+  - A case takes more than ten seconds by the JIT → made smaller: the CI is not
+    to be slowed by it
+- **Cut-off**: forty runs of each by the JIT, 60 seconds a run; no more.
