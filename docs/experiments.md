@@ -4996,3 +4996,30 @@ The card, written before the run.
     each case and the same asking, and until then the CI's cases get a limit so
     that a hang is a failure in minutes, not a job that stands
 - **Cut-off**: 48 runs of each build, 60 seconds a run.
+
+**Result (2026-11-27): not reproduced; neither (a) nor (b) is shown. The CI's next
+hang will say where it is: every case has a limit of time now, and a case that
+passes it fails with every thread's call.**
+
+- A first round with each container held to one core counted four hangs that
+  were none: Go's toolchain compiles its library on a first `go run`, which one
+  core does not finish in 60 seconds; the threads had moved between two looks.
+  A wrong condition of mine, not a result.
+- With four cores each and 150 seconds, two at once: 24 runs of R059's build,
+  all end well. The CI's own second run of the same code (started by the card's
+  push) passed in 4 minutes.
+- R057's build was not run beside it: with none in 24 of the new build there is
+  nothing for it to be compared with (a count that changes no move).
+- So one hang in three CI runs of this code, none in 24 on the Mac. Whether
+  R059's changes have any part in it is not known. Go takes descriptors out of
+  its `epoll` by a pointer to a real event, which R059 no longer reads; the
+  kernel does not read it either.
+- What is done instead of waiting: `tests/container.rs` gives each case a limit
+  (300 seconds by the JIT, 1,800 by the other two ways; `R64M_CASE_SECONDS` says
+  another) and, past it, fails the case with every process and thread of the
+  container and the call each is in with its arguments (the cases run inside the
+  container, so it is all there to read), then ends the case's processes. Tried
+  with a limit of 3 seconds on the Go case: the failure lists `go`'s threads in
+  `futex` and `epoll_pwait` as they stood.
+- Owed: the same limit for the unit tests' step (R058's kind), which has only
+  the job's 120 minutes.
