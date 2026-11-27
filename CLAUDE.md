@@ -23,7 +23,7 @@ Work is done on a branch of its own, cut from `main` and named by its kind
 (`fix/...`, `perf/...`, `feat/...`, `docs/...`), and reaches `main` by a pull request.
 `main` is protected on GitHub (since 2026-11-27, when the repository was made public):
 no push straight to it, no forced push, no deletion; a pull request is merged only when
-the CI's job `linux` has passed on it. A pull request is opened when a step is committed
+the CI's jobs `tests` and `cases` have passed on it. A pull request is opened when a step is committed
 and verified; merging it is the owner's to do or to say. A branch whose pull request is
 merged is deleted.
 

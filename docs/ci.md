@@ -20,7 +20,7 @@ command (`xtask/src/main.rs`), so what the CI runs can be run by hand:
 | | macOS (arm64) | `cargo xtask test` |
 
 `main` is protected (since 2026-11-27): it changes only by a pull request, and a
-pull request is merged only when the job `linux` has passed on it; no push straight
+pull request is merged only when the jobs `tests` and `cases` have passed on it; no push straight
 to it, no forced push, no deletion, for the owner too. That is why a pull request of
 documents only is run as well.
 
@@ -37,11 +37,15 @@ r64m against them; it does not make them.
 
 ## How long a pull request waits
 
-Measured on 2026-11-27 (R061), the job `linux`: 3 minutes 16 seconds. Setting up
-(checkouts, `nasm`, `rustup`) 30 seconds; the unit tests, primitives and traces 70,
-mostly their build; the container cases 82, four suites at once (135 one at a time);
-loading the two built images 10. A container case that does not end fails after 300
-seconds with every thread's call (R060); the job itself has 120 minutes.
+Measured on 2026-11-27 (R062): 2 minutes 17 seconds, by two jobs side by side.
+`tests` (the unit tests, primitives and traces, the guest's programs) takes 1 minute
+46, most of it setting up and building; `cases` (the container cases, four suites at
+once by the JIT) 1 minute 58, after `images` has looked up its cache. As one job it
+was 3 minutes 16 (R061), and 4 minutes with the suites one at a time.
+
+A container case that does not end fails after 300 seconds with every thread's call
+(R060). The job `tests` has ten minutes at most, `cases` twenty (two hours for the
+weekly three ways).
 
 ## What it cost while the repository was private
 

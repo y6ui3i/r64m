@@ -5101,3 +5101,18 @@ The card, written before the run.
   - A job waits for a runner while the other runs → said with the time; that is
     GitHub's queue and not to be cut here
 - **Cut-off**: the pull request's own run and one re-run.
+
+**Result (2026-11-27): a pull request waits 2 minutes 17 seconds, where it waited
+3 minutes 16. Kept; `main` requires `tests` and `cases`.**
+
+- The pull request's own run, from its start to its last job's end: 2 minutes 17
+  seconds. `tests` 1 minute 46; `cases` 1 minute 58, begun 14 seconds after it
+  (it waits for `images`, which looks up its cache in 12).
+- The cases' job builds r64m again, as said; with that it is still the shorter
+  wait by a minute than the one job was.
+- `main`'s protection, as GitHub answers it after the change: required checks
+  `tests` and `cases`; the rest as it was (pull requests only, administrators
+  included, no approving review, no forced push, no deletion).
+- From 4 minutes this morning: 3 minutes 16 by four suites at once (R061), 2
+  minutes 17 by two jobs. What is left is the runner's start, `rustup`, and two
+  builds of r64m; not looked at further.

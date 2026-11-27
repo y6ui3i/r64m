@@ -5,8 +5,7 @@
 # repository), the guest's own programs, and the programs of x86-64 images by the
 # JIT, on arm64 Linux. Once a week, and when asked for by hand: the same three ways
 # (the interpreter, the JIT, the JIT checked block by block), and the host's tests
-# on macOS. (While the repository is private a minute of macOS counts as about
-# twelve of arm64 Linux: docs/ci.md.)
+# on macOS. How long it takes and what it once cost: docs/ci.md.
 name: CI
 
 on:
