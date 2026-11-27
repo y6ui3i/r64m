@@ -22,11 +22,11 @@ the clock of whoever waits:
 |---|---|
 | NetHack 3.6.7 built by `make` with GCC, one job (590 s under QEMU, 203 s) | 2.9 times as fast |
 | nginx over TLS in front of FastAPI: the container's start to its first answer | 3.0 |
-| the same: a request on a new connection | 2.3 |
-| the same: a request on a connection kept open | 1.8 |
+| the same: a request on a new connection | 2.4 |
+| the same: a request on a connection kept open | 1.9 |
 
-The aim is twice QEMU; the kept connection is under it (and has not been raced again
-since r64m's side of it was made 13.5% shorter). Rosetta, where there is one, is faster
+The aim is twice QEMU; the kept connection is under it (raced again on 2026-11-27,
+R067: 1.92, in a measure that moves by a quarter from one launch to the next). Rosetta, where there is one, is faster
 than both: it builds NetHack in 168 s. r64m is for where there is none.
 
 **How it is made, in short.** An interpreter for the integer instructions, SSE and SSE2

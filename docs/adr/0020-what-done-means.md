@@ -73,3 +73,13 @@ costs about 18 MB of r64m's own, which is the next thing to decide.
 goal's server holds 92 MB under load where the real machine holds 48, and stays
 there. Node's workers failing one run in ten was `clone` writing a thread's id
 late: fixed in R052.)
+
+**Where it stands after R051 to R067 (2026-11-27)**: the repository is public, and
+r64m is put into Docker and taken out by one command each (`cargo xtask install`,
+`uninstall`). Point 1 holds. Point 2 as before, raced again (R067): the start 3.05,
+a new connection 2.42, the build 2.9, a kept connection 1.92, under the aim. Point
+3: eleven images, about a hundred cases in the CI by the JIT on every pull request
+and by three ways weekly; threads and `fork` held to the real machine with musl
+and with glibc (R065); `apt-get install` runs. What load found and cases had not
+(R052, R055 to R057, R064, R066) is fixed and each has its case. Known not to
+work: robust mutexes.

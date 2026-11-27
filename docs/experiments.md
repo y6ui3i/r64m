@@ -5468,3 +5468,39 @@ The card, written before the run.
   - A measure that was past 2 is under it → something since R046 cost it: the
     builds between are raced for that measure alone (R054's, R064's, R066's)
 - **Cut-off**: three launches; nothing else running on the Mac meanwhile.
+
+**Result (2026-11-27): a kept connection 1.92 times QEMU: still under 2. The
+start 3.05, a new connection 2.42. My 2.13 was wrong.**
+
+Three launches, the two side by side; milliseconds by the client's clock:
+
+| launch | | the start | a new connection | a kept connection |
+|---|---|---|---|---|
+| 1 | QEMU | 4,473 | 18.09 | 4.59 |
+| | r64m | 1,667 | 7.48 | 1.95 |
+| 2 | QEMU | 3,419 | 18.21 | 3.68 |
+| | r64m | 1,103 | 8.56 | 1.92 |
+| 3 | QEMU | 3,245 | 19.27 | 5.16 |
+| | r64m | 1,065 | 7.71 | 2.67 |
+
+| the least of three | QEMU | r64m | QEMU / r64m | R046 |
+|---|---|---|---|---|
+| the start | 3,245 ms | 1,065 ms | 3.05 | 2.98 |
+| a new connection | 18.09 ms | 7.48 ms | 2.42 | 2.34 |
+| a kept connection | 3.68 ms | 1.92 ms | 1.92 | 1.84 |
+
+- By the card's rule (the least of three for each side) a kept connection is at
+  1.92. Launch by launch the two side by side stand at 2.35, 1.92 and 1.93: the
+  measure moves by a quarter between launches (QEMU's own from 3.68 to 5.16),
+  so the second figure after the point is not to be leaned on; that it is not
+  clearly past 2 is.
+- r64m's kept request is 1.92 ms where R046 had 1.95: the 13.5% R054 measured
+  with r64m alone (1.71 to 1.48 ms, another client and no QEMU beside it) does
+  not show here. Either the two servers side by side hide it, or something since
+  has taken it back (R066's routine is in every call that waits; R064's stores
+  are wider, which should help). Not known; not looked into here.
+- ADR 0020's point 2 stands as it stood: three of four past twice QEMU, the kept
+  connection under it.
+- Owed, as the card says, in a card of its own: where a kept request's 1.9 ms
+  goes now (the profile, R054's way), and R054's build beside today's for that
+  one measure, to say whether anything was lost.
