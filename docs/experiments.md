@@ -5597,3 +5597,32 @@ program that does nothing takes under a hundredth by either.
   rounds I had not checked (it was not the 30 I took it for): its numbers were
   thrown away. One run of each, both built anew with the same count, took four
   minutes.
+
+## R069: a whole build beside the host's own (2026-11-27)
+
+The owner, after R068: 「実際の仕事でも測っていいよ」 (the packages for an arm64
+image may be fetched). R068's primitives put r64m at 1.52 times native, in loops
+where nearly every instruction is in a block; what a user waits for is not that.
+
+The card, written before the run.
+
+- **Hypothesis**: NetHack 3.6.7 built by `make` with one job takes r64m three to
+  six times as long as the same build done natively on arm64: the compiler is
+  many short-lived processes (each one's blocks made anew), with system calls
+  and files between, none of which the primitives have. (R068's guess of mine
+  was wrong by a factor of two the other way; this one has as little under it.)
+- **What is changed from before** (R030, R031): the second side is not QEMU but
+  the host itself: the same Alpine 3.22.8 with the same packages by version
+  (GCC 14.2.0, the Dockerfile of `tools/images/gcc` built for arm64), the same
+  source prepared the same way, `make all` with one job; three builds of each,
+  one after the other, taking turns, nothing else running. The x86-64 side is
+  the image of R030, run by r64m as Docker runs it today.
+- **Next move for each result**:
+  - The ratio is had → written beside R068's as the second measure to optimise
+    by; with `--profile` of one compilation to say where r64m's share goes, if
+    the ratio is past 3
+  - Under 2 → r64m is near enough the host on real work that speed is no longer
+    the first thing; compatibility and long running are
+  - The native build fails where the x86-64 one does not → the image differs:
+    put right, not measured around
+- **Cut-off**: three builds of each.
