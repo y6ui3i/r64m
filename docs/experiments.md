@@ -4894,3 +4894,132 @@ known.**
   footing.
 - If it happens again with this in: the card's last move (the tests run on the
   runner by hand, with a limit and the processes listed).
+
+### R058, what the runner said (2026-11-27)
+
+The step added to the CI printed, on the pull request that carried it:
+`|/usr/lib/systemd/systemd-coredump %P %u %g %s %t 9223372036854775808 %h %d`, and a
+limit of 0. So on the runner a process that dies of a fault is piped to a program,
+whatever the limit (my understanding of the kernel: a limit of 0 does not stop a
+pipe; not tried). The guess has a footing; that this is what stood for 24 minutes
+is still not shown. With R058's change the children are not dumped at all.
+
+## R059: arguments a call does not use, every call (2026-11-27)
+
+The owner: 「総点検を始める」; the second of the three things R056 names. For ADR
+0020's point 3. R056's fault was one of a kind: r64m looked at a register the
+kernel does not look at for that call, and refused the call by it.
+
+The card, written before the run.
+
+- **Hypothesis**: there are more of the kind. Read through, the calls' table
+  (`src/sys.rs`, `src/sys/linux.rs`, 173 arms) shows two: `epoll_ctl` reads the
+  event its fourth argument points at for EPOLL_CTL_DEL too, where the kernel
+  ignores the pointer, and `shmctl` takes its third for an address for IPC_RMID,
+  which has none. Everything else either hands all six registers to the host's
+  kernel as they are (which ignores what it ignores) or reads an argument only
+  under the flag or command that gives it meaning. Reading can miss one.
+- **What is changed from before** (R056): not one call found by a hang, but all
+  of them asked at once: a program of the guest's (`guest/src/bin/unused.rs`)
+  makes each call twice, the registers the call does not use holding zero and
+  then all ones, and says whether the two answers are the same; the calls whose
+  arguments depend on a command are made with that command and a pointer that
+  points nowhere. What the real machine prints (hal) is what is right.
+- **Next move for each result**:
+  - r64m differs from hal on a line → that call is put right (the argument is
+    looked at only where the kernel looks at it), and the line stays as a case
+  - hal itself says "differs" for a call → my table of what the call uses is
+    wrong there: put right, not r64m
+  - No line differs beyond the two found by reading → those two are put right
+    and the program stays as the case for the kind
+- **Cut-off**: one program, one run on hal, one on r64m three ways; no waiting.
+
+**Result (2026-11-27): three faults, one of them not of the kind looked for. All
+put right; r64m prints the real machine's 55 lines by the interpreter, the JIT
+and the JIT checked.**
+
+- The real machine: 55 lines, every call ending the same with zero and with all
+  ones in the registers it does not use; the process ends with its code. So the
+  table of what each call uses is right as far as it goes.
+- r64m, before: the first 53 lines the same, and then r64m itself died of a
+  fault (139), by all three ways, at `epoll_ctl`.
+  1. **The last address of all was allowed** (`Mem::search`): an access at
+     FFFF_FFFF_FFFF_FFFFh had its end cut off at the top, which left a range of
+     no bytes, which nothing refuses; r64m then read at one byte before the
+     guest's memory and on into it, and the host's fault was r64m's own. Any
+     access of the guest's own to that address did the same by the interpreter.
+     Not the kind looked for; found because the pointer that points nowhere was
+     that address. A unit test now holds the highest addresses to a fault.
+  2. **`epoll_ctl`, EPOLL_CTL_DEL**: the event was read through the fourth
+     argument, which the kernel ignores for that command. Now not looked at.
+  3. **`shmctl`, IPC_RMID (and SHM_LOCK, SHM_UNLOCK)**: the third argument was
+     taken for an address. Now not looked at.
+- The two that reading had found were the two the run found; reading had not
+  found the first, and the run had no other.
+- The program stays as a case (`tests/guest/unused.txt`), run three ways with the
+  guest's other program.
+- What it does not cover: the calls it does not make (about 120 of the 173
+  arms, most of which hand all six registers to the host's kernel untouched);
+  `clone`'s arguments under its flags; and the calls that have the kernel write
+  the guest's memory where a page is closed for translated code (R057's note).
+- Tests: 122 unit tests; six container suites by the JIT (PostgreSQL, which
+  removes its segment, among them).
+
+## R060: the Go case never ends, once, on the CI (2026-11-27)
+
+The pull request that carries R059: its CI run stood for 41 minutes after the JVM's
+suite had passed, in the suite that comes next, Go's (`go version`, then `go run`
+of a program with goroutines), and was cancelled. The same code had passed that
+suite on the Mac. Go's toolchain is many processes with many threads each; it
+makes its own `futex`, `epoll` and `clone` calls, without a C library.
+
+The card, written before the run.
+
+- **Hypothesis**: one of two. (a) R059's change is at fault: Go takes a
+  descriptor out of its `epoll` with a pointer to an event, as it always did, and
+  something in the three changes answers it differently. (b) It was there before:
+  a wake lost or a signal not delivered under load, of R056's kind but by a
+  path the JVM does not take, met now by chance on a runner with four cores.
+- **What is changed from before**: nothing was looked for before. The condition is
+  made on the Mac: the case's `go run` in the same image, four at once in
+  containers held to four cores together, 60 seconds each at most, with R059's
+  build and with the build before it (R057's); a run that passes its time is
+  asked for every process and thread of its container and the call each waits
+  in, and the words those calls wait on (R056's way).
+- **Next move for each result**:
+  - Hangs with R059's build and none in as many runs with R057's → (a): the three
+    changes are taken out one at a time, by the call the hung threads wait in
+  - Hangs with both → (b): the state read says which wake or signal; the fix is
+    made where it is, and R059 is not held back by it longer than that takes
+  - No hang in 48 runs of each → the runner is the condition missing (four
+    cores, its kernel): the suite is run there by hand with a limit of time on
+    each case and the same asking, and until then the CI's cases get a limit so
+    that a hang is a failure in minutes, not a job that stands
+- **Cut-off**: 48 runs of each build, 60 seconds a run.
+
+**Result (2026-11-27): not reproduced; neither (a) nor (b) is shown. The CI's next
+hang will say where it is: every case has a limit of time now, and a case that
+passes it fails with every thread's call.**
+
+- A first round with each container held to one core counted four hangs that
+  were none: Go's toolchain compiles its library on a first `go run`, which one
+  core does not finish in 60 seconds; the threads had moved between two looks.
+  A wrong condition of mine, not a result.
+- With four cores each and 150 seconds, two at once: 24 runs of R059's build,
+  all end well. The CI's own second run of the same code (started by the card's
+  push) passed in 4 minutes.
+- R057's build was not run beside it: with none in 24 of the new build there is
+  nothing for it to be compared with (a count that changes no move).
+- So one hang in three CI runs of this code, none in 24 on the Mac. Whether
+  R059's changes have any part in it is not known. Go takes descriptors out of
+  its `epoll` by a pointer to a real event, which R059 no longer reads; the
+  kernel does not read it either.
+- What is done instead of waiting: `tests/container.rs` gives each case a limit
+  (300 seconds by the JIT, 1,800 by the other two ways; `R64M_CASE_SECONDS` says
+  another) and, past it, fails the case with every process and thread of the
+  container and the call each is in with its arguments (the cases run inside the
+  container, so it is all there to read), then ends the case's processes. Tried
+  with a limit of 3 seconds on the Go case: the failure lists `go`'s threads in
+  `futex` and `epoll_pwait` as they stood.
+- Owed: the same limit for the unit tests' step (R058's kind), which has only
+  the job's 120 minutes.

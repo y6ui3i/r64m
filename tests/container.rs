@@ -66,10 +66,68 @@ fn r64m() -> PathBuf {
 /// The cases that make files make them by fixed names: one of those at a time.
 static FILES: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// How long a case may take by the JIT, and by the two ways that take many times as
+/// long, before it is taken for one that will not end (R060: a case stood for 41
+/// minutes on the CI and the job with it; nothing said where).; `R64M_CASE_SECONDS` says
+/// another limit).
+fn most(way: &[&str]) -> std::time::Duration {
+    let asked = std::env::var("R64M_CASE_SECONDS").ok().and_then(|s| s.parse().ok());
+    std::time::Duration::from_secs(asked.unwrap_or(if way == ["--jit"] { 300 } else { 1800 }))
+}
+
+/// Every process there is (the container's: the cases run in one) and every thread
+/// of each: its state and the call it is in, with the call's arguments, as the
+/// kernel says them. What a case that does not end is waiting for.
+fn who_waits() -> String {
+    let mut said = String::new();
+    let mut processes: Vec<u32> = std::fs::read_dir("/proc").into_iter().flatten().flatten().filter_map(|e| e.file_name().to_str()?.parse().ok()).collect();
+    processes.sort();
+    for process in processes {
+        let read = |file: &str| std::fs::read_to_string(format!("/proc/{process}/{file}")).unwrap_or_default();
+        said += &format!("  process {process}: {}\n", read("cmdline").replace('\0', " ").chars().take(120).collect::<String>());
+        let mut threads: Vec<u32> = std::fs::read_dir(format!("/proc/{process}/task")).into_iter().flatten().flatten().filter_map(|e| e.file_name().to_str()?.parse().ok()).collect();
+        threads.sort();
+        for thread in threads {
+            let state = read(&format!("task/{thread}/stat")).rsplit(')').next().and_then(|rest| rest.split_whitespace().next().map(str::to_string)).unwrap_or_default();
+            said += &format!("    thread {thread} {state} {}\n", read(&format!("task/{thread}/syscall")).trim_end());
+        }
+    }
+    said
+}
+
 fn run(case: &Case, way: &[&str]) -> Result<(), Failed> {
+    use std::io::Read;
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
     let _one = case.command.iter().any(|a| a.contains("/tmp")).then(|| FILES.lock().unwrap_or_else(|e| e.into_inner()));
-    let out = Command::new(r64m()).args(way).args(&case.command).output().map_err(|e| format!("r64m: {e}"))?;
-    if out.stdout == case.output && out.status.code() == Some(case.code) {
+    // In a group of its own, so that all it started can be ended with it.
+    let mut child = Command::new(r64m()).args(way).args(&case.command).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).process_group(0).spawn().map_err(|e| format!("r64m: {e}"))?;
+    let (mut out, mut err) = (child.stdout.take().expect("piped"), child.stderr.take().expect("piped"));
+    let reads_out = std::thread::spawn(move || {
+        let mut all = Vec::new();
+        let _ = out.read_to_end(&mut all);
+        all
+    });
+    let reads_err = std::thread::spawn(move || {
+        let mut all = Vec::new();
+        let _ = err.read_to_end(&mut all);
+        all
+    });
+    let begun = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait().map_err(|e| format!("r64m: {e}"))? {
+            Some(status) => break status,
+            None if begun.elapsed() > most(way) => {
+                let waits = who_waits();
+                unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+                let _ = child.wait();
+                return Err(format!("{}\n  did not end in {} seconds. Every process and thread then, with the call each was in:\n{waits}", case.command.join(" "), most(way).as_secs()).into());
+            }
+            None => std::thread::sleep(std::time::Duration::from_millis(20)),
+        }
+    };
+    let (stdout, stderr) = (reads_out.join().unwrap_or_default(), reads_err.join().unwrap_or_default());
+    if stdout == case.output && status.code() == Some(case.code) {
         return Ok(());
     }
     Err(format!(
@@ -77,9 +135,9 @@ fn run(case: &Case, way: &[&str]) -> Result<(), Failed> {
         case.command.join(" "),
         String::from_utf8_lossy(&case.output),
         case.code,
-        String::from_utf8_lossy(&out.stdout),
-        out.status,
-        String::from_utf8_lossy(&out.stderr).trim_end()
+        String::from_utf8_lossy(&stdout),
+        status,
+        String::from_utf8_lossy(&stderr).trim_end()
     )
     .into())
 }
