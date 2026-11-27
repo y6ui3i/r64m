@@ -53,6 +53,12 @@ pub fn start() -> std::io::Result<()> {
     Ok(())
 }
 
+/// The places noted, as they were met (for a second reading of them, after `report`).
+pub fn places() -> Vec<usize> {
+    let n = COUNT.load(Ordering::Relaxed).min(MOST);
+    PLACES.iter().take(n).map(|p| p.load(Ordering::Relaxed)).collect()
+}
+
 /// Stops the timer and prints what was noted: `generated` says of a place whether it
 /// is in generated code, `anchor` is the address of a function whose name is known,
 /// and `guest` says of a place in generated code which block it is in (by the guest's

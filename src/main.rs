@@ -396,6 +396,27 @@ fn main() {
     lines.flush().ok();
     if profile {
         let hot = profile::report(jit::is_generated, main as *const () as usize, |pc| blocks.as_ref().and_then(|b| b.where_is(pc)));
+        // The time in generated code by the kind of the guest's instruction it was
+        // in, with how often each kind was translated and into how many of the
+        // host's instructions on average (R071). "block" is a block's own
+        // beginning.
+        if let Some(made) = blocks.as_ref() {
+            let costs = made.costs(&mem);
+            let mut samples: std::collections::HashMap<Vec<u8>, u64> = std::collections::HashMap::new();
+            for pc in profile::places() {
+                if jit::is_generated(pc) {
+                    if let Some(kind) = made.kind_at(pc, &mem) {
+                        *samples.entry(kind).or_insert(0) += 1;
+                    }
+                }
+            }
+            let mut kinds: Vec<_> = costs.iter().map(|(kind, &(times, words))| (samples.get(kind).copied().unwrap_or(0), times, words, kind)).collect();
+            kinds.sort_by(|a, b| b.0.cmp(&a.0).then(b.2.cmp(&a.2)).then(a.3.cmp(b.3)));
+            for (met, times, words, kind) in kinds {
+                let name = if kind.is_empty() { "block".to_string() } else { kind.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ") };
+                eprintln!("r64m: cost: {met:>6} samples, translated {times:>7} times, {:>5.1} each: {name}", words as f64 / times.max(1) as f64);
+            }
+        }
         // The code of the blocks met most often, as words an assembler can be given,
         // with where each of the guest's instructions begins in them.
         for &(rip, count) in hot.iter().take(40) {

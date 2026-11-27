@@ -5775,3 +5775,104 @@ What follows, each a card of its own, in the order I would take them:
    returns, operands in memory with an index).
 3. Blocks kept between processes (a build starts the same compiler 143 times
    and translates it anew each time: 8% here, more for small files).
+
+## R071: what each kind of instruction costs (2026-11-28)
+
+The owner: 「マージして進める」. R070 left an average: 5.5 of the host's
+instructions for each of the guest's, and 70% of a compilation's time in
+generated code with no hot place. An average cannot be optimised.
+
+The card, written before the run.
+
+- **Hypothesis**: a few kinds of instruction are most of the cost: by time, the
+  conditional jumps and what sets the flags before them, calls and returns, and
+  loads and stores with an index; and what stands at a block's beginning and end
+  for every block (the look for a signal, the count, the way out) is a tenth or
+  more by itself. A guess: the table is to say.
+- **What is changed from before**: a tool, no change to what is generated. With
+  `--profile` r64m now also says, for the time in generated code, which of the
+  guest's instructions each sample was in, by kind (prefixes and opcode, as
+  `--jit-why` names them; a block's own beginning apart), and for each kind how
+  often it was translated and into how many of the host's instructions on
+  average.
+- **Next move for each result**:
+  - A few kinds hold half the samples or more → those, by what they are made
+    into (their code read), in the order of samples times what could be saved
+  - The samples are as flat by kind as they are by block → the saving is in what
+    every instruction pays (how registers and flags are kept), not in kinds: the
+    conventions are looked at
+  - A block's beginning is a tenth or more → that first: it is paid 4.9 million
+    times in this compilation whatever the block holds
+- **Cut-off**: the tool, one run on the compilation of R070, the table.
+
+**Result (2026-11-28): the cost is in going from one block to another, not in
+the instructions. Of the time in generated code, 37 in a hundred is at blocks'
+beginnings and another 24 in calls, returns and jumps; an ordinary instruction is
+one to two of the host's. The 5.5 of R070 is mostly code that is not run: nine
+instructions kept beside every way out of every block.**
+
+The compilation of R070 again, with the new table (`--profile`): 2352 samples in
+generated code. The kinds with most:
+
+| kind | samples | share | translated | the host's instructions for each |
+|---|---|---|---|---|
+| a block's own beginning | 877 | 37.3% | 117,431 | 1.6 |
+| RET (`c3`) | 228 | 9.7% | 15,497 | 35.8 |
+| CALL (`e8`) | 205 | 8.7% | 59,733 | 44.4 |
+| MOV r64, r/m64 (`48 8b`) | 126 | 5.4% | 146,667 | 2.1 |
+| MOV r/m64, r64 (`48 89`) | 75 | 3.2% | 133,697 | 1.4 |
+| MOV r32, r/m32 (`8b`) | 53 | 2.3% | 42,453 | 2.3 |
+| CALL through a register or memory (`ff fa`) | 49 | 2.1% | 3,377 | 53.6 |
+| CMP r/m8, imm8 (`80 ff`) | 41 | 1.7% | 21,974 | 7.0 |
+| MOVZX from a byte (`0f b6`) | 32 | 1.4% | 18,271 | 2.1 |
+| JMP short (`eb`) | 30 | 1.3% | 9,046 | 30.7 |
+| JMP (`e9`) | 27 | 1.1% | 21,766 | 28.9 |
+| JMP through a register or memory (`ff fc`) | 27 | 1.1% | 1,429 | 48.4 |
+| MOVZX from a word (`0f b7`) | 27 | 1.1% | 17,002 | 1.7 |
+| JE short (`74`) | 25 | 1.1% | 43,908 | 1.8 |
+| JNE short (`75`) | 24 | 1.0% | 29,805 | 4.2 |
+
+(A block's last instruction is counted to where the next block begins, so what
+stands after it is in its number: that is why RET, CALL and the jumps show 30 to
+50.)
+
+Read in the code of the blocks with most samples:
+
+- An ordinary instruction is what it should be: a move 1.4 to 2.1, a test 1.1, a
+  conditional jump 1.3 to 1.8.
+- A RET is ten instructions on its way: the return address loaded and the stack
+  pointer moved, the count, the address made into a place in the table of
+  16,384, two loads from it, a compare, and the host's own `ret` to the block
+  (R046). A jump through memory is twelve, ending in `br`.
+- **Every way out of a block has nine instructions standing after the block**:
+  the count added, a branch (to the next block once the two are joined, which
+  they nearly all are), and seven more that hand the address to r64m when they
+  are not joined, never run again after the joining. A block with eight ways out
+  has 63 instructions after its last one. A conditional jump taken goes by two
+  of them (the count and the branch) on its way to the next block.
+- So of the 7.35 million instructions made, the larger part is these: the code
+  that runs is about a third of the 29 MB, with the rest between its pieces.
+
+What the samples at blocks' beginnings are, I do not know and say so: 37% of
+the time on what is one or two instructions (the look for a signal, where a
+block has one). A sample lands on the instruction the processor was waiting to
+run: after a branch it had guessed wrongly, or for code it had to fetch. Both
+are costs of arriving at a block; which of the two it is, this machine's VM
+gives no counter to say. My reading: with the code that runs spread over three
+times the memory it needs, fetching it is a large part. That is a guess until
+something is changed and timed.
+
+By the card's lines, two hold: a block's beginning is far more than a tenth, and
+a few kinds hold more than half. What follows, each its own card:
+
+1. The seven instructions of a way out that are not run after joining go out
+   of the way: one place for them all, or a short form (a call to a shared
+   piece with the address after it), so that the code that runs lies together.
+   Timed on this compilation and on the whole build; this is the test of the
+   guess above.
+2. A conditional jump taken to a joined block goes straight there, the count
+   kept some other way than by two instructions on the way.
+3. Then calls and returns, by what is left of them in the table.
+
+- The tool stays: `--profile` prints the table (`r64m: cost:` lines).
+- Unit tests 123; the profile is not run by any case (it prints addresses).
