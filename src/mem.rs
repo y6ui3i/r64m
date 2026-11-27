@@ -1007,6 +1007,16 @@ mod tests {
             let pid = libc::fork();
             assert!(pid >= 0, "fork");
             if pid == 0 {
+                // The child dies by the kernel's own doing and nothing else: no
+                // handler of r64m's (another test may have put the JIT's in place
+                // for the whole process), and no core of it taken, which is the
+                // host's business and can take as long as the host likes (R058: on
+                // the CI's runner, where a crash is piped to a program, two of
+                // these tests once did not end in 24 minutes).
+                #[cfg(target_os = "linux")]
+                libc::prctl(libc::PR_SET_DUMPABLE, 0 as libc::c_ulong);
+                libc::signal(libc::SIGSEGV, libc::SIG_DFL);
+                libc::signal(libc::SIGBUS, libc::SIG_DFL);
                 if write {
                     ptr::write_volatile(p, 1);
                 } else {

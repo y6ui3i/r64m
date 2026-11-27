@@ -11,7 +11,7 @@ name: CI
 
 on:
   push:
-    branches: [main, port]
+    branches: [main]
     paths-ignore: ["docs/**", "**.md", "LICENSE"]
   # Every pull request, one of documents only too: `main` takes a pull request
   # only when the job `linux` has passed on it, and a run that never starts never
@@ -68,6 +68,10 @@ jobs:
           path: g64m
       - run: sudo apt-get update -q && sudo apt-get install -y -q nasm
       - run: rustup target add aarch64-unknown-linux-musl x86_64-unknown-linux-musl
+      # What this runner does with a process that dies of a fault (R058: some of
+      # the tests make a child die so, on purpose).
+      - name: How the runner takes a crash
+        run: cat /proc/sys/kernel/core_pattern; ulimit -c
       - name: Unit tests, primitives, traces
         run: R64M_G64M=$GITHUB_WORKSPACE/g64m cargo xtask test
       - name: The guest's own programs
