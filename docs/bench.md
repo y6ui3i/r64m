@@ -9,7 +9,13 @@ round, so that the two meet the same load; then it says the ratio of their media
 cargo xtask bench                                  # every work, this tree's r64m
 cargo xtask bench --against old/r64m compile build # two works, this tree's against another
 cargo xtask bench --rounds 3 start                 # fewer or more rounds than the work's own
+cargo xtask bench --cache --against old/r64m       # with a cache of translations, warm
 ```
+
+With `--cache` the container is given `R64M_CACHE` (ADR 0021, R084): each r64m runs
+every work once untimed to fill the cache, said as `cold` with its time, and the
+rounds are warm. An r64m from before R084 ignores the variable, so `--against` it
+compares warm with no cache at all.
 
 | work | what is timed | image | rounds |
 |---|---|---|---|

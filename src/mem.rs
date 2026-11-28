@@ -682,7 +682,9 @@ impl Mem {
     /// May the guest write any of `[start, end)`? (By what it mapped and protected:
     /// the mark of translated code does not change the answer.)
     pub fn guest_may_write(&self, start: u64, end: u64) -> bool {
-        self.regions.iter().any(|r| r.start < end && start < r.end && r.prot & W != 0)
+        // The list is in order: from the first region that ends after `start` (R087;
+        // it was read whole for every block made).
+        self.regions[self.first_ending_after(start)..].iter().take_while(|r| r.start < end).any(|r| r.prot & W != 0)
     }
 
     /// What is known of `addr`, in words (`--faults`): the region it lies in by

@@ -59,6 +59,10 @@ pub struct Built {
     /// of the flags need not be written (R013). A store there forgets the block as a
     /// store to its own instructions does.
     pub seen: Option<(u64, u64)>,
+    /// Each instruction read past the block's own to say that flags are dead, as
+    /// the guest's addresses from and to (R084): within `seen`, but only what was
+    /// read, for a cache of translations to compare (ADR 0021, point 2).
+    pub read: Vec<(u64, u64)>,
     /// The landings of returns (R046): for each CALL in the block, its `bl` (counted
     /// from the block's start) and the guest's return address, which the host
     /// instruction after the `bl` is a way out to. Where another block has the same
@@ -573,12 +577,15 @@ fn goes_on(blocks_do: bool, block: u64, target: u64, room: usize) -> bool {
 
 /// The reading on from an instruction that sets the flags, to find whether anything
 /// can read them before they are written whole again.
-struct Scan<'a> {
+struct Scan<'a, 'b> {
     m: &'a Mem,
     /// How many instructions more may be read before giving up.
     budget: usize,
     /// The lowest and one past the highest address read.
     span: (u64, u64),
+    /// Each instruction read, from and to, noted where a cache of translations is in
+    /// use (R084): with none, nothing is noted, and nothing is allocated (R086).
+    reads: Option<&'b mut Vec<(u64, u64)>>,
     /// A conditional jump of the block was passed that the host's flags answer: the
     /// flags are dead as a record, but the host's are asked for.
     asked: bool,
@@ -595,7 +602,7 @@ struct Scan<'a> {
     within: bool,
 }
 
-impl Scan<'_> {
+impl Scan<'_, '_> {
     /// Are the flags dead from `at` on: written whole on every way before anything
     /// reads them? `host` is what the host's flags can say for a conditional jump, and
     /// `room` how many instructions more the block the question is asked for may hold:
@@ -614,6 +621,9 @@ impl Scan<'_> {
             };
             let next = at.wrapping_add(ins.len as u64);
             self.span = (self.span.0.min(at), self.span.1.max(next));
+            if let Some(reads) = self.reads.as_deref_mut() {
+                reads.push((at, next));
+            }
             let inside = room > 0;
             if self.within && !inside {
                 return false;
@@ -798,6 +808,7 @@ struct Emit<'a> {
     skip: bool,
     /// What was read to decide that, for all the instructions so far.
     seen: Option<(u64, u64)>,
+    read: Vec<(u64, u64)>,
     /// The record that the jump now to be translated writes on the ways that need it.
     later: Option<Later>,
     /// The instruction being translated must leave the host's flags as x86's would
@@ -829,13 +840,20 @@ impl Emit<'_> {
     /// Are the flags dead from `at` on (`Scan::dead`)? What is read to say so becomes
     /// part of what the block rests on, and must lie within a few pages of it.
     fn dead(&mut self, at: u64, host: Option<HostFlags>, room: usize) -> bool {
-        let mut scan = Scan { m: self.m, budget: 48, span: (at, at), asked: false, block: self.rip, goes_on: !self.exact, within: self.exact };
-        if !scan.dead(at, host, room, 2) {
+        // What the scan reads is noted straight into the block's own list, and taken
+        // back off it if the answer is not used (R086).
+        let noted = self.read.len();
+        let reads = (super::cache::on() || cfg!(test)).then_some(&mut self.read);
+        let mut scan = Scan { m: self.m, budget: 48, span: (at, at), reads, asked: false, block: self.rip, goes_on: !self.exact, within: self.exact };
+        let dead = scan.dead(at, host, room, 2);
+        let (asked, (lo, hi)) = (scan.asked, scan.span);
+        if !dead {
+            self.read.truncate(noted);
             return false;
         }
-        self.host = scan.asked;
-        let (lo, hi) = scan.span;
+        self.host = asked;
         if lo < self.rip.saturating_sub(0x2000) || hi > self.rip.saturating_add(0x4000) {
+            self.read.truncate(noted);
             return false;
         }
         self.seen = Some(match self.seen {
@@ -1890,7 +1908,7 @@ pub fn translate(m: &Mem, rip: u64, exact: bool) -> Option<Built> {
 /// The same; with `ordered`, for a process that has more than one thread: every load
 /// and store of the guest's memory keeps x86's order between threads.
 pub fn translate_as(m: &Mem, rip: u64, exact: bool, ordered: bool) -> Option<Built> {
-    let mut e = Emit { w: Vec::new(), ordered, seg: 0, flags: None, m, rip, exact, skip: false, seen: None, later: None, host: true, bails: Vec::new(), now: (0, 0), pads: Vec::new(), outs: Vec::new(), lookups: Vec::new(), exits: COUNTING.load(std::sync::atomic::Ordering::Relaxed).then(Vec::new) };
+    let mut e = Emit { w: Vec::new(), ordered, seg: 0, flags: None, m, rip, exact, skip: false, seen: None, read: Vec::new(), later: None, host: true, bails: Vec::new(), now: (0, 0), pads: Vec::new(), outs: Vec::new(), lookups: Vec::new(), exits: COUNTING.load(std::sync::atomic::Ordering::Relaxed).then(Vec::new) };
     let mut starts = Vec::new();
     let mut taken: Vec<Taken> = Vec::new();
     let mut sse = false;
@@ -2549,7 +2567,7 @@ pub fn translate_as(m: &Mem, rip: u64, exact: bool, ordered: bool) -> Option<Bui
         words = first;
     }
     let counted = entry.map(|entry| (entry, e.exits.take().unwrap_or_default()));
-    Some(Built { words, starts, end: at, seen: e.seen, pads: e_pads, lookups: e_lookups, counted, body })
+    Some(Built { words, starts, end: at, seen: e.seen, read: e.read, pads: e_pads, lookups: e_lookups, counted, body })
 }
 
 impl Emit<'_> {

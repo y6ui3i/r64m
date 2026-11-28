@@ -6640,3 +6640,241 @@ within one in a hundred; the first of each given):
   the interpreter and the checked JIT (counting) passed.
 - RDTSC: a program now sees time go on where it did not count. Nothing in the cases
   read it so as to differ.
+
+## R084: translations kept across processes, in `R64M_CACHE` (2026-11-28)
+
+ADR 0021, accepted with (a): 「(a) R64M_CACHEで」. R079: `cc1` makes blocks for 19% of
+its time, in each of the build's 137 processes, the same blocks every time; and until a
+block is made its code is interpreted (`HOT` = 4).
+
+The card, written before the run.
+
+- **Hypothesis**: with the blocks of one process kept and used by the next, a warm
+  NetHack build no longer pays for making `cc1`'s blocks nor for their first arrivals,
+  and is faster by a tenth or more on Graviton (R079's 41.6 s of making in 377 s).
+  `hello` and `start`, which are almost all starting, gain more as a share. A cold
+  build pays for writing the files, by no more than a hundredth.
+- **What is changed from before**: `R64M_CACHE=dir` (taken out of the guest's
+  environment and handed to children as r64m's option `--cache`). One file in it
+  for each program file (its device, inode, size and time) and r64m's own build; in
+  it, each block's `Built` as the translator gave it, with the guest's bytes it was
+  made from. A kept block is used at an address's first arrival if its bytes are the
+  guest's now, byte for byte; otherwise nothing changes. Blocks made and not kept
+  are added as the process ends or execs (a new file renamed over the old). Never
+  with `--jit-check` or `--jit-count`, never for code the guest may write; how it
+  was made (ordered, counted) is part of the key.
+- **Next move for each result**:
+  - Warm faster by a tenth or more, cold no slower than a hundredth → kept; then the
+    file's size and a limit, and whether (c) is worth its hiding
+  - Warm faster by less → what the warm build still spends (account: making,
+    interpreter, loading the file) decides the next card
+  - A case fails warm → a dependency of translation not in the key: found, put in
+- **Cut-off**: the unit tests (one that keeps and reuses, one whose bytes changed);
+  the container cases by the JIT twice with one cache, cold then warm; on Graviton
+  the four works with no cache, cold and warm, beside main, and the instance stopped
+  after.
+
+Found on the way (2026-11-28, the Mac, Docker's arm64 VM):
+
+- The first file for `cc1` was 148 MB, 93 of it guest bytes: `seen` is the lowest and
+  highest address the scan for dead flags read, and a few blocks' span is 20 KB or
+  more. The scan now notes each instruction it reads (`Built::read`), and a block
+  keeps its own bytes and those pieces only: 64 MB, and less to compare.
+- One compilation, three rounds with one cache: the same output each time;
+  `cc1` translated 1,356,799 instructions, then 3,108, then 126.
+- All suites by the JIT twice with one cache: every case passed but one,
+  `keytool -genkeypair`, which failed cold and warm. Over four runs of the Java suite
+  with a warm cache it failed three times (the JVM's `hs_err`: SIGSEGV, si_code
+  SI_KERNEL, in `ld-musl` +0x4694a, in a native call from `BigInteger.passesMillerRabin`).
+  With no cache it passed four times in four.
+- Each kept block was translated again beside it and compared (`R64M_CACHE_CHECK`):
+  none differed, and keytool still failed two runs in four. A kept block is the
+  block; what differs is when it is used. A kept block was taken at an address's
+  first arrival, where without a cache it is made at the fourth (`HOT`).
+- With no cache and `--jit-hot=1` (every block made at its first arrival), keytool
+  failed two runs in four with this branch and one in four with `main` built apart:
+  a fault of the JIT's that is in `main` and shows when blocks are made early. Its
+  own card follows (R085).
+- So a kept block is now taken where it would have been made (the fourth arrival),
+  never before: the Java suite passed six runs in six (one cold, five warm). What the
+  cache saves is the translating, not yet the interpreted arrivals before it.
+- All suites by the JIT twice with one cache after that: every case passed, cold and
+  warm (Java two of two each time). The cache was 236 MB for all the suites.
+
+**Result (2026-11-28, Graviton c7g.large, `cargo xtask bench`, the branch beside
+`main` round by round): warm, the four works are faster by 11% to 49%; but with no
+cache the branch is slower than `main` by 2% to 10%, and a lone cold process pays
+for writing its file. Not kept as it stands.**
+
+With no cache (`R64M_CACHE` not set), medians:
+
+| work | `main` | this | `main` / this |
+|---|---|---|---|
+| compile | 5.625 s | 5.746 s | 0.979 |
+| hello | 0.232 s | 0.256 s | 0.905 |
+| build | 365.3 s | 381.8 s | 0.957 |
+| start | 0.110 s | 0.123 s | 0.895 |
+
+With the cache warm (each r64m ran the work once first, untimed, the `cold` run),
+medians, and the cold run beside `main`'s first run:
+
+| work | `main` | this, warm | `main` / warm | `main`'s first | this, cold |
+|---|---|---|---|---|---|
+| compile | 5.494 s | 4.966 s | 1.106 | 5.496 s | 5.651 s |
+| hello | 0.230 s | 0.162 s | 1.420 | 0.229 s | 0.299 s |
+| build | 366.6 s | 316.3 s | 1.159 | 363.4 s | 327.8 s |
+| start | 0.105 s | 0.071 s | 1.487 | 0.106 s | 0.203 s |
+
+- Warm, the card's first half holds: a tenth or more on every work, the build 15.9%
+  (50 s, more than R079's 41.6 s of making, as the card guessed from what is no longer
+  translated). `hello` and `start`, almost all starting, gain most.
+- Cold, a build already gains (327.8 s against 363.4 s): its 137 `cc1`s fill the cache
+  for each other. A lone process does not: `start` cold is 1.9 times `main`, `hello`
+  1.3, `compile` 1.03. That is the writing out of the file (a merge and a write of all
+  that was made, at exit), which the card bounded by a hundredth. It is far over.
+- With no cache, slower by 2% to 10%. The card did not foresee it. With no cache
+  nothing is opened, read or written (`cache::open` is not called); what is in every
+  translation is the scan's note of what it read (`Built::read`, one vector per block),
+  and the build is otherwise a different binary. Each run is one launch, `start`'s
+  and `hello`'s slow side has outliers (spread 118% and 28%), but `build`, 4.3% over
+  three rounds of spread 1.6%, is not noise. Not yet known which; found first, on
+  the Mac by `--jit-stats` and on Graviton by the counters.
+- Owed, in this order: the cost with no cache found and taken away (the branch must
+  be no slower than `main` with the cache off); the cold write made cheap (what is
+  written, and when: perhaps only the new blocks appended, not the whole file merged);
+  then the measure again. The instance ran 17:40 to 19:07, 1 h 27 min.
+
+## R086: why R084's branch is slower than `main` with no cache (2026-11-28)
+
+R084 measured the branch 2% to 10% slower than `main` with `R64M_CACHE` not set
+(`build` 4.3%, spread 1.6%). With no cache nothing is opened, looked up or written.
+What every process still does differently: each scan for dead flags notes the
+instructions it read in a vector of its own (`Scan::reads`, allocated on its first
+push, grown, then copied into `Emit::read`), and `Built` carries it to `keep_block`.
+
+- **Hypothesis**: those vectors, one allocation and a copy for each scan (that is,
+  nearly each instruction translated), make translating dearer by enough to be the
+  difference: making blocks is about 11% of a build, so 4% would be making dearer by
+  a third or more.
+- **What is changed from before**: nothing in r64m first. `main` and the branch,
+  built alike, on the Mac, `--jit-stats` on `compile` (one `cc1`) and `start`: time
+  making blocks per instruction translated, and each work's whole time, five
+  rounds each, in turn.
+- **Next move for each result**:
+  - Making per instruction dearer by a quarter or more on the branch → the notes made
+    only when a cache is in use (or kept without allocating: in one vector of the
+    block's, by index), and measured again
+  - Making the same, the whole time still longer → not the translator: where the
+    time goes (interpreter, run, start) by `--jit-stats` and, on Graviton, the
+    counters; and the two binaries' layout
+  - Neither slower on the Mac → Graviton only: its counters, `main` and the branch
+- **Cut-off**: the five rounds of two works by two builds, tonight.
+
+**Result (2026-11-28, the Mac, Docker's arm64 VM): the scan's notes were the cost.
+Made only with a cache, into the block's own list, making blocks is `main`'s again.**
+
+Medians of five rounds, each round `main` then the branch:
+
+| | `main` | branch as R084 | branch now |
+|---|---|---|---|
+| `compile`, making blocks | 0.384 s | 0.457 s (+19%) | 0.383 s |
+| `compile`, whole (with `docker run`) | 3.457 s | 3.555 s | 3.569 s (`main` 3.534) |
+| 20 `python3 -c pass`, whole | 1.571 s | 1.695 s (+8%) | 1.543 s (`main` 1.609) |
+
+- Making dearer by 19%, under the card's quarter, but it is the whole of the
+  difference: 0.07 s of making against 0.07 to 0.10 s of `compile`'s whole. Each scan
+  for dead flags made a vector of its own, grown as it read, then copied: one or more
+  allocations for nearly each instruction translated.
+- Now a scan notes what it reads only where a cache is in use (and in the tests), and
+  straight into the block's `read`, cut back if its answer is not used. Where the
+  answer is used is unchanged (the host's flags taken as before the span is weighed).
+- With a cache, unchanged: `cc1` three times, 1,356,813 instructions translated, then
+  0, then 0, the same output each time. The unit tests pass.
+- Owed still (R084): the lone cold process's write; then Graviton again, with no
+  cache, cold and warm.
+
+## R087: the cold process's write made cheap (2026-11-28)
+
+R084 on Graviton: with the cache cold, a lone `python3 -c pass` took 0.203 s against
+`main`'s 0.106, `hello` 0.299 against 0.229. On the Mac (R086's build, a Docker
+volume, ten starts each): no cache 70 ms, cold 89 ms, warm 47 ms. Timed inside r64m,
+a cold `python3`'s 12,540 blocks cost 12 ms to keep (each serialized as it is made,
+one allocation for the entry and one for each piece of guest bytes), 3 ms to merge
+(the whole file built again in memory) and 3 ms to write 7.3 MB. Seen besides:
+
+- Every process that made even one new block writes its whole file again: the
+  second `python3`, with 72 new blocks, wrote 7.3 MB; a warm `cc1` in the build
+  writes 64 MB for its few hundred, 137 times.
+- A forked child holds its parent's new blocks and writes them again at its
+  `execve`, as the parent does at its end; and the list of new blocks is behind a
+  lock that a fork does not hold (R064's way to a child that never starts).
+
+- **Hypothesis**: those costs are the cold run's, and they can be made small: entries
+  written straight into one buffer; the file written as its new index, its old data
+  as it lies (one slice of the mapping) and the new data after it, nothing copied in
+  memory; a file written again only when the new blocks are a sixty-fourth or more of
+  what it holds; a child forgetting its parent's new blocks, the lock held over the
+  fork. Then cold costs no more than a few percent of a lone start over no cache,
+  and warm is no slower.
+- **What is changed from before**: those four, in `cache.rs` and `fork`.
+- **Next move for each result**:
+  - Cold within 5% of no cache on the Mac → Graviton: no cache, cold and warm beside
+    `main` (R084's measure again), then the PR
+  - Still dearer → what is left (by the same timing inside r64m) decides
+  - A case fails → the format or the index wrong: the unit test widened to it
+- **Cut-off**: the unit tests; the Mac's ten starts and `hello`, none, cold, warm;
+  the container cases cold and warm with one cache; Graviton tonight.
+
+Found on the way (2026-11-28, the Mac, Docker's arm64 VM, the host busy: load 12,
+so no times taken here are leaned on):
+
+- Inside the making of blocks there was more than the keeping: with a cache in use,
+  `keep_block` asked whether the guest may write a block's pages twice, and that
+  question read the whole list of regions each time (`guest_may_write`; `python3`
+  has hundreds). Now it is asked once, by a search in the ordered list, which helps
+  `main`'s one asking too.
+- All suites by the JIT twice with one cache: every case passed, but one file of the
+  cache was 1.1 GB (all of R084's was 236 MB). Where a kept block did not fit the
+  guest's bytes, the block made again was added under the same key; the file's
+  entry won, so the new one's bytes were written and pointed to by nothing, and the
+  stale one was tried and refused in every process after. Now the new entry wins,
+  and a file that drops an entry is written entry by entry, so that nothing is kept
+  that nothing points to. A unit test adds it. All suites again: 235 MB.
+- In that second run `java -version` failed once, cold (its output not kept). The
+  Java suite then passed 28 times in 28 (6 cold, 6 warm, 6 with no cache, then 10
+  cold, two at once). One in 29 with a cache; R085's fault of the JIT's is the
+  likely one, but not shown.
+
+**Result (2026-11-28, Graviton c7g.large, R084's measure again, R087's build beside
+`main`): with no cache the branch is `main`'s speed again; warm it is faster by 10% to
+47%; a build from an empty cache is faster by 14%. A lone process from an empty cache
+is not shown to cost little: the bench's cold line cannot say it.**
+
+| work | no cache: `main` / this | warm: `main` / this | cold: this | cold: `main`'s first |
+|---|---|---|---|---|
+| compile | 1.008 | 1.102 (5.008 s) | 5.616 s | 5.453 s |
+| hello | 1.005 | 1.433 (0.161 s) | 0.281 s | 0.232 s |
+| build | 1.019 | 1.161 (318.4 s) | 319.6 s | 371.5 s |
+| start | 1.000 | 1.469 (0.072 s) | 0.187 s | 0.107 s |
+
+- R086 holds on Graviton: with no cache the four are within 2% of `main`, none slower
+  (R084's branch: 2% to 10% slower).
+- Warm as R084 (1.106, 1.420, 1.159, 1.487): the write made cheap did not move it.
+- A build from an empty cache: 319.6 s against 371.5 s (R084: 327.8 s).
+- The cold line is biased, and that is found here: in the run with no cache at all,
+  this side's slowest round is always far out (`start` 0.244 s against a median of
+  0.107, `hello` 0.300 against 0.228, `compile` 5.797 against 5.513), and `main`'s
+  never is. The side named first runs first in a fresh container, and its first
+  process pays for what is not yet in the host's memory (r64m's 14 MB, the image's
+  files). The cold run is exactly that first process, and `main`'s "first" is its
+  second. So `start` cold 0.187 s is less than this side's first run with no cache
+  (0.244 s), and the cost of writing is somewhere under what the line says. The
+  Mac's ten in a row (busy host) said about 10% for `python3`.
+- Against the card of R087: the Mac's 5% for cold not shown (its host was busy), and
+  on Graviton the line cannot show it. Kept all the same, because the cache is used
+  only when asked for, no cache is `main`'s speed, and the work the cache is for (a
+  build, the same programs again) gains cold and warm.
+- Owed: the bench's cold measured fairly (a first, untimed run of each side before
+  either's cold run; or the cold run taken in a container of its own after the
+  files are read), then the lone cold write, if it is still there, made smaller;
+  R085. The instance ran 20:05 to 21:31, 1 h 26 min (today 2 h 53 min in all).
