@@ -6519,3 +6519,71 @@ quarter to three eighths of the time. Their ratios are what to read.)
 - So the next cut, by these counters: less code and hotter code together. Fewer host
   instructions for each guest one (2.48 here), and the blocks that run often placed
   together, apart from those that ran a few times.
+
+## R083: no count of instructions unless it is asked for (2026-11-28)
+
+The owner: 「とりあえず、アイデアとして覚えておいて、今は最適化を進めよう」. R082's counters:
+the front end waits four times as long as native's and the instruction cache misses
+six times as often; less code and fewer instructions are the cut. Every way out of a
+block begins with an addition to the count of instructions run (x27), 842 million of
+them in a compilation (R076), one in every block's code. The count is r64m's own
+bookkeeping: `--count`, `--jit-stats`, `--jit-check` and the tests read it; and one
+thing of the guest's does, RDTSC, which r64m answers with it.
+
+The card, written before the run.
+
+- **Hypothesis**: the count is written only when something will read it (one of the
+  options that say it, the checker, the tests); otherwise no way out adds to it, and
+  RDTSC answers from the host's own counter of time, as a real processor's TSC goes on
+  with time and not with instructions. Then a compilation runs a twentieth fewer
+  instructions and its code is smaller, and it is faster on Graviton by three in a
+  hundred or more.
+- **What is changed from before**: a switch (`cpu::COUNT`) on by those options, by
+  `R64M_ACCOUNT`, and in the tests; the translator's seven additions to x27 made only
+  under it; RDTSC from the host's virtual counter (nanoseconds) where it is off. The
+  look for a signal (x27's top bit) is as it was.
+- **Next move for each result**:
+  - Faster by three in a hundred or more on Graviton, the counts as said → kept
+  - Fewer instructions and no faster → the additions were free (they depend on
+    nothing): said, and kept only if the code is smaller and nothing is slower
+  - A case fails → something read the count that was not known to: found, put right
+- **Cut-off**: the tests, the 62 programs four ways (with `--count`, so counting), the
+  suites by the JIT (without); on Graviton `cargo xtask bench --against` the build
+  before, and the counters of one compilation; the instance stopped after.
+
+Results (2026-11-28). Graviton (c7g.large), `cargo xtask bench --this` this branch
+`--against` the r64m of R082 (main before this card); the instance ran 42 minutes and was
+stopped.
+
+| work | before (median) | after (median) | before / after | spreads (before, after) |
+|---|---|---|---|---|
+| `compile` (8) | 5.736 s | 5.617 s | 1.021 | 1.0%, 5.3% (one slow run of eight) |
+| `hello` (10) | 0.233 s | 0.232 s | 1.005 | 1.9%, 32% (one slow run) |
+| `build` (3) | 381.07 s | 375.93 s | 1.014 | 0.6%, 0.7% |
+| `start` (10) | 0.108 s | 0.108 s | 1.007 | 3.0%, 131% (one slow run) |
+
+The processor's counters, one compilation, each r64m twice in turn (the two runs agree
+within one in a hundred; the first of each given):
+
+| | before | after | after / before |
+|---|---|---|---|
+| instructions | 26.54 billion | 25.71 billion | 0.969 |
+| cycles | 14.73 billion | 14.50 billion | 0.984 |
+| L1 instruction cache misses | 865 million | 838 million | 0.969 |
+| front end stalled (cycles) | 5.56 billion | 5.53 billion | 0.995 |
+| back end stalled (cycles) | 1.78 billion | 1.72 billion | 0.964 |
+| branches | 4.76 billion | 4.77 billion | 1.003 |
+
+- 0.83 billion fewer instructions where R076 counted 0.84 billion additions: the
+  additions are gone and nothing else moved.
+- Faster by two in a hundred (`compile`) and one and a half (`build`), more than the
+  spreads, and nothing slower; but not the three the card guessed. An addition that
+  depends on nothing costs less than an instruction's share of the time: the
+  instructions fell by 3.1%, the cycles by 1.6–2.0%.
+- The instruction cache misses fell as the code did (3%), and the front end's waiting
+  hardly at all: what stalls it is not the size of the exits.
+- Kept: faster everywhere, and the count is still whole wherever it is read. The tests,
+  the 62 programs four ways (counting), the container cases by the JIT (not counting),
+  the interpreter and the checked JIT (counting) passed.
+- RDTSC: a program now sees time go on where it did not count. Nothing in the cases
+  read it so as to differ.
