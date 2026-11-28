@@ -6519,3 +6519,34 @@ quarter to three eighths of the time. Their ratios are what to read.)
 - So the next cut, by these counters: less code and hotter code together. Fewer host
   instructions for each guest one (2.48 here), and the blocks that run often placed
   together, apart from those that ran a few times.
+
+## R083: no count of instructions unless it is asked for (2026-11-28)
+
+The owner: 「とりあえず、アイデアとして覚えておいて、今は最適化を進めよう」. R082's counters:
+the front end waits four times as long as native's and the instruction cache misses
+six times as often; less code and fewer instructions are the cut. Every way out of a
+block begins with an addition to the count of instructions run (x27), 842 million of
+them in a compilation (R076), one in every block's code. The count is r64m's own
+bookkeeping: `--count`, `--jit-stats`, `--jit-check` and the tests read it; and one
+thing of the guest's does, RDTSC, which r64m answers with it.
+
+The card, written before the run.
+
+- **Hypothesis**: the count is written only when something will read it (one of the
+  options that say it, the checker, the tests); otherwise no way out adds to it, and
+  RDTSC answers from the host's own counter of time, as a real processor's TSC goes on
+  with time and not with instructions. Then a compilation runs a twentieth fewer
+  instructions and its code is smaller, and it is faster on Graviton by three in a
+  hundred or more.
+- **What is changed from before**: a switch (`cpu::COUNT`) on by those options, by
+  `R64M_ACCOUNT`, and in the tests; the translator's seven additions to x27 made only
+  under it; RDTSC from the host's virtual counter (nanoseconds) where it is off. The
+  look for a signal (x27's top bit) is as it was.
+- **Next move for each result**:
+  - Faster by three in a hundred or more on Graviton, the counts as said → kept
+  - Fewer instructions and no faster → the additions were free (they depend on
+    nothing): said, and kept only if the code is smaller and nothing is slower
+  - A case fails → something read the count that was not known to: found, put right
+- **Cut-off**: the tests, the 62 programs four ways (with `--count`, so counting), the
+  suites by the JIT (without); on Graviton `cargo xtask bench --against` the build
+  before, and the counters of one compilation; the instance stopped after.
