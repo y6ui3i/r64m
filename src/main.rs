@@ -242,6 +242,10 @@ fn main() {
     let profile = option("--profile");
     // What the interpreter still ran, by instruction: for deciding what to translate.
     let jit_why = option("--jit-why");
+    // For measuring: counters in generated code, and what ran by kind (R076).
+    if option("--jit-count") {
+        jit::translate::COUNTING.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     // For the tests: every block made the first time its address is arrived at.
     let jit_now = option("--jit-now");
     // For measuring: every block with ordered loads and stores, as a process with
@@ -444,6 +448,17 @@ fn main() {
         for (key, n) in by_count.into_iter().take(20) {
             let bytes: Vec<String> = key.iter().map(|b| format!("{b:02x}")).collect();
             eprintln!("r64m: why, where no block begins: {n:>12} {}", bytes.join(" "));
+        }
+    }
+    if jit::translate::COUNTING.load(std::sync::atomic::Ordering::Relaxed) {
+        if let Some(made) = blocks.as_ref() {
+            let (rows, begun) = jit::run::count_report(&made.counted);
+            let (ran, host): (u64, u64) = rows.iter().fold((0, 0), |a, r| (a.0 + r.1, a.1 + r.2));
+            eprintln!("r64m: count: {ran} instructions run in blocks ({} by r64m's own count), {host} of the host's, {:.2} each; blocks begun {begun}, {:.1} instructions each", made.stats.in_blocks, host as f64 / ran.max(1) as f64, ran as f64 / begun.max(1) as f64);
+            for (kind, n, h) in rows.iter().take(40) {
+                let name: Vec<String> = kind.iter().map(|b| format!("{b:02x}")).collect();
+                eprintln!("r64m: count: {:>5.1}% of the host's {:>12} run {:>6.2} each: {}", 100.0 * *h as f64 / host.max(1) as f64, n, *h as f64 / (*n).max(1) as f64, name.join(" "));
+            }
         }
     }
     if let (true, Some(blocks)) = (jit_stats, &blocks) {

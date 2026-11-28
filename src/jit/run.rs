@@ -90,6 +90,46 @@ impl Block {
     }
 }
 
+/// A block as `--jit-count` keeps it (R076): its counters, and for each of its
+/// instructions the length of its code and its kind.
+pub struct Counted {
+    entry: u32,
+    exits: Vec<(u32, u32)>,
+    lens: Vec<u32>,
+    kinds: Vec<Vec<u8>>,
+}
+
+/// What `--jit-count` says: for each kind of instruction how often it ran and how
+/// many of the host's instructions that was; and in all, how often blocks were
+/// begun.
+pub fn count_report(blocks: &[Counted]) -> (Vec<(Vec<u8>, u64, u64)>, u64) {
+    let counts = std::ptr::addr_of!(translate::COUNTS) as *const u64;
+    let read = |c: u32| unsafe { counts.add(c as usize).read() };
+    let mut by_kind: HashMap<Vec<u8>, (u64, u64)> = HashMap::new();
+    let mut begun = 0;
+    for b in blocks {
+        let entered = read(b.entry);
+        begun += entered;
+        // Instruction i ran each time the block was begun but for the ways out
+        // taken after fewer than i + 1 instructions.
+        let mut left = vec![0u64; b.lens.len() + 1];
+        for &(c, n) in &b.exits {
+            left[(n as usize).min(b.lens.len())] += read(c);
+        }
+        let mut gone = 0;
+        for i in 0..b.lens.len() {
+            gone += left[i];
+            let ran = entered.saturating_sub(gone);
+            let k = by_kind.entry(b.kinds[i].clone()).or_default();
+            k.0 += ran;
+            k.1 += ran * b.lens[i] as u64;
+        }
+    }
+    let mut rows: Vec<_> = by_kind.into_iter().map(|(k, (n, h))| (k, n, h)).collect();
+    rows.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(&b.0)));
+    (rows, begun)
+}
+
 /// What is counted for `--jit-stats`.
 #[derive(Default)]
 pub struct Stats {
@@ -175,6 +215,8 @@ pub struct Jit {
     /// been put out of the table since it last grew.
     lookups: Vec<u64>,
     put_out: u64,
+    /// With `--jit-count`: each block made, for the report (R076).
+    pub counted: Vec<Counted>,
     /// Code that leaves for Rust with RIP as generated code had it in x16: what an
     /// empty place of the table sends to, so that no place can send astray.
     miss: u64,
@@ -266,6 +308,7 @@ impl Jit {
             table: vec![[0, 0]; 1 << TABLE_BITS].into_boxed_slice(),
             lookups: Vec::new(),
             put_out: 0,
+            counted: Vec::new(),
             miss: 0,
             stats: Stats::default(),
         })
@@ -655,7 +698,7 @@ impl Jit {
         if self.writes.get(&page).is_some_and(|&n| n >= GIVEN_UP) {
             return false;
         }
-        let Some(Built { mut words, starts, end, seen, pads, lookups }) = translate_as(m, rip, self.check, self.ordered) else {
+        let Some(Built { mut words, starts, end, seen, pads, lookups, counted, body }) = translate_as(m, rip, self.check, self.ordered) else {
             return false;
         };
         if std::env::var_os("R64M_JIT_DUMP").is_some() {
@@ -685,6 +728,12 @@ impl Jit {
             }
         };
         self.lookups.extend(lookups.iter().map(|&at| code as u64 + 4 * at as u64));
+        // With `--jit-count`: what each of its instructions is and how long its code is.
+        if let Some((entry, exits)) = counted {
+            let lens = (0..starts.len()).map(|i| starts.get(i + 1).map_or(body, |n| n.0) - starts[i].0).collect();
+            let kinds = starts.iter().map(|&(_, at)| key_of(m, at)).collect();
+            self.counted.push(Counted { entry, exits, lens, kinds });
+        }
         // If the guest may write any page of what the block rests on, the host pages
         // those lie in may not be written from now, and are counted as holding code
         // (ADR 0016: what the guest may not write needs no guard).

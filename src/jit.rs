@@ -25,7 +25,7 @@
 #[allow(dead_code)]
 pub mod a64;
 pub mod run;
-mod translate;
+pub mod translate;
 
 use crate::cpu::Cpu;
 use std::io;

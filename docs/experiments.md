@@ -6183,3 +6183,62 @@ The card, written before the run.
   - What runs between arrivals is short (under ten instructions) → what every
     arrival costs is the next card, whatever the kinds say
 - **Cut-off**: the tool, its check on the compilation, the table.
+
+**Result (2026-11-28): the measure holds (its total is r64m's own count less 0.12
+in a hundred), and it says three things R071 could not.**
+
+GCC's `cc1 -O2` on `apply.c` with `--jit-count`:
+
+- 7,042 million of the guest's instructions counted by the counters, against 7,050
+  million by r64m's own count (the difference is what ran in blocks left by a way
+  not counted: a fault, a repeat; it is 0.12 in a hundred).
+- **2.49 of the host's instructions for each of the guest's that ran.** R070's 5.5
+  was of what was made, not of what ran: most of what is made is ways out that are
+  not run.
+- **Blocks were begun 842 million times: 8.4 instructions each.** Under the card's
+  ten: what every arrival at a block costs is the next thing to look at, whatever
+  the kinds say.
+
+By kind (share of the host's instructions that ran; how often; how many each):
+
+| kind | share | ran (millions) | host each |
+|---|---|---|---|
+| RET (`c3`) | 10.8% | 135 | 14.0 |
+| MOV r64, r/m64 (`48 8b`) | 6.7% | 558 | 2.1 |
+| CALL (`e8`) | 6.4% | 125 | 9.0 |
+| MOV r/m64, r64 (`48 89`) | 4.4% | 606 | 1.3 |
+| CMP r/m8, imm8 (`80 ff`) | 3.4% | 97 | 6.1 |
+| MOV r32, r/m32 (`8b`) | 2.6% | 220 | 2.1 |
+| PUSH rbp, POP rbp (`55`, `5d`) | 5.2% | 300 | 3.0 |
+| MOV r/m32, r32 (`89`) | 2.5% | 354 | 1.2 |
+| CMP rax, imm8 (`48 83 f8`) | 2.2% | 130 | 3.0 |
+| JE short (`74`) | 2.0% | 280 | 1.3 |
+| CMP AL, imm8 (`3c`) | 1.8% | 66 | 4.9 |
+| TEST r/m8, imm8 (`f6 f8`) | 1.6% | 44 | 6.4 |
+| JMP through memory or a register (`ff fc`) | 1.5% | 16 | 16.9 |
+| CALL through memory or a register (`ff fa`) | 1.2% | 10 | 21.8 |
+| SUB rax, FS:[...] (the stack protector's check, `64 48 2b`) | 1.2% | 27 | 8.0 |
+
+(The full list is what `--jit-count` prints. The count for a block's last
+instruction runs to the end of the block's own code, so a RET's 14 holds the four
+instructions of its way to r64m on a miss, which are not run when the table has
+the address: what runs is ten.)
+
+Grouped: calls and returns 20 in a hundred of what the host ran (285 million of
+them, 9 to 22 instructions each); PUSH and POP 13 (755 million, 3 each, where POP
+of a register other than RSP needs 2); comparisons and tests of a byte or a word
+6 (5 to 6 each, where a register of 32 or 64 bits needs 1 to 3); the conditional
+jumps 6.5 at 1.1 to 1.4, which is what they should be.
+
+The order to cut, by this measure:
+
+1. What every arrival at a block costs (842 million arrivals): the count added and
+   the branch at every way out, the look at a block that a cycle goes through.
+   Longer blocks (going on past a jump to a block already made) would arrive less
+   often; or the count kept another way.
+2. Calls and returns: a RET of ten instructions and a CALL of nine.
+3. PUSH and POP: a POP of a register in two.
+4. Comparisons of a byte and a word.
+
+Each its own card; the measure stays (`--jit-count`, for measuring only: without it
+nothing generated changes).
