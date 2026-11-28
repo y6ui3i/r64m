@@ -6081,3 +6081,43 @@ shift's record of 32 bits (0.62 million), JO after a multiplication's of 64 bits
 subtraction's. Each is a way out, the interpreter for one instruction, and a way
 in. The card follows; the owner asked meanwhile for a picture of how an
 instruction goes, which comes first.
+
+## R075: conditional jumps after a shift and a multiplication, in the block (2026-11-28)
+
+The owner: 「マージして戻る」. What the count before this card found: of 2.73
+million leavings of generated code at a way out not yet joined, 2.48 million
+arrived at a conditional jump that no block can begin with, because the host's
+flags do not say what it asks. The two largest: JE and JNE after a shift (0.76
+million: SHR of 32 bits, then 64), JO after an unsigned multiplication of 64
+bits (0.37 million). A shift is translated with arm64's shifts, which set no
+flags, and a multiplication with `umulh` and `mul`; both leave a record and say
+the host's flags are nothing. So the block ends before the jump, the jump is the
+interpreter's at every pass, and the way back into generated code is by Rust.
+
+The card, written before the run.
+
+- **Hypothesis**: the host's flags can say these two at the cost of one
+  instruction. After a shift by a constant that is not zero, of 32 or 64 bits,
+  x86's ZF and SF are the result's: an `ands` of the result with itself gives the
+  host's Z and N, which answer JE, JNE, JS and JNS. After MUL (unsigned) CF and
+  OF are both "the upper half is not zero": a `subs` of the D register less
+  nothing gives the host's Z, which answers JO, JNO, JB and JAE. With those the
+  jumps are in their blocks; the leavings at a conditional jump fall by 1.1
+  million or more, and the compilation is faster by a tenth (2.48 million of
+  them cost, by R073's 125 ns, about 0.3 s of 3).
+- **What is changed from before**: two kinds of host flags (`ZeroSign`,
+  `HighHalf`) the translator knows, the instruction after the shift and the
+  MUL, and what a jump asks of each. Where a record was written for a jump that
+  is now answered by the host, it is not written (the scan of what is dead sees
+  the host answers).
+- **Next move for each result**:
+  - The leavings fall as said and the compilation by a twentieth or more →
+    kept; what is left of 2.48 million is counted again for the next kinds
+    (the jumps after a subtraction that begin blocks)
+  - They fall and the time does not → the interpreter's single step was cheap
+    and the arrivals were not: said, and kept for the leavings
+  - A case fails → the condition is wrong for some width or count: found by
+    the case, put right
+- **Cut-off**: unit tests of each jump after each instruction against the
+  interpreter; the 62 programs four ways; the suites by the JIT; the
+  compilation eight rounds; the build three times.
