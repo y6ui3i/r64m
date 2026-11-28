@@ -358,7 +358,14 @@ fn fork(c: &mut Cpu, m: &mut Mem, s: &mut Sys, flags: u64, stack: u64, parent_ti
         // runs, and a second thread asking for it here would wait for ever: the
         // first form of this did, at Go's first child.)
         let _err = std::io::stderr().lock();
-        unsafe { libc::fork() }
+        // And the blocks made for the cache of translations, which the child forgets:
+        // they are its parent's to write (R087).
+        let mut kept = crate::jit::cache::held();
+        let pid = unsafe { libc::fork() };
+        if let (0, Some(kept)) = (pid, kept.as_mut()) {
+            kept.forget();
+        }
+        pid
     };
     match pid {
         pid if pid < 0 => {

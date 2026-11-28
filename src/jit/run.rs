@@ -745,22 +745,21 @@ impl Jit {
     /// kept for the next process too, if a cache is in use and the guest may not
     /// write its code.
     fn keep_block(&mut self, rip: u64, m: &mut Mem, built: Built, fresh: bool) -> bool {
-        if fresh && super::cache::on() && !self.check {
-            let (from, to) = built.seen.map_or((rip, built.end), |(lo, hi)| (lo.min(rip), hi.max(built.end)));
-            if !m.guest_may_write(from & !(PAGE - 1), to.next_multiple_of(PAGE)) {
-                super::cache::keep(super::cache::key(rip, self.ordered), rip, &built, m);
-            }
+        // What the block rests on: its own instructions, and what was read past them
+        // to leave a record of the flags unwritten. A store to any of it forgets it.
+        let (from, to) = built.seen.map_or((rip, built.end), |(lo, hi)| (lo.min(rip), hi.max(built.end)));
+        // Whether the guest may write any page of it (ADR 0016), asked once (R087).
+        let guarded = m.guest_may_write(from & !(PAGE - 1), to.next_multiple_of(PAGE));
+        if fresh && !guarded && super::cache::on() && !self.check {
+            super::cache::keep(super::cache::key(rip, self.ordered), rip, &built, m);
         }
-        let Built { mut words, starts, end, seen, pads, lookups, counted, body, .. } = built;
+        let Built { mut words, starts, end, pads, lookups, counted, body, .. } = built;
         if std::env::var_os("R64M_JIT_DUMP").is_some() {
             // For looking at what was made: each block's address, its instructions'
             // addresses, and its code as words an assembler can be given.
             eprintln!("block {rip:#x}..{end:#x} guest {:x?}", starts.iter().map(|s| s.1).collect::<Vec<_>>());
             eprintln!("{}", words.iter().map(|w| format!(".inst {w:#010x}")).collect::<Vec<_>>().join("\n"));
         }
-        // What the block rests on: its own instructions, and what was read past them
-        // to leave a record of the flags unwritten. A store to any of it forgets it.
-        let (from, to) = seen.map_or((rip, end), |(lo, hi)| (lo.min(rip), hi.max(end)));
         // Its lookups take as many bits as the table has now.
         let bits = self.table.len().trailing_zeros();
         if bits != TABLE_BITS {
@@ -789,7 +788,6 @@ impl Jit {
         // those lie in may not be written from now, and are counted as holding code
         // (ADR 0016: what the guest may not write needs no guard).
         let pages = m.host_pages(from, to);
-        let guarded = m.guest_may_write(from & !(PAGE - 1), to.next_multiple_of(PAGE));
         for page in (from & !(PAGE - 1)..to).step_by(PAGE as usize) {
             self.known.insert(page);
         }
@@ -2106,6 +2104,19 @@ mod tests {
         let file = cache::merged(&file, 1, &[(cache::key(CODE + 4, false), cache::entry(CODE + 4, &second, &m).unwrap())]).unwrap();
         assert_eq!(cache::find_in(&file, 2, cache::key(CODE, false), &m).map(|b| b.words), Some(built.words));
         assert_eq!(cache::find_in(&file, 2, cache::key(CODE + 4, false), &m).map(|b| b.end), Some(second.end));
+        // Other code at the same address, made again and added: the new entry is
+        // taken, and the file keeps no bytes of the one it replaced (R087: such
+        // orphans grew one file to 1.1 GB).
+        let mut other = across;
+        other[1] = 0xd0;
+        let o = guest(&other, &[]);
+        let again = cache::entry(CODE, &translate(&o, CODE, false).unwrap(), &o).unwrap();
+        let before = file.len();
+        let file = cache::merged(&file, 2, &[(cache::key(CODE, false), again.clone())]).unwrap();
+        assert!(cache::find_in(&file, 2, cache::key(CODE, false), &o).is_some(), "the new entry");
+        assert!(cache::find_in(&file, 2, cache::key(CODE, false), &m).is_none(), "not the old");
+        assert!(cache::find_in(&file, 2, cache::key(CODE + 4, false), &m).is_some(), "the other block kept");
+        assert_eq!(file.len(), before - e.len() + again.len());
     }
 
     #[test]

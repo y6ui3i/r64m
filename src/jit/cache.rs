@@ -6,13 +6,17 @@
 //! guest's bytes it was made from. A kept block is used only if those bytes are the
 //! guest's now, byte for byte. The blocks a process made that the file did not have
 //! are added as it ends or execs: a new file is written and renamed over the old.
+//!
+//! A file: `MAGIC`, how many blocks; the index, a (key, offset) for each block in
+//! the order of the keys; then the entries, in any order (R087: the old ones as
+//! they lay, the new ones after them).
 
 use super::translate::Built;
 use crate::mem::Mem;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
-const MAGIC: &[u8; 8] = b"r64mtc02";
+const MAGIC: &[u8; 8] = b"r64mtc03";
 
 /// The cache of this process: where its file is, and what the file held when the
 /// process began (mapped, never written; a rename by another leaves it as it was).
@@ -25,9 +29,31 @@ struct Kept {
 }
 
 static KEPT: OnceLock<Kept> = OnceLock::new();
-/// The blocks made in this process that the file did not have, each written out as
-/// it will be in the file, with its key.
-static NEW: Mutex<Vec<(u64, Vec<u8>)>> = Mutex::new(Vec::new());
+/// The blocks made in this process that the file did not have, written out as they
+/// will be in the file, one after another into one buffer (R087).
+pub(crate) struct New {
+    data: Vec<u8>,
+    /// Each block's key and where its entry begins in `data`, in the order made.
+    index: Vec<(u64, usize)>,
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+impl New {
+    /// A child of a fork forgets its parent's new blocks: the parent writes them.
+    pub(crate) fn forget(&mut self) {
+        self.data = Vec::new();
+        self.index = Vec::new();
+    }
+}
+
+static NEW: Mutex<New> = Mutex::new(New { data: Vec::new(), index: Vec::new() });
+
+/// The new blocks, held over a fork, that no other thread holds them as the child
+/// is copied (R064's way to a child that waits for ever; R087).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn held() -> Option<MutexGuard<'static, New>> {
+    NEW.lock().ok()
+}
 
 /// The key of a block: its address, and how it was made (ADR 0021, point 3).
 pub fn key(rip: u64, ordered: bool) -> u64 {
@@ -192,16 +218,27 @@ pub fn keep(key: u64, rip: u64, b: &Built, m: &Mem) {
     if !on() || b.counted.is_some() {
         return;
     }
-    if let (Some(e), Ok(mut new)) = (entry(rip, b, m), NEW.lock()) {
-        new.push((key, e));
+    if let Ok(mut new) = NEW.lock() {
+        let at = new.data.len();
+        if put(&mut new.data, rip, b, m) {
+            new.index.push((key, at));
+        }
     }
 }
 
 /// A block's entry, as `read` takes it. None if its bytes cannot be read.
+#[cfg(test)]
 pub(crate) fn entry(rip: u64, b: &Built, m: &Mem) -> Option<Vec<u8>> {
+    let mut e = Vec::new();
+    put(&mut e, rip, b, m).then_some(e)
+}
+
+/// A block's entry written at the end of `e`; false, and `e` as it was, if its
+/// bytes cannot be read.
+fn put(e: &mut Vec<u8>, rip: u64, b: &Built, m: &Mem) -> bool {
+    let begun = e.len();
     let pieces = pieces(rip, b);
     let (lo, hi) = b.seen.unwrap_or((1, 0));
-    let mut e = Vec::with_capacity(48 + 4 * b.words.len() + 12 * (b.starts.len() + b.pads.len() + pieces.len()) + 4 * b.lookups.len() + 64);
     for v in [b.end, lo, hi] {
         e.extend_from_slice(&v.to_le_bytes());
     }
@@ -209,11 +246,15 @@ pub(crate) fn entry(rip: u64, b: &Built, m: &Mem) -> Option<Vec<u8>> {
         e.extend_from_slice(&v.to_le_bytes());
     }
     for (from, to) in pieces {
-        let mut bytes = vec![0u8; (to - from) as usize];
-        m.read_bytes(from, &mut bytes).ok()?;
+        let len = (to - from) as usize;
         e.extend_from_slice(&from.to_le_bytes());
-        e.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-        e.extend_from_slice(&bytes);
+        e.extend_from_slice(&(len as u32).to_le_bytes());
+        let at = e.len();
+        e.resize(at + len, 0);
+        if m.read_bytes(from, &mut e[at..]).is_err() {
+            e.truncate(begun);
+            return false;
+        }
     }
     for w in &b.words {
         e.extend_from_slice(&w.to_le_bytes());
@@ -225,55 +266,105 @@ pub(crate) fn entry(rip: u64, b: &Built, m: &Mem) -> Option<Vec<u8>> {
     for l in &b.lookups {
         e.extend_from_slice(&l.to_le_bytes());
     }
-    Some(e)
+    true
 }
 
 /// Writes out what this process added (as it ends or execs): the file's blocks and
 /// the new ones, in a new file renamed over the old. A block another process wrote
-/// meanwhile may be lost (the last rename wins): it is made again, never wrong.
+/// meanwhile may be lost (the last rename wins): it is made again, never wrong. Not
+/// written again for a few blocks more: unless the new are a sixty-fourth of what the
+/// file holds, they are made again next time instead (R087).
 pub fn save() {
     let Some(k) = KEPT.get() else { return };
     let new = match NEW.lock() {
-        Ok(mut new) => std::mem::take(&mut *new),
+        Ok(mut new) => std::mem::replace(&mut *new, New { data: Vec::new(), index: Vec::new() }),
         Err(_) => return,
     };
-    if new.is_empty() {
+    if new.index.is_empty() || new.index.len() * 64 < k.n {
         return;
     }
-    let Some(out) = merged(k.bytes, k.n, &new) else { return };
+    let Some((head, parts)) = layout(k.bytes, k.n, &new) else { return };
     let tmp = k.file.with_extension(format!("{}", std::process::id()));
-    if std::fs::write(&tmp, &out).is_ok() && std::fs::rename(&tmp, &k.file).is_err() {
+    let written = std::fs::File::create(&tmp).and_then(|f| {
+        use std::io::Write;
+        let mut f = std::io::BufWriter::with_capacity(1 << 20, f);
+        f.write_all(&head)?;
+        for part in parts {
+            f.write_all(part)?;
+        }
+        f.flush()
+    });
+    if written.is_err() || std::fs::rename(&tmp, &k.file).is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
 }
 
-/// A file of blocks: those of the file `b` (holding `n`) and the new ones, by key;
-/// for a key in both, the file's. None if `b` is not whole.
-pub(crate) fn merged(b: &[u8], n: usize, new: &[(u64, Vec<u8>)]) -> Option<Vec<u8>> {
-    let mut all: Vec<(u64, &[u8])> = Vec::with_capacity(n + new.len());
+/// How long the entry at the start of `e` is.
+fn entry_len(e: &[u8]) -> Option<usize> {
+    let (nr, nw, ns, np, nl) = (u32_at(e, 28)? as usize, u32_at(e, 32)? as usize, u32_at(e, 36)? as usize, u32_at(e, 40)? as usize, u32_at(e, 44)? as usize);
+    let mut at = 48;
+    for _ in 0..nr {
+        at += 12 + u32_at(e, at + 8)? as usize;
+    }
+    let len = at + 4 * nw + 12 * (ns + np) + 4 * nl;
+    (len <= e.len()).then_some(len)
+}
+
+/// A file of the blocks of the file `b` (holding `n`) and the new ones: its header
+/// and index, and the pieces of data to follow it. For a key in both, the new
+/// entry: it was made because the file's did not fit the guest's bytes (R087).
+/// Mostly the file's data as it lies then the new data, nothing copied; where an
+/// entry of the file's is dropped, each entry kept is written on its own, so that
+/// what nothing points to is not kept. None if `b` is not whole.
+fn layout<'a>(b: &'a [u8], n: usize, new: &'a New) -> Option<(Vec<u8>, Vec<&'a [u8]>)> {
+    let start = 16 + 16 * n;
+    let old = if n == 0 { &[][..] } else { b.get(start..)? };
+    // (key, which: 0 new, 1 the file's, where its entry is in its own data)
+    let mut all: Vec<(u64, u8, usize)> = Vec::with_capacity(n + new.index.len());
     for i in 0..n {
         let at = 16 + 16 * i;
-        let (key, off) = (u64_at(b, at)?, u64_at(b, at + 8)?);
-        let next = if i + 1 < n { u64_at(b, at + 24)? } else { b.len() as u64 };
-        all.push((key, b.get(off as usize..next as usize)?));
+        let off = (u64_at(b, at + 8)? as usize).checked_sub(start)?;
+        all.push((u64_at(b, at)?, 1, off));
     }
+    all.extend(new.index.iter().map(|&(key, at)| (key, 0, at)));
+    // Stable: of a key twice, the new entry, and of two new ones the first made.
+    all.sort_by_key(|&(key, which, _)| (key, which));
+    let had = all.len();
+    all.dedup_by_key(|&mut (key, _, _)| key);
+    let whole = all.len() == had;
+    let data = (16 + 16 * all.len()) as u64;
+    let mut head = Vec::with_capacity(16 + 16 * all.len());
+    head.extend_from_slice(MAGIC);
+    head.extend_from_slice(&(all.len() as u64).to_le_bytes());
+    let mut parts = Vec::new();
+    let mut off = data;
+    for &(key, which, at) in &all {
+        let from = if which == 1 { old } else { &new.data[..] };
+        let here = if whole {
+            data + if which == 1 { 0 } else { old.len() as u64 } + at as u64
+        } else {
+            let e = from.get(at..)?;
+            let len = entry_len(e)?;
+            parts.push(&e[..len]);
+            off += len as u64;
+            off - len as u64
+        };
+        head.extend_from_slice(&key.to_le_bytes());
+        head.extend_from_slice(&here.to_le_bytes());
+    }
+    if whole {
+        parts = vec![old, &new.data[..]];
+    }
+    Some((head, parts))
+}
+
+#[cfg(test)]
+pub(crate) fn merged(b: &[u8], n: usize, new: &[(u64, Vec<u8>)]) -> Option<Vec<u8>> {
+    let mut each = New { data: Vec::new(), index: Vec::new() };
     for (key, e) in new {
-        all.push((*key, e.as_slice()));
+        each.index.push((*key, each.data.len()));
+        each.data.extend_from_slice(e);
     }
-    // Stable: a key in both keeps the file's, which is first.
-    all.sort_by_key(|&(key, _)| key);
-    all.dedup_by_key(|&mut (key, _)| key);
-    let mut out = Vec::with_capacity(16 + 16 * all.len() + all.iter().map(|e| e.1.len()).sum::<usize>());
-    out.extend_from_slice(MAGIC);
-    out.extend_from_slice(&(all.len() as u64).to_le_bytes());
-    let mut off = (16 + 16 * all.len()) as u64;
-    for (key, e) in &all {
-        out.extend_from_slice(&key.to_le_bytes());
-        out.extend_from_slice(&off.to_le_bytes());
-        off += e.len() as u64;
-    }
-    for (_, e) in &all {
-        out.extend_from_slice(e);
-    }
-    Some(out)
+    let (head, parts) = layout(b, n, &each)?;
+    Some([&[&head[..]][..], &parts].concat().concat())
 }

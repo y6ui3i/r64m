@@ -6792,3 +6792,55 @@ Medians of five rounds, each round `main` then the branch:
   0, then 0, the same output each time. The unit tests pass.
 - Owed still (R084): the lone cold process's write; then Graviton again, with no
   cache, cold and warm.
+
+## R087: the cold process's write made cheap (2026-11-28)
+
+R084 on Graviton: with the cache cold, a lone `python3 -c pass` took 0.203 s against
+`main`'s 0.106, `hello` 0.299 against 0.229. On the Mac (R086's build, a Docker
+volume, ten starts each): no cache 70 ms, cold 89 ms, warm 47 ms. Timed inside r64m,
+a cold `python3`'s 12,540 blocks cost 12 ms to keep (each serialized as it is made,
+one allocation for the entry and one for each piece of guest bytes), 3 ms to merge
+(the whole file built again in memory) and 3 ms to write 7.3 MB. Seen besides:
+
+- Every process that made even one new block writes its whole file again: the
+  second `python3`, with 72 new blocks, wrote 7.3 MB; a warm `cc1` in the build
+  writes 64 MB for its few hundred, 137 times.
+- A forked child holds its parent's new blocks and writes them again at its
+  `execve`, as the parent does at its end; and the list of new blocks is behind a
+  lock that a fork does not hold (R064's way to a child that never starts).
+
+- **Hypothesis**: those costs are the cold run's, and they can be made small: entries
+  written straight into one buffer; the file written as its new index, its old data
+  as it lies (one slice of the mapping) and the new data after it, nothing copied in
+  memory; a file written again only when the new blocks are a sixty-fourth or more of
+  what it holds; a child forgetting its parent's new blocks, the lock held over the
+  fork. Then cold costs no more than a few percent of a lone start over no cache,
+  and warm is no slower.
+- **What is changed from before**: those four, in `cache.rs` and `fork`.
+- **Next move for each result**:
+  - Cold within 5% of no cache on the Mac → Graviton: no cache, cold and warm beside
+    `main` (R084's measure again), then the PR
+  - Still dearer → what is left (by the same timing inside r64m) decides
+  - A case fails → the format or the index wrong: the unit test widened to it
+- **Cut-off**: the unit tests; the Mac's ten starts and `hello`, none, cold, warm;
+  the container cases cold and warm with one cache; Graviton tonight.
+
+Found on the way (2026-11-28, the Mac, Docker's arm64 VM, the host busy: load 12,
+so no times taken here are leaned on):
+
+- Inside the making of blocks there was more than the keeping: with a cache in use,
+  `keep_block` asked whether the guest may write a block's pages twice, and that
+  question read the whole list of regions each time (`guest_may_write`; `python3`
+  has hundreds). Now it is asked once, by a search in the ordered list, which helps
+  `main`'s one asking too.
+- All suites by the JIT twice with one cache: every case passed, but one file of the
+  cache was 1.1 GB (all of R084's was 236 MB). Where a kept block did not fit the
+  guest's bytes, the block made again was added under the same key; the file's
+  entry won, so the new one's bytes were written and pointed to by nothing, and the
+  stale one was tried and refused in every process after. Now the new entry wins,
+  and a file that drops an entry is written entry by entry, so that nothing is kept
+  that nothing points to. A unit test adds it. All suites again: 235 MB.
+- In that second run `java -version` failed once, cold (its output not kept). The
+  Java suite then passed 28 times in 28 (6 cold, 6 warm, 6 with no cache, then 10
+  cold, two at once). One in 29 with a cache; R085's fault of the JIT's is the
+  likely one, but not shown.
