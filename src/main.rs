@@ -443,6 +443,10 @@ fn main() {
             "r64m: jit: {} blocks, entered {} times, {} of {} instructions in blocks, {} jumps joined, {} checked, {} left by a fault, {} stores made beside code, {} pages' blocks forgotten, emptied {} times",
             s.blocks, s.entered, s.in_blocks, c.steps, s.joined, s.checked, s.faults, s.beside, s.forgotten, s.emptied
         );
+        eprintln!(
+            "r64m: jit: left for the interpreter {}, at a way out not yet joined {}, by an address not in the table {} (of which its place held another {}), by a fault {}",
+            s.left_for_interpreter, s.left_unjoined, s.left_missed, s.missed_taken, s.faults
+        );
         // (Timed only when this is asked for: the clock is read twice for each.)
         eprintln!(
             "r64m: jit: {:.3} s making blocks, {:.3} s in generated code",

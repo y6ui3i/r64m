@@ -45,7 +45,11 @@ pub const RAN: u8 = 27;
 /// operand): two to the `TABLE_BITS` places chosen by an address's low bits, each an
 /// address in the guest and where the code of its block is.
 pub const TABLE: u8 = 28;
-pub const TABLE_BITS: u32 = 14;
+// 2^16 places, a megabyte for each thread (R073: with 2^14 a compiler's returns and
+// calls through registers put each other out of the table two million times in one
+// compilation; with 2^16, 0.6 million, and the build 3 in a hundred faster. 2^18
+// gained a little more for four times the memory).
+pub const TABLE_BITS: u32 = 16;
 /// In the way in's frame, from the stack pointer as generated code has it: whether the
 /// XMM registers were loaded since the way in (not zero), and where the lower halves
 /// of the caller's v8 to v15 are kept when they were.

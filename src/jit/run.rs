@@ -102,6 +102,14 @@ pub struct Stats {
     pub checked: u64,
     pub joined: u64,
     pub beside: u64,
+    /// Why generated code was left (R073): for the interpreter; at a way out not yet
+    /// joined to the block it goes to; by an address looked up in the table and not
+    /// found there; and of those, how often the place held another address, which
+    /// was put out for this one.
+    pub left_for_interpreter: u64,
+    pub left_unjoined: u64,
+    pub left_missed: u64,
+    pub missed_taken: u64,
     /// How long the making of blocks took, and the running of generated code, in
     /// nanoseconds: the rest of a run is the interpreter and r64m's own keeping.
     pub making: u64,
@@ -281,7 +289,11 @@ impl Jit {
                         // or through an operand finds it in the table from now on.
                         if !self.check {
                             let to = self.pads.get(&c.rip).copied().unwrap_or(self.blocks[id].code as u64);
-                            self.table[Self::place(c.rip)] = [c.rip, to];
+                            let place = &mut self.table[Self::place(c.rip)];
+                            if self.from == 0 && place[0] != c.rip && place[0] != u64::MAX {
+                                self.stats.missed_taken += 1;
+                            }
+                            *place = [c.rip, to];
                         }
                         match self.run_block(id, c, m) {
                             Ok(whole) => {
@@ -492,6 +504,12 @@ impl Jit {
         c.steps += ran;
         self.stats.in_blocks += ran;
         self.stats.entered += 1;
+        match reason {
+            LEFT_FOR_THE_INTERPRETER => self.stats.left_for_interpreter += 1,
+            LEFT_AT_END if c.left_from != 0 => self.stats.left_unjoined += 1,
+            LEFT_AT_END => self.stats.left_missed += 1,
+            _ => {}
+        }
         if reason == LEFT_FOR_THE_INTERPRETER {
             // RIP is on the instruction; what ran before it is counted.
             return Ok(false);
