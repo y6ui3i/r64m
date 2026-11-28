@@ -6743,3 +6743,52 @@ medians, and the cold run beside `main`'s first run:
   be no slower than `main` with the cache off); the cold write made cheap (what is
   written, and when: perhaps only the new blocks appended, not the whole file merged);
   then the measure again. The instance ran 17:40 to 19:07, 1 h 27 min.
+
+## R086: why R084's branch is slower than `main` with no cache (2026-11-28)
+
+R084 measured the branch 2% to 10% slower than `main` with `R64M_CACHE` not set
+(`build` 4.3%, spread 1.6%). With no cache nothing is opened, looked up or written.
+What every process still does differently: each scan for dead flags notes the
+instructions it read in a vector of its own (`Scan::reads`, allocated on its first
+push, grown, then copied into `Emit::read`), and `Built` carries it to `keep_block`.
+
+- **Hypothesis**: those vectors, one allocation and a copy for each scan (that is,
+  nearly each instruction translated), make translating dearer by enough to be the
+  difference: making blocks is about 11% of a build, so 4% would be making dearer by
+  a third or more.
+- **What is changed from before**: nothing in r64m first. `main` and the branch,
+  built alike, on the Mac, `--jit-stats` on `compile` (one `cc1`) and `start`: time
+  making blocks per instruction translated, and each work's whole time, five
+  rounds each, in turn.
+- **Next move for each result**:
+  - Making per instruction dearer by a quarter or more on the branch → the notes made
+    only when a cache is in use (or kept without allocating: in one vector of the
+    block's, by index), and measured again
+  - Making the same, the whole time still longer → not the translator: where the
+    time goes (interpreter, run, start) by `--jit-stats` and, on Graviton, the
+    counters; and the two binaries' layout
+  - Neither slower on the Mac → Graviton only: its counters, `main` and the branch
+- **Cut-off**: the five rounds of two works by two builds, tonight.
+
+**Result (2026-11-28, the Mac, Docker's arm64 VM): the scan's notes were the cost.
+Made only with a cache, into the block's own list, making blocks is `main`'s again.**
+
+Medians of five rounds, each round `main` then the branch:
+
+| | `main` | branch as R084 | branch now |
+|---|---|---|---|
+| `compile`, making blocks | 0.384 s | 0.457 s (+19%) | 0.383 s |
+| `compile`, whole (with `docker run`) | 3.457 s | 3.555 s | 3.569 s (`main` 3.534) |
+| 20 `python3 -c pass`, whole | 1.571 s | 1.695 s (+8%) | 1.543 s (`main` 1.609) |
+
+- Making dearer by 19%, under the card's quarter, but it is the whole of the
+  difference: 0.07 s of making against 0.07 to 0.10 s of `compile`'s whole. Each scan
+  for dead flags made a vector of its own, grown as it read, then copied: one or more
+  allocations for nearly each instruction translated.
+- Now a scan notes what it reads only where a cache is in use (and in the tests), and
+  straight into the block's `read`, cut back if its answer is not used. Where the
+  answer is used is unchanged (the host's flags taken as before the span is weighed).
+- With a cache, unchanged: `cc1` three times, 1,356,813 instructions translated, then
+  0, then 0, the same output each time. The unit tests pass.
+- Owed still (R084): the lone cold process's write; then Graviton again, with no
+  cache, cold and warm.

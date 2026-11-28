@@ -577,14 +577,15 @@ fn goes_on(blocks_do: bool, block: u64, target: u64, room: usize) -> bool {
 
 /// The reading on from an instruction that sets the flags, to find whether anything
 /// can read them before they are written whole again.
-struct Scan<'a> {
+struct Scan<'a, 'b> {
     m: &'a Mem,
     /// How many instructions more may be read before giving up.
     budget: usize,
     /// The lowest and one past the highest address read.
     span: (u64, u64),
-    /// Each instruction read, from and to.
-    reads: Vec<(u64, u64)>,
+    /// Each instruction read, from and to, noted where a cache of translations is in
+    /// use (R084): with none, nothing is noted, and nothing is allocated (R086).
+    reads: Option<&'b mut Vec<(u64, u64)>>,
     /// A conditional jump of the block was passed that the host's flags answer: the
     /// flags are dead as a record, but the host's are asked for.
     asked: bool,
@@ -601,7 +602,7 @@ struct Scan<'a> {
     within: bool,
 }
 
-impl Scan<'_> {
+impl Scan<'_, '_> {
     /// Are the flags dead from `at` on: written whole on every way before anything
     /// reads them? `host` is what the host's flags can say for a conditional jump, and
     /// `room` how many instructions more the block the question is asked for may hold:
@@ -620,7 +621,9 @@ impl Scan<'_> {
             };
             let next = at.wrapping_add(ins.len as u64);
             self.span = (self.span.0.min(at), self.span.1.max(next));
-            self.reads.push((at, next));
+            if let Some(reads) = self.reads.as_deref_mut() {
+                reads.push((at, next));
+            }
             let inside = room > 0;
             if self.within && !inside {
                 return false;
@@ -837,16 +840,22 @@ impl Emit<'_> {
     /// Are the flags dead from `at` on (`Scan::dead`)? What is read to say so becomes
     /// part of what the block rests on, and must lie within a few pages of it.
     fn dead(&mut self, at: u64, host: Option<HostFlags>, room: usize) -> bool {
-        let mut scan = Scan { m: self.m, budget: 48, span: (at, at), reads: Vec::new(), asked: false, block: self.rip, goes_on: !self.exact, within: self.exact };
-        if !scan.dead(at, host, room, 2) {
+        // What the scan reads is noted straight into the block's own list, and taken
+        // back off it if the answer is not used (R086).
+        let noted = self.read.len();
+        let reads = (super::cache::on() || cfg!(test)).then_some(&mut self.read);
+        let mut scan = Scan { m: self.m, budget: 48, span: (at, at), reads, asked: false, block: self.rip, goes_on: !self.exact, within: self.exact };
+        let dead = scan.dead(at, host, room, 2);
+        let (asked, (lo, hi)) = (scan.asked, scan.span);
+        if !dead {
+            self.read.truncate(noted);
             return false;
         }
-        self.host = scan.asked;
-        let (lo, hi) = scan.span;
+        self.host = asked;
         if lo < self.rip.saturating_sub(0x2000) || hi > self.rip.saturating_add(0x4000) {
+            self.read.truncate(noted);
             return false;
         }
-        self.read.extend_from_slice(&scan.reads);
         self.seen = Some(match self.seen {
             Some((a, b)) => (a.min(lo), b.max(hi)),
             None => (lo, hi),
