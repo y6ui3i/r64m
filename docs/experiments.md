@@ -6306,3 +6306,35 @@ blocks' beginnings is the arrivals, and fewer of them is the next card.**
 What follows, as its own card: fewer arrivals. Blocks that go on through a jump to
 a constant (JMP: 72 million arrivals of 842 by R076's count) and through a call
 into its callee (CALL: 125 million), where the guest's code allows it.
+
+## R078: blocks that go on through a jump to a constant (2026-11-28)
+
+The owner: 「マージして進める」. R077: an arrival at a block costs about a nanosecond,
+and a compilation has 842 million. A JMP to a constant ends a block today: the way
+out is joined to the block at the target, so it is a branch and an arrival. R076
+counted 72 million JMP of 32 bits run in the compilation (and some of 8).
+
+The card, written before the run.
+
+- **Hypothesis**: a block that goes on at the target of a JMP, as if the JMP were
+  not there, arrives at blocks 70 million times less and is faster by about 0.07
+  s of 2.7 (a nanosecond each), without anything else changing. Where the target
+  is far, or is the block's own beginning or one of its instructions, the block
+  ends at the JMP as now.
+- **What is changed from before**: a JMP whose target is within the pages a block
+  may rest on (8 KB before its start to 16 KB after, as for what is read to find
+  flags dead) and not already in the block is translated as nothing, and the
+  block goes on there. A block's instructions are then not in one run of
+  addresses: what it rests on (for stores that forget it) is from the lowest to
+  the highest of them, and an instruction's address is kept as a distance that
+  may be before the block's start.
+- **Next move for each result**:
+  - Arrivals fall by about as many JMP as ran, and the compilation by a
+    nanosecond each or more → kept; CALL into its callee is the next card
+  - They fall and the time does not → following a jump costs elsewhere (blocks
+    made longer and more of them made twice): said, and taken back if slower
+  - A case fails → an address taken for one in a single run: found, put right
+- **Cut-off**: unit tests (a block through a JMP forward and back, against the
+  interpreter; a store into the code past the JMP forgets the block), the 62
+  programs four ways, the suites by the JIT and three ways for GCC's, glibc's and
+  Python's; the compilation eight rounds, the build three times.
