@@ -23,6 +23,12 @@ the container a program of the host's (xtask itself, built for arm64 Linux) star
 r64m for the work and reads the clock around it. Docker's starting a container, and
 any shell of the guest's around the work, are not in the time.
 
+On a host with Docker and no Rust (R082): xtask built for arm64 Linux is copied there
+with r64m, `tools/images/bench/Dockerfile` and the NetHack source, and run as
+`R64M_ROOT=DIR ./xtask bench --this ./r64m [--against ./other]`; `DIR` holds `tools/`
+and `target/bench/`. The host must run x86-64 programs for Docker to build the image
+(r64m registered with `binfmt_misc`).
+
 What it needs:
 
 - Docker, and the targets `aarch64-unknown-linux-musl` for Rust.

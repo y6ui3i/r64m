@@ -6460,3 +6460,62 @@ Two things it showed at once:
   r64m is its own question, now owed.
 - The load the container sees on the Mac is the Docker VM's (1.00 throughout),
   not the Mac's (5.4): the spread is what shows other work there.
+
+## R082: the measure on a host that runs nothing else, beside its own code, with its counters (2026-11-28)
+
+The owner: 「マージしてGravitonで測る」, on the AWS host the owner allowed (「グラビトンは
+立てていいよ」, 「使ったらすぐ止めて」): c7g.large, Graviton3 (Neoverse V1), 2 vCPU,
+Ubuntu 24.04, 4 KB pages; no Rosetta, no x86 order of memory in the processor. Not an
+experiment with a card: the first numbers on the host the decisions will be taken on,
+and the counters the Mac's VM could not give.
+
+How: `cargo xtask bench` with xtask built for arm64 Linux and run there with no Rust
+(`--this`, `R64M_ROOT`, this card's change); r64m registered with the host's
+`binfmt_misc` by hand, so that Docker could make the x86-64 image (its NetHack build
+under r64m: 399 s). The same works natively: the same Dockerfile built for arm64, each
+work's program run as the host's own (`/r/native`, a stand-in for r64m that runs the
+work as it is). The counters by `perf stat` around one compilation, each under
+`chroot` into its image's files. The instance ran 36 minutes and was stopped.
+
+| work | native (median) | r64m (median) | r64m / native | r64m's spread |
+|---|---|---|---|---|
+| `compile` (8) | 2.036 s | 5.662 s | 2.78 | 1.7% |
+| `hello` (10) | 0.034 s | 0.234 s | 6.9 | 2.6% |
+| `build` (3) | 107.4 s | 376.9 s | 3.51 | 1.2% |
+| `start` (10) | 0.0167 s | 0.107 s | 6.4 | 48% (one slow run of ten) |
+
+- The spreads are one to three in a hundred where the Mac's were ten to fifty: the
+  host to decide on.
+- On the Mac (R069) the build was 3.85 times native; here 3.51.
+- Short processes are where r64m is furthest behind (`hello`, `start`: six to seven
+  times): each starts r64m and translates its program's beginning anew.
+
+The processor's counters, one compilation (`cc1 -O2` on `apply.i`):
+
+| | native | r64m | r64m / native |
+|---|---|---|---|
+| cycles | 5.30 billion | 14.67 billion | 2.77 |
+| instructions | 10.90 billion | 27.07 billion | 2.48 |
+| instructions a cycle | 2.06 | 1.85 | |
+| branches | 2.29 billion | 4.85 billion | 2.12 |
+| branches guessed wrongly | 56 million | 126 million | 2.24 |
+| misses of the first-level instruction cache | 144 million | 865 million | **6.0** |
+| misses of the first-level data cache | 75 million | 131 million | 1.74 |
+| cycles stalled in the front end | 1.35 billion | 5.55 billion | **4.1** |
+| cycles stalled in the back end | 1.01 billion | 1.72 billion | 1.70 |
+
+(The counters are shared out in turns by the kernel: each is an estimate from a
+quarter to three eighths of the time. Their ratios are what to read.)
+
+- **The front end is where r64m loses most.** Of 9.4 billion cycles more than native,
+  4.2 billion are the front end waiting, and the instruction cache misses six times
+  as often: the generated code (38 MB for this compilation, R076) is spread over far
+  more memory than `cc1`'s own hot code, and the processor cannot keep it near.
+- That explains, on this processor, R077's nanosecond an arrival and R078's slower
+  larger code; R072's laying aside of unrun code gained little because the code that
+  runs is spread over as many blocks as before.
+- Branches guessed wrongly are 2.2 times native for 2.1 times the branches: no worse a
+  rate. Not the place.
+- So the next cut, by these counters: less code and hotter code together. Fewer host
+  instructions for each guest one (2.48 here), and the blocks that run often placed
+  together, apart from those that ran a few times.

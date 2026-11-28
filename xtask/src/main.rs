@@ -11,7 +11,7 @@
 //!   cargo xtask uninstall              and taken away again
 //!   cargo xtask status                 whether it is, and what else is registered
 //!   cargo xtask waits                  every process and thread here, and the call each is in
-//!   cargo xtask bench [--against FILE] [--rounds N] [WORK ...]
+//!   cargo xtask bench [--this FILE] [--against FILE] [--rounds N] [WORK ...]
 //!                                      the measure: GCC compiling, NetHack built, Python
 //!                                      started, each a number of times, by this tree's r64m
 //!                                      and, in turn with it, another's
@@ -59,8 +59,13 @@ const SUITES: [(&str, Image, &[&str]); 11] = [
     ("postgres", Image::Hub("postgres@sha256:e80acae3f1109e8e4533618b594918936f2858c63afc7204c4773148a673add8"), &["postgres::"]),
 ];
 
+/// The repository: where xtask was built from, or where `R64M_ROOT` says (xtask built
+/// for arm64 Linux and copied to a host that has no Rust, to measure there: R082).
 fn root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("xtask is a folder of the repository").to_path_buf()
+    match std::env::var_os("R64M_ROOT") {
+        Some(dir) => PathBuf::from(dir),
+        None => Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("xtask is a folder of the repository").to_path_buf(),
+    }
 }
 
 fn fail(what: impl std::fmt::Display) -> ! {
@@ -496,15 +501,24 @@ fn spread(times: &mut [f64]) -> (f64, f64, f64) {
 
 fn bench(mut args: Vec<String>) -> bool {
     let against = option(&mut args, "--against").map(PathBuf::from);
+    // With `--this FILE`, that r64m is measured as this tree's, and nothing is built:
+    // the xtask that runs is the one staged (a host with no Rust, R082).
+    let this = option(&mut args, "--this").map(PathBuf::from);
     let rounds: Option<usize> = option(&mut args, "--rounds").map(|n| n.parse().unwrap_or_else(|_| fail("--rounds N")));
     if let Some(unknown) = args.iter().find(|a| !WORKS.iter().any(|w| w.name == a.as_str())) {
         fail(format_args!("no work named {unknown}: there are {}", WORKS.iter().map(|w| w.name).collect::<Vec<_>>().join(", ")));
     }
-    must(cargo().args(["build", "--release", "--target", LINUX]));
-    must(cargo().args(["build", "--release", "--manifest-path", "xtask/Cargo.toml", "--target", LINUX]));
+    let (r64m, xtask) = match &this {
+        Some(file) => (file.clone(), std::env::current_exe().unwrap_or_else(|e| fail(format_args!("this xtask: {e}")))),
+        None => {
+            must(cargo().args(["build", "--release", "--target", LINUX]));
+            must(cargo().args(["build", "--release", "--manifest-path", "xtask/Cargo.toml", "--target", LINUX]));
+            (root().join("target").join(LINUX).join("release/r64m"), root().join("xtask/target").join(LINUX).join("release/xtask"))
+        }
+    };
     let stage = root().join("target/bench/stage");
     std::fs::create_dir_all(&stage).unwrap_or_else(|e| fail(format_args!("{}: {e}", stage.display())));
-    let mut files = vec![(root().join("target").join(LINUX).join("release/r64m"), "a"), (root().join("xtask/target").join(LINUX).join("release/xtask"), "xtask")];
+    let mut files = vec![(r64m, "a"), (xtask, "xtask")];
     if let Some(b) = &against {
         files.push((b.clone(), "b"));
     }
