@@ -69,11 +69,32 @@ pub struct Built {
     /// table's size (`lookup_word`), counted from the block's start: written with
     /// `TABLE_BITS`, and again by whoever keeps the table when it grows (R074).
     pub lookups: Vec<u32>,
+    /// With `--jit-count`: the counter at the block's beginning, and for each way out
+    /// before its last instruction its counter and how many of the block's
+    /// instructions had run (R076).
+    pub counted: Option<(u32, Vec<(u32, u32)>)>,
+    /// Where the code of the block's own instructions ends: what comes after is
+    /// ways out that are run only when taken.
+    pub body: u32,
 }
 
 /// The instruction of a lookup that takes an address's low `bits` for its place.
 pub fn lookup_word(bits: u32) -> u32 {
     a64::ubfx(T1, T0, 0, bits)
+}
+
+/// For `--jit-count` (R076): whether blocks are written with counters, and the
+/// counters, each a word of memory that generated code adds one to. A block has one
+/// at its beginning and one at each way out before its last instruction.
+pub static COUNTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub const COUNTERS: usize = 1 << 22;
+pub static mut COUNTS: [u64; COUNTERS] = [0; COUNTERS];
+static NEXT_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// A new counter, if one is left.
+fn new_counter() -> Option<u32> {
+    let n = NEXT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    (n < COUNTERS).then_some(n as u32)
 }
 
 /// What a block that uses the XMM registers begins with: if none has loaded them since
@@ -792,6 +813,9 @@ struct Emit<'a> {
     now: (u64, usize),
     /// The landings of returns written so far (`Built::pads`).
     pads: Vec<(u32, u64)>,
+    /// With `--jit-count`: the counters of the ways out before the block's last
+    /// instruction, and how many instructions had run (R076).
+    exits: Option<Vec<(u32, u32)>>,
     /// Where the instruction of each lookup in the table that says its size is
     /// (`Built::lookups`).
     lookups: Vec<u32>,
@@ -1179,10 +1203,31 @@ impl Emit<'_> {
         self.w[over] = a64::b((self.w.len() - over) as i32);
     }
 
+    /// One added to a counter (`--jit-count`), by T4 and T5, which are free wherever
+    /// this is written.
+    fn count(&mut self, counter: u32) {
+        let at = std::ptr::addr_of_mut!(COUNTS) as *mut u64 as u64 + 8 * counter as u64;
+        self.constant(T4, at);
+        self.put(a64::mem_imm(Size::X, Op::Load, T5, T4, 0));
+        self.put(a64::arith_imm(true, false, false, T5, T5, 1, false));
+        self.put(a64::mem_imm(Size::X, Op::Store, T5, T4, 0));
+    }
+
+    /// A way out before the block's last instruction, after `n` of them, counted.
+    fn count_exit(&mut self, n: usize) {
+        if self.exits.is_some() {
+            if let Some(counter) = new_counter() {
+                self.count(counter);
+                self.exits.as_mut().expect("counting").push((counter, n as u32));
+            }
+        }
+    }
+
     /// The way out itself. Not one that can be joined: the block that begins at `at`
     /// may be this one, and the instruction is the interpreter's this time whatever
     /// begins there.
     fn bail_out(&mut self, at: u64, n: usize) {
+        self.count_exit(n);
         self.put(a64::arith_imm(true, false, false, RAN, RAN, n as u32, false));
         self.put(a64::mem_imm(Size::X, Op::Store, a64::ZR, CPU, offset_of!(Cpu, left_from) as u32));
         self.constant(T0, at);
@@ -1837,7 +1882,7 @@ pub fn translate(m: &Mem, rip: u64, exact: bool) -> Option<Built> {
 /// The same; with `ordered`, for a process that has more than one thread: every load
 /// and store of the guest's memory keeps x86's order between threads.
 pub fn translate_as(m: &Mem, rip: u64, exact: bool, ordered: bool) -> Option<Built> {
-    let mut e = Emit { w: Vec::new(), ordered, seg: 0, flags: None, m, rip, exact, skip: false, seen: None, later: None, host: true, bails: Vec::new(), now: (0, 0), pads: Vec::new(), outs: Vec::new(), lookups: Vec::new() };
+    let mut e = Emit { w: Vec::new(), ordered, seg: 0, flags: None, m, rip, exact, skip: false, seen: None, later: None, host: true, bails: Vec::new(), now: (0, 0), pads: Vec::new(), outs: Vec::new(), lookups: Vec::new(), exits: COUNTING.load(std::sync::atomic::Ordering::Relaxed).then(Vec::new) };
     let mut starts = Vec::new();
     let mut taken: Vec<Taken> = Vec::new();
     let mut sse = false;
@@ -1853,6 +1898,10 @@ pub fn translate_as(m: &Mem, rip: u64, exact: bool, ordered: bool) -> Option<Bui
     // the thread's word and the host's handler sets in a thread it interrupts here.
     e.bails.push((0, rip, 0));
     e.put(a64::tbnz_top(RAN, 0));
+    let entry = if e.exits.is_some() { new_counter() } else { None };
+    if let Some(counter) = entry {
+        e.count(counter);
+    }
     loop {
         let (code, have) = m.code_at(at);
         let bytes = unsafe { std::slice::from_raw_parts(code, have) };
@@ -2428,10 +2477,12 @@ pub fn translate_as(m: &Mem, rip: u64, exact: bool, ordered: bool) -> Option<Bui
             break;
         }
     }
+    let mut body = e.w.len() as u32;
     // The ways taken of the jumps the block went on past.
     for way in taken {
         let here = e.w.len();
         e.w[way.jump] = a64::b_cond(way.cond, (here - way.jump) as i32);
+        e.count_exit(way.n);
         if let Some(l) = way.later {
             e.write_later(l);
         }
@@ -2470,6 +2521,7 @@ pub fn translate_as(m: &Mem, rip: u64, exact: bool, ordered: bool) -> Option<Bui
         for at in &mut e_lookups {
             *at -= 1;
         }
+        body -= 1;
     }
     // A block that uses the XMM registers loads them first. What was written for it
     // comes after: its jumps to itself are to where it was to begin, past the loading
@@ -2485,10 +2537,12 @@ pub fn translate_as(m: &Mem, rip: u64, exact: bool, ordered: bool) -> Option<Bui
         for at in &mut e_lookups {
             *at += first.len() as u32;
         }
+        body += first.len() as u32;
         first.append(&mut words);
         words = first;
     }
-    Some(Built { words, starts, end: at, seen: e.seen, pads: e_pads, lookups: e_lookups })
+    let counted = entry.map(|entry| (entry, e.exits.take().unwrap_or_default()));
+    Some(Built { words, starts, end: at, seen: e.seen, pads: e_pads, lookups: e_lookups, counted, body })
 }
 
 impl Emit<'_> {
