@@ -6007,3 +6007,64 @@ hundred (205 s to 199 s). Kept at 2^16.**
 The owner, on the result: 「でもVM１台に256とか可変で割り当てられるから、俺らも可変に
 したほうがいい気がするけどどうなんだろう？」: a table that grows with the thread's
 work, in place of one size for all. Noted for its own card.
+
+## R074: a table of blocks that grows with its thread (2026-11-28)
+
+The owner, on R073's fixed size: 「でもVM１台に256とか可変で割り当てられるから、俺らも
+可変にしたほうがいい気がするけどどうなんだろう？」, and then 「固定で入れてから可変に」.
+A thread's table is one size for every thread: a compiler with 117,000 blocks
+gains from 4 MB of it, and a server's twenty threads that mostly wait pay 1 MB
+each for nothing.
+
+The card, written before the run.
+
+- **Hypothesis**: a table that begins at 2^12 places (64 KB) and is made four
+  times larger whenever as many addresses have been put out of it as it has
+  places, to 2^18 at most, does on a compilation at least as well as R073's
+  fixed 2^16 (it reaches 2^18 there, which was 1 in a hundred better), and holds
+  a waiting thread at 64 KB.
+- **What is changed from before**: the size is the thread's own. The one
+  instruction of every lookup that says the size (`ubfx`, the low bits taken)
+  is noted where it is written; when the table grows its entries are put in
+  their new places and each of those instructions is written again with the
+  new size, as a jump is written again when it is joined. A block made after is
+  written with the size of the moment.
+- **Next move for each result**:
+  - A compilation no slower than with 2^16 fixed, a waiting thread's table 64 KB
+    → kept
+  - Slower → the growing itself costs (a hundred thousand instructions written
+    again, each with the processor's caches told): grown earlier, or by more at
+    once
+  - A case fails → a lookup not noted, still asking with the old size: found by
+    the case and noted
+- **Cut-off**: the unit tests with a case of growing, the 62 programs four ways,
+  the suites by the JIT; the compilation eight rounds beside 2^16 fixed; the
+  sizes the threads of the goal's server reach.
+
+**Result (2026-11-28): the hypothesis held. A compilation is 2 in a hundred faster
+than with R073's 2^16 for every thread (the table reached 2^18), and a process of
+forty threads that wait holds 34 MB where it held 72.**
+
+- The compilation of R070, eight rounds in turn, hundredths of a second: fixed
+  2^16 least 2.99, median 3.08; growing least 2.94, median 3.01. It grew three
+  times, to 2^18 (4.2 MB with the list of its lookups); misses that put another
+  out 0.22 million (2^16 fixed: 0.60).
+- Python with forty threads waiting (`VmRSS`, the same both times of two):
+  fixed 2^16 72.3 MB; growing 34.0 MB; and for comparison R072's fixed 2^14,
+  40.8 MB. A waiting thread's table stays at 64 KB.
+- The lookups are noted where they are written (`Built::lookups`), and written
+  again when the table grows; a new block is written with the size of the
+  moment. A unit test (`the_table_grows_and_what_was_made_before_finds_its_way`):
+  sixteen return addresses that share a place grow the table twice; with the
+  lookups not written again it fails (91,281 returns not found, where 30,000 is
+  the bound).
+- Tests: 124 unit tests on macOS and 125 on Linux, 116 primitives, 39 traces, the
+  62 programs four ways, every container suite by the JIT.
+- What it does not do: a table never shrinks while its blocks stand (it is made
+  small again only when generated code is emptied).
+
+The owner, along the way (「r64mは独自性を発揮したいけど、いいとこ取りをしたいよなぁ」):
+a miss still leaves generated code for r64m's own (about 125 ns); QEMU, FEX-Emu
+and box64 each have a second level that does not. Which to borrow, by this
+ledger's numbers, is the next card of this kind; the ways out not yet joined
+(2.73 million in the compilation) are the larger part still.

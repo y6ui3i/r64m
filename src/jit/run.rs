@@ -2,8 +2,8 @@
 //! what is done when one is left, and the check of every block against the
 //! interpreter (ADR 0014, points 2, 7, 8 and 11).
 
-use super::translate::{translate_as, Built};
-use super::{a64, enter, Code, CPU, LEFT_AT_END, LEFT_FOR_THE_INTERPRETER, REASON, TABLE_BITS};
+use super::translate::{self, translate_as, Built};
+use super::{a64, enter, Code, CPU, LEFT_AT_END, LEFT_FOR_THE_INTERPRETER, REASON, TABLE_BITS, TABLE_BITS_MOST};
 use crate::cpu::{self, Cpu, Step, Stop};
 use std::mem::offset_of;
 use crate::mem::{Access, Mem, PAGE};
@@ -110,6 +110,8 @@ pub struct Stats {
     pub left_unjoined: u64,
     pub left_missed: u64,
     pub missed_taken: u64,
+    /// How often the table was made larger (R074).
+    pub grown: u64,
     /// How long the making of blocks took, and the running of generated code, in
     /// nanoseconds: the rest of a run is the interpreter and r64m's own keeping.
     pub making: u64,
@@ -160,6 +162,11 @@ pub struct Jit {
     /// chosen by an address's low bits, the address and where its block's code is. A
     /// place with no block holds an address no place is chosen by and `miss`.
     table: Box<[[u64; 2]]>,
+    /// Where generated code has the instruction of each lookup that says the table's
+    /// size, to be written again when it grows (R074); and how many addresses have
+    /// been put out of the table since it last grew.
+    lookups: Vec<u64>,
+    put_out: u64,
     /// Code that leaves for Rust with RIP as generated code had it in x16: what an
     /// empty place of the table sends to, so that no place can send astray.
     miss: u64,
@@ -202,9 +209,32 @@ impl Jit {
         self.table.fill([u64::MAX, self.miss]);
     }
 
-    /// The place in the table that an address chooses.
-    fn place(rip: u64) -> usize {
-        (rip & ((1 << TABLE_BITS) - 1)) as usize
+    /// The place in a table of `len` places that an address chooses.
+    fn place(len: usize, rip: u64) -> usize {
+        (rip as usize) & (len - 1)
+    }
+
+    /// The table four times larger (R074): what it holds put in the new places, and
+    /// every lookup in generated code told the new size.
+    fn grow(&mut self) {
+        let bits = self.table.len().trailing_zeros();
+        if bits >= TABLE_BITS_MOST {
+            return;
+        }
+        let bits = (bits + 2).min(TABLE_BITS_MOST);
+        let mut table = vec![[u64::MAX, self.miss]; 1 << bits].into_boxed_slice();
+        for &[rip, to] in self.table.iter() {
+            if rip != u64::MAX {
+                table[Self::place(table.len(), rip)] = [rip, to];
+            }
+        }
+        self.table = table;
+        let word = translate::lookup_word(bits);
+        for &at in &self.lookups {
+            unsafe { self.code.rewrite(at as *const u8, word) };
+        }
+        self.put_out = 0;
+        self.stats.grown += 1;
     }
 
     fn bare(check: bool, hot: u8) -> std::io::Result<Jit> {
@@ -225,6 +255,8 @@ impl Jit {
             hot: hot.max(1),
             from: 0,
             table: vec![[0, 0]; 1 << TABLE_BITS].into_boxed_slice(),
+            lookups: Vec::new(),
+            put_out: 0,
             miss: 0,
             stats: Stats::default(),
         })
@@ -289,11 +321,16 @@ impl Jit {
                         // or through an operand finds it in the table from now on.
                         if !self.check {
                             let to = self.pads.get(&c.rip).copied().unwrap_or(self.blocks[id].code as u64);
-                            let place = &mut self.table[Self::place(c.rip)];
-                            if self.from == 0 && place[0] != c.rip && place[0] != u64::MAX {
-                                self.stats.missed_taken += 1;
-                            }
+                            let place = &mut self.table[Self::place(self.table.len(), c.rip)];
+                            let put_out = self.from == 0 && place[0] != c.rip && place[0] != u64::MAX;
                             *place = [c.rip, to];
+                            if put_out {
+                                self.stats.missed_taken += 1;
+                                self.put_out += 1;
+                                if self.put_out >= self.table.len() as u64 {
+                                    self.grow();
+                                }
+                            }
                         }
                         match self.run_block(id, c, m) {
                             Ok(whole) => {
@@ -594,7 +631,7 @@ impl Jit {
         if self.writes.get(&page).is_some_and(|&n| n >= GIVEN_UP) {
             return false;
         }
-        let Some(Built { words, starts, end, seen, pads }) = translate_as(m, rip, self.check, self.ordered) else {
+        let Some(Built { mut words, starts, end, seen, pads, lookups }) = translate_as(m, rip, self.check, self.ordered) else {
             return false;
         };
         if std::env::var_os("R64M_JIT_DUMP").is_some() {
@@ -606,6 +643,13 @@ impl Jit {
         // What the block rests on: its own instructions, and what was read past them
         // to leave a record of the flags unwritten. A store to any of it forgets it.
         let (from, to) = seen.map_or((rip, end), |(lo, hi)| (lo.min(rip), hi.max(end)));
+        // Its lookups take as many bits as the table has now.
+        let bits = self.table.len().trailing_zeros();
+        if bits != TABLE_BITS {
+            for &at in &lookups {
+                words[at as usize] = translate::lookup_word(bits);
+            }
+        }
         let code = match self.code.append(&words) {
             Some(code) => code,
             None => {
@@ -616,6 +660,7 @@ impl Jit {
                 }
             }
         };
+        self.lookups.extend(lookups.iter().map(|&at| code as u64 + 4 * at as u64));
         // If the guest may write any page of what the block rests on, the host pages
         // those lie in may not be written from now, and are counted as holding code
         // (ADR 0016: what the guest may not write needs no guard).
@@ -650,7 +695,7 @@ impl Jit {
                 None => {
                     self.pads.insert(next, bl + 4);
                     own.push((next, bl + 4));
-                    let place = &mut self.table[Self::place(next)];
+                    let place = &mut self.table[Self::place(self.table.len(), next)];
                     if place[0] == next && !self.check {
                         place[1] = bl + 4;
                     }
@@ -686,7 +731,7 @@ impl Jit {
         let pad_map = (self.pads.capacity() * 17) as u64;
         let holds = (self.holds.capacity() * 13) as u64 + (self.writes.capacity() * 10) as u64;
         let known = (self.known.len() * 12) as u64;
-        let table = (self.table.len() * 16) as u64;
+        let table = (self.table.len() * 16 + self.lookups.capacity() * 8) as u64;
         let all = code + records + starts + incoming + pads + pieces * 16 + places + pad_map + holds + known + table;
         eprintln!(
             "r64m: memory of thread {}: {} blocks, {} guest instructions, {} places known; code {code}, block records {records}, starts {starts}, incoming {incoming}, pads {pads}, {pieces} vectors, places {places}, pad map {pad_map}, pages {holds}, known {known}, table {table}; in all {all}",
@@ -760,7 +805,7 @@ impl Jit {
                     dropped.push(id);
                     // (Gone from the map: to be arrived at as often again before it is
                     // made again.) And not to be found by generated code.
-                    let place = &mut table[Self::place(*rip)];
+                    let place = &mut table[Self::place(table.len(), *rip)];
                     if place[0] == *rip {
                         *place = [u64::MAX, miss];
                     }
@@ -780,7 +825,7 @@ impl Jit {
                 if self.pads.get(&next) == Some(&pad) {
                     self.pads.remove(&next);
                 }
-                let place = &mut self.table[Self::place(next)];
+                let place = &mut self.table[Self::place(self.table.len(), next)];
                 if *place == [next, pad] {
                     *place = [u64::MAX, self.miss];
                 }
@@ -817,6 +862,7 @@ impl Jit {
         self.holds.clear();
         self.from = 0;
         self.code.empty();
+        self.lookups.clear();
         self.clear_table();
         self.stats.emptied += 1;
     }
@@ -1324,6 +1370,53 @@ mod tests {
     }
 
     #[test]
+    fn the_table_grows_and_what_was_made_before_finds_its_way() {
+        // One function called from 16 places 2^12 apart, round after round: their
+        // return addresses all choose one place of the first table, and four of a
+        // table four times larger, and put each other out at every return. The table
+        // grows twice, to where each has a place; the blocks made before still find
+        // the landings, which they could only do by lookups told the new size. The
+        // sum is the same as the interpreter's.
+        //   at k * 1000h (k < 16): call f; jmp (k + 1) * 1000h  (the last: sub ebx, 1;
+        //   jne 0; syscall)       f at 10000h + 100h: add edx, 3; ret
+        const STEP: u64 = 1 << TABLE_BITS;
+        const N: u64 = 16;
+        let f = CODE + N * STEP + 0x100;
+        let mut code = vec![0u8; (N * STEP + 0x110) as usize];
+        let rel = |from_end: u64, to: u64| ((to as i64 - from_end as i64) as i32).to_le_bytes();
+        for k in 0..N {
+            let at = CODE + k * STEP;
+            let i = (k * STEP) as usize;
+            code[i] = 0xe8;
+            code[i + 1..i + 5].copy_from_slice(&rel(at + 5, f));
+            if k + 1 < N {
+                code[i + 5] = 0xe9;
+                code[i + 6..i + 10].copy_from_slice(&rel(at + 10, at + STEP));
+            } else {
+                code[i + 5..i + 10].copy_from_slice(&[0x83, 0xeb, 0x01, 0x0f, 0x85]);
+                code[i + 10..i + 14].copy_from_slice(&rel(at + 14, CODE));
+                code[i + 14..i + 16].copy_from_slice(&[0x0f, 0x05]);
+            }
+        }
+        let fi = (f - CODE) as usize;
+        code[fi..fi + 4].copy_from_slice(&[0x83, 0xc2, 0x03, 0xc3]);
+        let set = |c: &mut Cpu| {
+            c.reg[RBX] = 6000;
+            c.reg[RDX] = 0;
+        };
+        let mut m = guest(&code, &[]);
+        let mut jit = Jit::new(false, 1).unwrap();
+        let c = both(&mut jit, &mut m, CODE, &set);
+        assert_eq!(c.reg[RDX], 6000 * N * 3);
+        assert!(jit.stats.grown >= 1, "the table did not grow: {} put out", jit.stats.missed_taken);
+        // Grown until the return addresses have a place each: about 21,000 returns
+        // missed on the way, and none after. (A lookup still taking the first
+        // table's bits would miss at every one of the 96,000.)
+        assert_eq!(jit.table.len(), 1 << (TABLE_BITS + 4));
+        assert!(jit.stats.left_missed < 30_000, "{} returns not found in the table", jit.stats.left_missed);
+    }
+
+    #[test]
     fn two_returns_that_share_a_place_in_the_table_both_arrive() {
         // Two calls of one function from addresses 4000h apart: their return
         // addresses choose the same place, and put each other out of it every time.
@@ -1345,7 +1438,7 @@ mod tests {
         code[far + 9] = 0x85;
         code[far + 10..far + 14].copy_from_slice(&rel(FAR + 14, CODE));
         code[far + 14..far + 16].copy_from_slice(&[0x0f, 0x05]);
-        assert_eq!(Jit::place(CODE + 5), Jit::place(FAR + 5));
+        assert_eq!(Jit::place(1 << TABLE_BITS, CODE + 5), Jit::place(1 << TABLE_BITS, FAR + 5));
         let (c, _) = checked(&code, &[], &|c| c.reg[RBX] = 25);
         assert_eq!(c.reg[RDX], 25 * 6);
     }
@@ -1364,7 +1457,7 @@ mod tests {
         let mut near = vec![0x41, 0xff, 0xd0, 0xc7, 0x05, 0, 0, 0, 0, 9, 0, 0, 0, 0x01, 0xc2, 0x83, 0xeb, 0x01, 0x75, 0xec, 0x0f, 0x05];
         near[5..9].copy_from_slice(&((FAR + 1 - (CODE + 13)) as i32).to_le_bytes());
         let far = [0xb8, 7, 0, 0, 0, 0xc3];
-        assert_ne!(Jit::place(FAR), Jit::place(CODE));
+        assert_ne!(Jit::place(1 << TABLE_BITS, FAR), Jit::place(1 << TABLE_BITS, CODE));
         for check in [true, false] {
             let mut m = Mem::reserve().unwrap();
             m.map(CODE, 4096, R | W | X).unwrap();
@@ -3487,12 +3580,12 @@ mod tests {
             Place::Block(id) => jit.blocks[id].code as u64,
             _ => panic!("no block at the return address"),
         };
-        let place = jit.table[Jit::place(CODE + 13)];
+        let place = jit.table[Jit::place(jit.table.len(), CODE + 13)];
         assert_eq!((place[0], place[1]), (CODE + 13, jit.pads[&(CODE + 13)]));
         assert_ne!(place[1], block);
         jit.guest_changed(CODE, CODE + 4096, &mut m);
         assert!(jit.pads.is_empty());
-        assert_ne!(jit.table[Jit::place(CODE + 13)][0], CODE + 13);
+        assert_ne!(jit.table[Jit::place(jit.table.len(), CODE + 13)][0], CODE + 13);
     }
 
     #[test]
