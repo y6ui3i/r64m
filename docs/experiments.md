@@ -6242,3 +6242,33 @@ The order to cut, by this measure:
 
 Each its own card; the measure stays (`--jit-count`, for measuring only: without it
 nothing generated changes).
+
+## R077: what an arrival at a block costs, by making more of them (2026-11-28)
+
+The owner: 「マージして進める」. R076 found blocks begun every 8.4 instructions (842
+million times in one compilation), and R071 a third of the samples in generated
+code at blocks' beginnings, which nothing so far has explained. Before changing how
+blocks are made to be longer, what an arrival costs is to be known: the processor's
+counters cannot be had on this VM, so the condition is made instead.
+
+The card, written before the run.
+
+- **Hypothesis**: an arrival costs about a nanosecond (two or three instructions and
+  a branch taken, which the processor's front end pays for), so 842 million of them
+  are a quarter of the compilation and longer blocks would gain much. The other
+  possibility: it costs a few tenths of a nanosecond, and the samples at blocks'
+  beginnings are where the processor waited for something else (a load, a branch
+  guessed wrongly before) and are not the arrival's.
+- **What is changed from before**: nothing to keep. Builds with the most
+  instructions in a block (`MOST`, 64) at 2 and at 4, which make many more
+  arrivals and nothing else different; for each, the arrivals by `--jit-count` and
+  the compilation's time (eight rounds, in turn with the build as it is). The
+  slope, more time over more arrivals, is what one costs.
+- **Next move for each result**:
+  - A nanosecond or more → fewer arrivals is the next card: blocks that go on
+    through a jump to a constant (72 million JMP of 32 bits ended blocks) and into
+    a call's callee
+  - A few tenths or less → arrivals are not where the time is: the samples at
+    beginnings are someone else's wait; the next card is calls and returns
+    (R076: a fifth of what the host runs), by their instructions
+- **Cut-off**: the two builds, eight rounds each beside the build as it is.
