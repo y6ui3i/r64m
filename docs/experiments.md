@@ -6461,6 +6461,59 @@ Two things it showed at once:
 - The load the container sees on the Mac is the Docker VM's (1.00 throughout),
   not the Mac's (5.4): the spread is what shows other work there.
 
+## R080: making blocks faster, and sooner (2026-11-28)
+
+The owner: 「翻訳を速くする」. R079: GCC's compiler spends a fifth of its time making
+blocks, 277 ns for each instruction translated.
+
+Looked at before the card, on the compilation of R070:
+
+- r64m's profile of making blocks: reading instructions 89 samples (3.6 million
+  reads for 1.36 million instructions translated: 1.4 more for each by the scan
+  for dead flags), the allocator 81 (several vectors made and dropped for every
+  block), appending code and telling the caches 30, the translator's own body 28,
+  copying 26, `flags_of` 18; nothing above a quarter of it. (131 samples more were
+  in the clock that `--jit-stats` reads around every block, which is the
+  measuring's own cost.)
+- How many arrivals before a block is made (`--jit-hot`, 4 as it is), six rounds
+  each: at 16 the compilation took 3.21 s, at 64 4.24, at 4 2.90; at 1 2.76, at 2
+  2.77, at 4 2.83 (a second set, in turn). Making a block at once, though it makes
+  more of them, is faster: the interpreter for the first arrivals costs more than
+  the translating.
+
+The card, written before the run.
+
+- **Hypothesis**: a block made at the first arrival (`HOT` 1) makes the compilation
+  2 in a hundred faster and the build as much, and costs nothing that shows where
+  code runs once (the goal's start, Python's start).
+- **What is changed from before**: `HOT`, 4 to 1. Nothing else.
+- **Next move for each result**:
+  - The build faster and the starts no slower → kept; then the translator's own
+    cost (the allocations made for every block, and the reads the scan makes
+    again), in a card of its own
+  - The build faster and a start slower → said; kept at 2 if 2 holds both
+  - The build no faster → not kept: the compilation alone was the gain
+- **Cut-off**: the build three times each, the goal's start and `python3 -c pass`
+  ten times each, beside `HOT` 4.
+
+**Partial (2026-11-28): not decided. The round for 2 measured the Mac, not r64m.**
+
+- The build, three of each in turn, `HOT` 4 against 1: 192, 199, 191 s against
+  192, 189, 184 s. A little faster at 1, inside what one round moves.
+- Python's start under 1 was slower: `python3 -c pass` 0.69 to 0.71 s where 4 takes
+  0.60 to 0.61 (three rounds of ten each); the imports of FastAPI and uvicorn the
+  same (5.4 to 5.8 s both). Code that runs once is made into blocks at once, and
+  that costs.
+- Under 2, the start as under 4 (0.59 to 0.62 s), the imports a little shorter
+  (5.27, 5.29 s; one round 6.51).
+- The build for 2 against 4 is not a result: its times rose round by round (219,
+  290, 332, 311, 384 s, and the sixth not ended in the time given) while the Mac
+  was doing other work (its antivirus scanning at more than one core, a load of
+  about five). Nothing is concluded from it.
+- `HOT` stays 4. What this card owes: the build for 2 against 4 again, on a host
+  that is not doing other work. With measuring done by one tool and on the
+  Graviton host (R081 onwards), it is taken there.
+
 ## R082: the measure on a host that runs nothing else, beside its own code, with its counters (2026-11-28)
 
 The owner: 「マージしてGravitonで測る」, on the AWS host the owner allowed (「グラビトンは
