@@ -6272,3 +6272,37 @@ The card, written before the run.
     beginnings are someone else's wait; the next card is calls and returns
     (R076: a fifth of what the host runs), by their instructions
 - **Cut-off**: the two builds, eight rounds each beside the build as it is.
+
+**Result (2026-11-28): an arrival at a block costs about a nanosecond. The 842
+million in a compilation are about 0.8 s of its 2.7: the third of the samples at
+blocks' beginnings is the arrivals, and fewer of them is the next card.**
+
+- The card's way of making more arrivals, a smaller `MOST`, made something else
+  too: a block cut where the flags are still to be read leaves its conditional
+  jump to begin the next block, which no block can do; with `MOST` at 4 the
+  compilation left generated code 247 million times (2 million as it is) and took
+  18 s. That measured R075's kind of leaving, not an arrival.
+- So the condition was made otherwise, for this measurement only and not kept: a
+  build that cuts a block after N instructions only where the flags are dead
+  (`R64M_SPLIT`), so that nothing but the arrivals changes (the times generated
+  code was left: 2.08, 2.33, 2.68 million; the output the same).
+
+| cut every | blocks begun | the compilation (median of six) |
+|---|---|---|
+| (as it is) | 842 million (8.4 each) | 2.74 s |
+| 4 | 1,742 million (4.0 each) | 3.51 s |
+| 2 | 2,857 million (2.5 each) | 4.93 s |
+
+- The slope: 0.77 s for 900 million more, 0.86 ns each; 2.19 s for 2,015 million
+  more, 1.08 ns each. About three of the processor's cycles for an arrival.
+- The arrivals made here are the simplest kind (a branch to the block that
+  follows in the guest, joined); those of returns and jumps through registers go
+  by the table and cost more. So 0.8 s for the 842 million is the least of it.
+- What an arrival is made of: the count added at the way out, a branch taken (to
+  another place in the code), and for a block a cycle passes through the look.
+  Of those the branch taken is the processor's front end starting again
+  somewhere else; which part is the most, this cannot say.
+
+What follows, as its own card: fewer arrivals. Blocks that go on through a jump to
+a constant (JMP: 72 million arrivals of 842 by R076's count) and through a call
+into its callee (CALL: 125 million), where the guest's code allows it.
