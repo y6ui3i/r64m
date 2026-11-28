@@ -65,6 +65,15 @@ pub struct Built {
     /// CALL already, whoever keeps the blocks makes this `bl` a jump to that one: a
     /// return address has one landing, or the host would foresee the wrong one.
     pub pads: Vec<(u32, u64)>,
+    /// Where each lookup in the table of blocks has the instruction that says the
+    /// table's size (`lookup_word`), counted from the block's start: written with
+    /// `TABLE_BITS`, and again by whoever keeps the table when it grows (R074).
+    pub lookups: Vec<u32>,
+}
+
+/// The instruction of a lookup that takes an address's low `bits` for its place.
+pub fn lookup_word(bits: u32) -> u32 {
+    a64::ubfx(T1, T0, 0, bits)
 }
 
 /// What a block that uses the XMM registers begins with: if none has loaded them since
@@ -769,6 +778,9 @@ struct Emit<'a> {
     now: (u64, usize),
     /// The landings of returns written so far (`Built::pads`).
     pads: Vec<(u32, u64)>,
+    /// Where the instruction of each lookup in the table that says its size is
+    /// (`Built::lookups`).
+    lookups: Vec<u32>,
     /// The ways out to a constant address written so far: where each one's branch is
     /// and the address. What hands the address to r64m is written after the block's
     /// end, out of the way of the code that runs (R072).
@@ -1757,7 +1769,8 @@ impl Emit<'_> {
     /// what it finds by the host's `ret`: foreseen if it is the landing after the
     /// `bl` of the CALL it answers.
     fn look_up_t0(&mut self, back: bool) {
-        self.put(a64::ubfx(T1, T0, 0, TABLE_BITS));
+        self.lookups.push(self.w.len() as u32);
+        self.put(lookup_word(TABLE_BITS));
         self.put(a64::arith(true, false, false, T1, TABLE, T1, 4));
         self.put(a64::mem_imm(Size::X, Op::Load, T2, T1, 0));
         self.put(a64::mem_imm(Size::X, Op::Load, T3, T1, 8));
@@ -1804,7 +1817,7 @@ pub fn translate(m: &Mem, rip: u64, exact: bool) -> Option<Built> {
 /// The same; with `ordered`, for a process that has more than one thread: every load
 /// and store of the guest's memory keeps x86's order between threads.
 pub fn translate_as(m: &Mem, rip: u64, exact: bool, ordered: bool) -> Option<Built> {
-    let mut e = Emit { w: Vec::new(), ordered, seg: 0, flags: None, m, rip, exact, skip: false, seen: None, later: None, host: true, bails: Vec::new(), now: (0, 0), pads: Vec::new(), outs: Vec::new() };
+    let mut e = Emit { w: Vec::new(), ordered, seg: 0, flags: None, m, rip, exact, skip: false, seen: None, later: None, host: true, bails: Vec::new(), now: (0, 0), pads: Vec::new(), outs: Vec::new(), lookups: Vec::new() };
     let mut starts = Vec::new();
     let mut taken: Vec<Taken> = Vec::new();
     let mut sse = false;
@@ -2376,6 +2389,7 @@ pub fn translate_as(m: &Mem, rip: u64, exact: bool, ordered: bool) -> Option<Bui
         if not_here {
             e.w.truncate(before);
             e.outs.retain(|&(branch, _)| branch < before);
+            e.lookups.retain(|&at| (at as usize) < before);
             starts.pop();
             if starts.is_empty() {
                 return None;
@@ -2417,6 +2431,7 @@ pub fn translate_as(m: &Mem, rip: u64, exact: bool, ordered: bool) -> Option<Bui
     // its start, with everything after it one place earlier. (What jumps within the
     // block jumps by a distance, which is the same.)
     let mut e_pads = std::mem::take(&mut e.pads);
+    let mut e_lookups = std::mem::take(&mut e.lookups);
     let mut words = e.w;
     if !cycle {
         words.remove(0);
@@ -2425,6 +2440,9 @@ pub fn translate_as(m: &Mem, rip: u64, exact: bool, ordered: bool) -> Option<Bui
         }
         for pad in &mut e_pads {
             pad.0 -= 1;
+        }
+        for at in &mut e_lookups {
+            *at -= 1;
         }
     }
     // A block that uses the XMM registers loads them first. What was written for it
@@ -2438,10 +2456,13 @@ pub fn translate_as(m: &Mem, rip: u64, exact: bool, ordered: bool) -> Option<Bui
         for pad in &mut e_pads {
             pad.0 += first.len() as u32;
         }
+        for at in &mut e_lookups {
+            *at += first.len() as u32;
+        }
         first.append(&mut words);
         words = first;
     }
-    Some(Built { words, starts, end: at, seen: e.seen, pads: e_pads })
+    Some(Built { words, starts, end: at, seen: e.seen, pads: e_pads, lookups: e_lookups })
 }
 
 impl Emit<'_> {

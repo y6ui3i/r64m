@@ -6040,3 +6040,31 @@ The card, written before the run.
 - **Cut-off**: the unit tests with a case of growing, the 62 programs four ways,
   the suites by the JIT; the compilation eight rounds beside 2^16 fixed; the
   sizes the threads of the goal's server reach.
+
+**Result (2026-11-28): the hypothesis held. A compilation is 2 in a hundred faster
+than with R073's 2^16 for every thread (the table reached 2^18), and a process of
+forty threads that wait holds 34 MB where it held 72.**
+
+- The compilation of R070, eight rounds in turn, hundredths of a second: fixed
+  2^16 least 2.99, median 3.08; growing least 2.94, median 3.01. It grew three
+  times, to 2^18 (4.2 MB with the list of its lookups); misses that put another
+  out 0.22 million (2^16 fixed: 0.60).
+- Python with forty threads waiting (`VmRSS`, the same both times of two):
+  fixed 2^16 72.3 MB; growing 34.0 MB; and for comparison R072's fixed 2^14,
+  40.8 MB. A waiting thread's table stays at 64 KB.
+- The lookups are noted where they are written (`Built::lookups`), and written
+  again when the table grows; a new block is written with the size of the
+  moment. A unit test (`the_table_grows_and_what_was_made_before_finds_its_way`):
+  sixteen return addresses that share a place grow the table twice; with the
+  lookups not written again it fails (91,281 returns not found, where 30,000 is
+  the bound).
+- Tests: 124 unit tests on macOS and 125 on Linux, 116 primitives, 39 traces, the
+  62 programs four ways, every container suite by the JIT.
+- What it does not do: a table never shrinks while its blocks stand (it is made
+  small again only when generated code is emptied).
+
+The owner, along the way (「r64mは独自性を発揮したいけど、いいとこ取りをしたいよなぁ」):
+a miss still leaves generated code for r64m's own (about 125 ns); QEMU, FEX-Emu
+and box64 each have a second level that does not. Which to borrow, by this
+ledger's numbers, is the next card of this kind; the ways out not yet joined
+(2.73 million in the compilation) are the larger part still.
