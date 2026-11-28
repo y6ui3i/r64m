@@ -6152,3 +6152,34 @@ the way back in were cheap.**
   on zero, sign, overflow and carry after each shift and MUL against the
   interpreter; 116 primitives, 39 traces; the 62 programs four ways; every suite
   by the JIT; GCC's, glibc's and Python's suites three ways.
+
+## R076: a measure of what runs, by kind of instruction (2026-11-28)
+
+The owner: 「各々の命令の統計をとってどこが削減できるか調べてみる？」, and 「物差しを
+作ろう」. R071's table says where the samples fall and how many of the host's
+instructions each kind is made into; not how often each ran. Without it the cost
+of a kind cannot be weighed (a kind made into thirty instructions and run once is
+nothing), and the length of what runs between blocks is not known.
+
+The card, written before the run.
+
+- **Hypothesis**: the measure can be had exactly enough to trust, without the
+  processor's counters: a counter at every block's beginning and at every way out
+  of a block before its last instruction (a jump taken past which the block went
+  on, a way to the interpreter) gives how often each instruction of each block
+  ran. Its total is checked against what r64m counts already (the instructions
+  run in blocks): it must be the same to within a hundredth.
+- **What is changed from before**: `--jit-count`, for measuring only: with it the
+  translator writes the counters (five or six instructions each); at the end r64m
+  says, by kind of instruction, how often it ran, into how many of the host's
+  instructions it is made, their product, and its share; and how many of the
+  guest's instructions run between two arrivals at a block's beginning. Without
+  it nothing that is generated changes.
+- **Next move for each result**:
+  - The total is the count's to a hundredth → the table is the measure, taken on
+    the compilation, and written down as the order of what to cut
+  - It is not → a way out not counted (a fault, a repeat): found and counted,
+    before the table is believed
+  - What runs between arrivals is short (under ten instructions) → what every
+    arrival costs is the next card, whatever the kinds say
+- **Cut-off**: the tool, its check on the compilation, the table.
