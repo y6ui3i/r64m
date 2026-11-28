@@ -152,6 +152,8 @@ pub struct Stats {
     pub missed_taken: u64,
     /// How often the table was made larger (R074).
     pub grown: u64,
+    /// The guest's instructions translated, over all blocks made (R079).
+    pub translated: u64,
     /// What a way out not yet joined arrived at (R075): a block (it is joined now),
     /// an address where no block can begin, or one not arrived at often enough yet.
     pub unjoined_to_block: u64,
@@ -781,6 +783,7 @@ impl Jit {
         let starts = starts.iter().map(|&(word, at)| (word, (at - rip) as u32)).collect();
         self.blocks.push(Block { code, starts, first: rip, pages, guest: (from, to), guarded, incoming: Vec::new(), pads });
         self.stats.blocks += 1;
+        self.stats.translated += self.blocks.last().map_or(0, |b| b.starts.len() as u64);
         if SAY_MEMORY.load(std::sync::atomic::Ordering::Relaxed) && self.blocks.len().is_multiple_of(2000) {
             self.say_memory();
         }

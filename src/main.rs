@@ -194,7 +194,27 @@ impl SeenXmm {
     }
 }
 
+/// When r64m began, for the account a process gives as it ends (`R64M_ACCOUNT`).
+static BEGAN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+/// With `R64M_ACCOUNT` set to a file, one line added to it as the process ends (R079):
+/// the program, the time from start to end, making blocks and in generated code (in
+/// microseconds), the blocks made, the guest's instructions translated, and the
+/// instructions run. Written with one call, so that the lines of processes that
+/// end together are not mixed.
+fn account(program: &str, blocks: Option<&jit::run::Jit>, steps: u64) {
+    let Some(file) = std::env::var_os("R64M_ACCOUNT") else { return };
+    let whole = BEGAN.get().map_or(0, |t| t.elapsed().as_micros());
+    let (making, running, made, translated) = blocks.map_or((0, 0, 0, 0), |b| (b.stats.making / 1000, b.stats.running / 1000, b.stats.blocks, b.stats.translated));
+    let line = format!("{program} {whole} {making} {running} {made} {translated} {steps}\n");
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(file) {
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
 fn main() {
+    let _ = BEGAN.set(std::time::Instant::now());
     let mut args: Vec<String> = std::env::args().collect();
     // Started by the kernel for an x86-64 program (registered with `binfmt_misc`
     // under this name, with the flag that keeps the program's own first argument:
@@ -350,7 +370,7 @@ fn main() {
             made.why = Some(Default::default());
             made.why_stood = Some(Default::default());
         }
-        made.timed = jit_stats;
+        made.timed = jit_stats || std::env::var_os("R64M_ACCOUNT").is_some();
         made.ordered = jit_ordered;
         Some(made)
     } else {
@@ -482,6 +502,7 @@ fn main() {
             s.running as f64 / 1e9
         );
     }
+    account(path, blocks.as_ref(), c.steps);
     std::process::exit(code);
 }
 

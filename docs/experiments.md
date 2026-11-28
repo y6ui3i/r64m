@@ -6398,3 +6398,37 @@ The card, written before the run.
   - Lines missing for some processes (they ended another way) → those ways of
     ending are added before the sum is believed
 - **Cut-off**: one build with the account; the sums by program.
+
+**Result (2026-11-28): the hypothesis held. Making blocks is 44 s over the build,
+and 42 s of it is GCC's compiler: a fifth of the build's time, made again in each
+of its 137 processes.**
+
+One build of NetHack (`make all`, one job) with `R64M_ACCOUNT`: 522 processes
+gave their account (every one the build starts: the shell, `make`, `cc`, `cc1`,
+`as`, `ld`, the game's own tools). The build took 223 s with the account on (the
+clock read around every run of generated code, which costs; 187 s without).
+
+| program | processes | time, summed | making blocks | share | in generated code | instructions translated |
+|---|---|---|---|---|---|---|
+| `cc1` | 137 | 214.9 s | 41.6 s | 19% | 124.0 s | 150 million |
+| `as` | 137 | 5.9 s | 1.5 s | 25% | 2.4 s | 5.6 million |
+| `ld` | 6 | 0.4 s | 0.1 s | 27% | 0.1 s | 0.4 million |
+| `cc` (the driver) | 143 | 222.6 s (it waits for `cc1` and `as`) | 0.5 s | | 0.1 s | 1.5 million |
+| `make`, `sh` | 36 | (they wait) | 0.1 s | | | 0.5 million |
+
+- `cc1` translates 1.1 million of its instructions in each process, 277 ns each,
+  0.30 s a process: 41.6 s, about a fifth of the build's own time. The other
+  programs together make blocks for 2.3 s.
+- What could be saved: if `cc1`'s translations were kept from one process to the
+  next, nearly all of 41.6 s, less what it costs to bring them back. The same
+  library code (the C library, the dynamic linker) is translated again in every
+  process of every program too, a smaller part.
+- Two ways to the same end, to be weighed in their own card: making blocks faster
+  (277 ns, about 900 of the processor's cycles, for one guest instruction is a
+  great deal: the reading ahead to find flags dead is done again for every
+  instruction that sets them), or keeping translations between processes (by the
+  program's file, as a cache on disk; a design for an ADR before any code: the
+  code made would have to be written so that it can be put elsewhere and joined
+  again).
+- The account stays: `R64M_ACCOUNT=file` (it turns on the clock that times
+  making blocks, as `--jit-stats` does).
