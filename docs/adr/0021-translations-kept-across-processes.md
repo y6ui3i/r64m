@@ -74,8 +74,10 @@ What makes this possible:
    `--jit-count`, `--jit-check` and the tests nothing is kept or read.
 
 4. **What is kept and when.**
-   - Each process reads, at its start, the file for each code region it maps.
-     The file is chosen by the region's file identity and its address.
+   - Each process reads, at its start, one file: the one for its program file
+     (chosen by the file's device, inode, size and time, and r64m's build). It
+     holds the blocks of every region that program's processes ran, its libraries'
+     too: point 2 makes the choice of file a matter of finding, never of trust.
    - A kept block is used at its first arrival, not after `HOT` arrivals: it costs
      no translation.
    - At its end (and before an `execve`), a process adds the blocks it made that
