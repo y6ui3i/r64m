@@ -83,12 +83,12 @@ sequenceDiagram
     participant B as generated code
     participant G as guest's handler (x86-64)
     K->>R: SIGINT for this thread
-    R->>R: noted; the thread's word set
+    R->>R: noted, and the thread's word set
     R-->>B: back to the block
     B->>B: at the start of a block a loop goes through:<br/>the word is set, the block is left
     B->>G: a frame built on the guest's stack<br/>as Linux builds one on x86-64
     G->>R: rt_sigreturn
-    R->>B: the registers put back; on from where it was
+    R->>B: the registers put back, on from where it was
 ```
 
 A fault in generated code (a load or store the host refused) is the same way round:
