@@ -6007,3 +6007,36 @@ hundred (205 s to 199 s). Kept at 2^16.**
 The owner, on the result: 「でもVM１台に256とか可変で割り当てられるから、俺らも可変に
 したほうがいい気がするけどどうなんだろう？」: a table that grows with the thread's
 work, in place of one size for all. Noted for its own card.
+
+## R074: a table of blocks that grows with its thread (2026-11-28)
+
+The owner, on R073's fixed size: 「でもVM１台に256とか可変で割り当てられるから、俺らも
+可変にしたほうがいい気がするけどどうなんだろう？」, and then 「固定で入れてから可変に」.
+A thread's table is one size for every thread: a compiler with 117,000 blocks
+gains from 4 MB of it, and a server's twenty threads that mostly wait pay 1 MB
+each for nothing.
+
+The card, written before the run.
+
+- **Hypothesis**: a table that begins at 2^12 places (64 KB) and is made four
+  times larger whenever as many addresses have been put out of it as it has
+  places, to 2^18 at most, does on a compilation at least as well as R073's
+  fixed 2^16 (it reaches 2^18 there, which was 1 in a hundred better), and holds
+  a waiting thread at 64 KB.
+- **What is changed from before**: the size is the thread's own. The one
+  instruction of every lookup that says the size (`ubfx`, the low bits taken)
+  is noted where it is written; when the table grows its entries are put in
+  their new places and each of those instructions is written again with the
+  new size, as a jump is written again when it is joined. A block made after is
+  written with the size of the moment.
+- **Next move for each result**:
+  - A compilation no slower than with 2^16 fixed, a waiting thread's table 64 KB
+    → kept
+  - Slower → the growing itself costs (a hundred thousand instructions written
+    again, each with the processor's caches told): grown earlier, or by more at
+    once
+  - A case fails → a lookup not noted, still asking with the old size: found by
+    the case and noted
+- **Cut-off**: the unit tests with a case of growing, the 62 programs four ways,
+  the suites by the JIT; the compilation eight rounds beside 2^16 fixed; the
+  sizes the threads of the goal's server reach.
