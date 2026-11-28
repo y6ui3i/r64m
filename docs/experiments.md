@@ -6242,3 +6242,67 @@ The order to cut, by this measure:
 
 Each its own card; the measure stays (`--jit-count`, for measuring only: without it
 nothing generated changes).
+
+## R077: what an arrival at a block costs, by making more of them (2026-11-28)
+
+The owner: 「マージして進める」. R076 found blocks begun every 8.4 instructions (842
+million times in one compilation), and R071 a third of the samples in generated
+code at blocks' beginnings, which nothing so far has explained. Before changing how
+blocks are made to be longer, what an arrival costs is to be known: the processor's
+counters cannot be had on this VM, so the condition is made instead.
+
+The card, written before the run.
+
+- **Hypothesis**: an arrival costs about a nanosecond (two or three instructions and
+  a branch taken, which the processor's front end pays for), so 842 million of them
+  are a quarter of the compilation and longer blocks would gain much. The other
+  possibility: it costs a few tenths of a nanosecond, and the samples at blocks'
+  beginnings are where the processor waited for something else (a load, a branch
+  guessed wrongly before) and are not the arrival's.
+- **What is changed from before**: nothing to keep. Builds with the most
+  instructions in a block (`MOST`, 64) at 2 and at 4, which make many more
+  arrivals and nothing else different; for each, the arrivals by `--jit-count` and
+  the compilation's time (eight rounds, in turn with the build as it is). The
+  slope, more time over more arrivals, is what one costs.
+- **Next move for each result**:
+  - A nanosecond or more → fewer arrivals is the next card: blocks that go on
+    through a jump to a constant (72 million JMP of 32 bits ended blocks) and into
+    a call's callee
+  - A few tenths or less → arrivals are not where the time is: the samples at
+    beginnings are someone else's wait; the next card is calls and returns
+    (R076: a fifth of what the host runs), by their instructions
+- **Cut-off**: the two builds, eight rounds each beside the build as it is.
+
+**Result (2026-11-28): an arrival at a block costs about a nanosecond. The 842
+million in a compilation are about 0.8 s of its 2.7: the third of the samples at
+blocks' beginnings is the arrivals, and fewer of them is the next card.**
+
+- The card's way of making more arrivals, a smaller `MOST`, made something else
+  too: a block cut where the flags are still to be read leaves its conditional
+  jump to begin the next block, which no block can do; with `MOST` at 4 the
+  compilation left generated code 247 million times (2 million as it is) and took
+  18 s. That measured R075's kind of leaving, not an arrival.
+- So the condition was made otherwise, for this measurement only and not kept: a
+  build that cuts a block after N instructions only where the flags are dead
+  (`R64M_SPLIT`), so that nothing but the arrivals changes (the times generated
+  code was left: 2.08, 2.33, 2.68 million; the output the same).
+
+| cut every | blocks begun | the compilation (median of six) |
+|---|---|---|
+| (as it is) | 842 million (8.4 each) | 2.74 s |
+| 4 | 1,742 million (4.0 each) | 3.51 s |
+| 2 | 2,857 million (2.5 each) | 4.93 s |
+
+- The slope: 0.77 s for 900 million more, 0.86 ns each; 2.19 s for 2,015 million
+  more, 1.08 ns each. About three of the processor's cycles for an arrival.
+- The arrivals made here are the simplest kind (a branch to the block that
+  follows in the guest, joined); those of returns and jumps through registers go
+  by the table and cost more. So 0.8 s for the 842 million is the least of it.
+- What an arrival is made of: the count added at the way out, a branch taken (to
+  another place in the code), and for a block a cycle passes through the look.
+  Of those the branch taken is the processor's front end starting again
+  somewhere else; which part is the most, this cannot say.
+
+What follows, as its own card: fewer arrivals. Blocks that go on through a jump to
+a constant (JMP: 72 million arrivals of 842 by R076's count) and through a call
+into its callee (CALL: 125 million), where the guest's code allows it.
