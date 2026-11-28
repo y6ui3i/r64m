@@ -769,6 +769,10 @@ struct Emit<'a> {
     now: (u64, usize),
     /// The landings of returns written so far (`Built::pads`).
     pads: Vec<(u32, u64)>,
+    /// The ways out to a constant address written so far: where each one's branch is
+    /// and the address. What hands the address to r64m is written after the block's
+    /// end, out of the way of the code that runs (R072).
+    outs: Vec<(usize, u64)>,
 }
 
 impl Emit<'_> {
@@ -1707,10 +1711,23 @@ impl Emit<'_> {
         self.leave_counted(rip);
     }
 
-    /// The same, the block's instructions having been counted already.
+    /// The same, the block's instructions having been counted already. Only the
+    /// branch is written here; what it goes to until it is joined is written after
+    /// the block's end (`hand_over`). Joined, the branch is all that is run, and the
+    /// code that runs lies together (R072: the seven instructions that hand the
+    /// address over stood after every branch, never run once it was joined, and
+    /// the code that ran was spread over three times the memory it needed).
     fn leave_counted(&mut self, rip: u64) {
-        self.put(a64::b(1));
-        self.put(a64::adr(T1, -4));
+        self.outs.push((self.w.len(), rip));
+        self.put(a64::nop());
+    }
+
+    /// What an unjoined way out goes to: where it was left from (the branch, which
+    /// r64m rewrites to join it), the address, and out.
+    fn hand_over(&mut self, branch: usize, rip: u64) {
+        let here = self.w.len();
+        self.w[branch] = a64::b((here - branch) as i32);
+        self.put(a64::adr(T1, -(((here - branch) * 4) as i32)));
         self.put(a64::mem_imm(Size::X, Op::Store, T1, CPU, offset_of!(Cpu, left_from) as u32));
         self.constant(T0, rip);
         self.out();
@@ -1787,7 +1804,7 @@ pub fn translate(m: &Mem, rip: u64, exact: bool) -> Option<Built> {
 /// The same; with `ordered`, for a process that has more than one thread: every load
 /// and store of the guest's memory keeps x86's order between threads.
 pub fn translate_as(m: &Mem, rip: u64, exact: bool, ordered: bool) -> Option<Built> {
-    let mut e = Emit { w: Vec::new(), ordered, seg: 0, flags: None, m, rip, exact, skip: false, seen: None, later: None, host: true, bails: Vec::new(), now: (0, 0), pads: Vec::new() };
+    let mut e = Emit { w: Vec::new(), ordered, seg: 0, flags: None, m, rip, exact, skip: false, seen: None, later: None, host: true, bails: Vec::new(), now: (0, 0), pads: Vec::new(), outs: Vec::new() };
     let mut starts = Vec::new();
     let mut taken: Vec<Taken> = Vec::new();
     let mut sse = false;
@@ -2358,6 +2375,7 @@ pub fn translate_as(m: &Mem, rip: u64, exact: bool, ordered: bool) -> Option<Bui
         }
         if not_here {
             e.w.truncate(before);
+            e.outs.retain(|&(branch, _)| branch < before);
             starts.pop();
             if starts.is_empty() {
                 return None;
@@ -2390,6 +2408,10 @@ pub fn translate_as(m: &Mem, rip: u64, exact: bool, ordered: bool) -> Option<Bui
         debug_assert!(e.w.len() - jump < 1 << 13);
         e.w[jump] |= ((e.w.len() - jump) as u32 & 0x7_ffff) << 5;
         e.bail_out(at, n);
+    }
+    // And what the ways out to constant addresses go to until they are joined.
+    for (branch, rip) in std::mem::take(&mut e.outs) {
+        e.hand_over(branch, rip);
     }
     // The look is taken out of a block no cycle passes through: the instruction at
     // its start, with everything after it one place earlier. (What jumps within the

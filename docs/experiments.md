@@ -5876,3 +5876,64 @@ a few kinds hold more than half. What follows, each its own card:
 
 - The tool stays: `--profile` prints the table (`r64m: cost:` lines).
 - Unit tests 123; the profile is not run by any case (it prints addresses).
+
+## R072: the ways out that are not run, set aside (2026-11-28)
+
+The owner: 「マージして進める」. R071 found every way out of a block written as a
+branch and seven instructions after it that hand the address to r64m; once the
+branch is joined to the next block (as nearly all are) the seven are never run
+again, and they lie between the pieces of code that are. Of a compilation's time
+in generated code 37 in a hundred was at blocks' beginnings, and what it is was
+not known: branches guessed wrongly, or code fetched from far apart.
+
+The card, written before the run.
+
+- **Hypothesis**: it is code fetched from far apart. With the seven set aside
+  (written after the block's last instruction, past its ways to the
+  interpreter, the branch going there until it is joined) the code that runs
+  lies together: about a third of the memory it took. Then a compilation is
+  faster by a tenth or more, and the samples at blocks' beginnings fall by more
+  than that.
+- **What is changed from before**: `leave_counted` writes the branch alone and
+  notes it; the block's end writes, for each, the seven, with `adr` pointing back
+  at the branch, as before. A join is undone by pointing the branch back at its
+  own seven (it pointed at the next word), which r64m learns from the branch
+  before the join. Nothing else of what is generated changes.
+- **Next move for each result**:
+  - The compilation is faster by a tenth or more, and the whole build by a good
+    part of that → kept; the beginnings were fetching
+  - Faster by under a twentieth → it was not fetching: what is left is the
+    branches (the look for a signal, the count, a block's entry by the table),
+    and the next card is those
+  - Slower → the seven far from their branch cost when a block is new (each is
+    run once): taken back, said
+- **Cut-off**: the unit tests, the 62 programs four ways, the container suites
+  three ways; then the compilation of R070 and the build of R069, three each,
+  beside the build before.
+
+**Result (2026-11-28): the hypothesis was wrong. With the code that runs lying
+together, a compilation is 3 in a hundred faster by the median and the whole
+build not faster at all (203 s for 204); the samples at blocks' beginnings did
+not fall. It was not fetching. Kept, for doing no harm and some good.**
+
+- One compilation (R070's), the two builds in turn, eight rounds, hundredths of
+  a second: before 3.07 at least, 3.14 the median; after 3.02 and 3.04.
+- Its profile: samples at blocks' beginnings 670 before, 706 after (of 2,173 and
+  2,040 in generated code); time in generated code by r64m's own clock 2.42 s
+  and 2.25 s. The code made is the same in size (29.4 MB): its words are in
+  another order, nothing fewer.
+- The whole build, three of each in turn: 204, 205, 205 s before; 203, 203, 204
+  after.
+- Tests: 124 unit tests on Linux, the 62 programs four ways (248 runs as the
+  interpreter), every container suite by the JIT.
+- A first round of the builds measured nothing: they were run under `chroot`
+  into the x86-64 image's files from an arm64 shell (so that its clock times
+  them), and without `/proc` there r64m could not start another program
+  (`/proc/self/exe`): every build ended at its first `cp`. `/proc` mounted, the
+  second round is the table above.
+
+By the card, the next is the branches: what a block's beginning holds and what
+its arrival costs (the look for a signal, the count, entering by the table and
+by `ret`). The 37 in a hundred is still not explained; the profile cannot tell a
+branch guessed wrongly from anything else on this VM, so the next card changes
+one of them and times it.
