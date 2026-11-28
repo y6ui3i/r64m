@@ -5937,3 +5937,46 @@ its arrival costs (the look for a signal, the count, entering by the table and
 by `ret`). The 37 in a hundred is still not explained; the profile cannot tell a
 branch guessed wrongly from anything else on this VM, so the next card changes
 one of them and times it.
+
+## R073: what a block's arrival costs (2026-11-28)
+
+The owner: 「マージして進める」. R072 showed the 37 in a hundred at blocks'
+beginnings is not code fetched from far apart. Before changing a branch to see,
+r64m was made to say why generated code is left for r64m's own (`--jit-stats`
+now says it), since every leaving is an arrival by `enter` at a block's
+beginning after a branch through a register, which the host cannot foresee, and
+r64m's own work between.
+
+What it says of the compilation of R070: of 4.9 million times generated code was
+entered, it was left
+
+- at a way out not yet joined to its block: 2.73 million;
+- by an address looked up in the table (a return, a jump or call through a
+  register) and not found there: 2.02 million, **1.97 million of them because
+  its place held another address**, which this one then put out;
+- for the interpreter: 0.14 million; by a fault: none.
+
+The table has 2^14 places (`TABLE_BITS`), chosen by an address's low bits, and
+the compiler has 117,000 blocks: returns and calls through registers put each
+other out of it two million times.
+
+The card, written before the run.
+
+- **Hypothesis**: the table is too small, and its misses are a large part of the
+  time at blocks' beginnings and in r64m's own keeping. With 2^16 places the
+  misses that put another out fall to a quarter or less, and the compilation is
+  faster by a tenth or more; 2^18 adds less again.
+- **What is changed from before**: `TABLE_BITS`, 14 then 16 then 18; nothing else.
+  The table is 16 bytes a place, one for each thread: 256 KB now, 1 MB at 2^16,
+  4 MB at 2^18 (R051 counted a thread's memory: this is to be said with the
+  result).
+- **Next move for each result**:
+  - Faster by a tenth or more at 2^16 → kept at the size where the gain stops,
+    with the memory said; then the ways out that are left unjoined (2.73
+    million) in a card of their own
+  - The misses fall and the time does not → arriving by `enter` is not what
+    costs: the unjoined ways out next, and the beginnings are still not known
+  - The misses do not fall → the places are chosen badly (low bits of addresses
+    that are aligned alike): another way of choosing, in place of more places
+- **Cut-off**: the three sizes, the compilation eight rounds each in turn, the
+  whole build three times at the size chosen.
