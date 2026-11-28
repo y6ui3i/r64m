@@ -22,7 +22,12 @@ command (`xtask/src/main.rs`), so what the CI runs can be run by hand:
 `main` is protected (since 2026-11-27): it changes only by a pull request, and a
 pull request is merged only when the jobs `tests` and `cases` have passed on it; no push straight
 to it, no forced push, no deletion, for the owner too. That is why a pull request of
-documents only is run as well.
+documents only is run as well, but only to its first job: `changed` (`cargo xtask
+changed`) looks at what GitHub's merge of the pull request changes, and when that is
+documents only (`docs/`, any `.md`, `LICENSE`: the paths a push to `main` is not run
+for) every other job is skipped. A skipped job counts as passed for `main`'s
+protection, so such a pull request can be merged in a minute or less, and its merge
+starts no run.
 
 The images of the container cases are Docker Hub's by digest (the very images the
 cases were taken in on hal; `SUITES` in `xtask/src/main.rs`), but three that are

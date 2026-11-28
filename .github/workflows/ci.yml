@@ -14,7 +14,8 @@ on:
     paths-ignore: ["docs/**", "**.md", "LICENSE"]
   # Every pull request, one of documents only too: `main` takes a pull request
   # only when `tests` and `cases` have passed on it, and a run that never starts never
-  # passes.
+  # passes. One of documents only is run to the job `changed` and no further: the
+  # jobs it skips count as passed.
   pull_request:
   schedule:
     - cron: "17 18 * * 6"
@@ -39,9 +40,25 @@ env:
   FULL: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.full) }}
 
 jobs:
+  # Whether a pull request changes anything but documents (the paths a push to
+  # `main` is not run for). Every other job is skipped when it does not.
+  changed:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      code: ${{ steps.said.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - id: said
+        run: cargo xtask changed
+
   # The three images that are built, not pulled: built on x86-64, where their own
   # programs run, and kept until a Dockerfile changes.
   images:
+    needs: changed
+    if: needs.changed.outputs.code == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -61,6 +78,8 @@ jobs:
   # The tests that need no image: the unit tests, the primitives and traces
   # (g64m's, from its public repository), the guest's own programs.
   tests:
+    needs: changed
+    if: needs.changed.outputs.code == 'true'
     runs-on: ubuntu-24.04-arm
     # The tests take a minute and a half; a test that does not end (R058) fails the
     # job in ten, not in two hours.
@@ -85,7 +104,8 @@ jobs:
 
   # The programs of x86-64 images, held to what the real machine printed.
   cases:
-    needs: images
+    needs: [changed, images]
+    if: needs.changed.outputs.code == 'true'
     runs-on: ubuntu-24.04-arm
     # Each case has its own limit (R060); the weekly three ways take an hour or so.
     timeout-minutes: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 120 || 20 }}
@@ -104,7 +124,8 @@ jobs:
         run: cargo xtask container --ways ${{ env.FULL == 'true' && 'all' || 'jit' }} --jobs ${{ env.FULL == 'true' && '1' || '4' }}
 
   macos:
-    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.full)
+    needs: changed
+    if: needs.changed.outputs.code == 'true' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.full))
     runs-on: macos-15
     timeout-minutes: 30
     steps:
