@@ -6844,3 +6844,37 @@ so no times taken here are leaned on):
   Java suite then passed 28 times in 28 (6 cold, 6 warm, 6 with no cache, then 10
   cold, two at once). One in 29 with a cache; R085's fault of the JIT's is the
   likely one, but not shown.
+
+**Result (2026-11-28, Graviton c7g.large, R084's measure again, R087's build beside
+`main`): with no cache the branch is `main`'s speed again; warm it is faster by 10% to
+47%; a build from an empty cache is faster by 14%. A lone process from an empty cache
+is not shown to cost little: the bench's cold line cannot say it.**
+
+| work | no cache: `main` / this | warm: `main` / this | cold: this | cold: `main`'s first |
+|---|---|---|---|---|
+| compile | 1.008 | 1.102 (5.008 s) | 5.616 s | 5.453 s |
+| hello | 1.005 | 1.433 (0.161 s) | 0.281 s | 0.232 s |
+| build | 1.019 | 1.161 (318.4 s) | 319.6 s | 371.5 s |
+| start | 1.000 | 1.469 (0.072 s) | 0.187 s | 0.107 s |
+
+- R086 holds on Graviton: with no cache the four are within 2% of `main`, none slower
+  (R084's branch: 2% to 10% slower).
+- Warm as R084 (1.106, 1.420, 1.159, 1.487): the write made cheap did not move it.
+- A build from an empty cache: 319.6 s against 371.5 s (R084: 327.8 s).
+- The cold line is biased, and that is found here: in the run with no cache at all,
+  this side's slowest round is always far out (`start` 0.244 s against a median of
+  0.107, `hello` 0.300 against 0.228, `compile` 5.797 against 5.513), and `main`'s
+  never is. The side named first runs first in a fresh container, and its first
+  process pays for what is not yet in the host's memory (r64m's 14 MB, the image's
+  files). The cold run is exactly that first process, and `main`'s "first" is its
+  second. So `start` cold 0.187 s is less than this side's first run with no cache
+  (0.244 s), and the cost of writing is somewhere under what the line says. The
+  Mac's ten in a row (busy host) said about 10% for `python3`.
+- Against the card of R087: the Mac's 5% for cold not shown (its host was busy), and
+  on Graviton the line cannot show it. Kept all the same, because the cache is used
+  only when asked for, no cache is `main`'s speed, and the work the cache is for (a
+  build, the same programs again) gains cold and warm.
+- Owed: the bench's cold measured fairly (a first, untimed run of each side before
+  either's cold run; or the cold run taken in a container of its own after the
+  files are read), then the lone cold write, if it is still there, made smaller;
+  R085. The instance ran 20:05 to 21:31, 1 h 26 min (today 2 h 53 min in all).
