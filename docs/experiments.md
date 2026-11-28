@@ -6698,3 +6698,48 @@ Found on the way (2026-11-28, the Mac, Docker's arm64 VM):
 - So a kept block is now taken where it would have been made (the fourth arrival),
   never before: the Java suite passed six runs in six (one cold, five warm). What the
   cache saves is the translating, not yet the interpreted arrivals before it.
+- All suites by the JIT twice with one cache after that: every case passed, cold and
+  warm (Java two of two each time). The cache was 236 MB for all the suites.
+
+**Result (2026-11-28, Graviton c7g.large, `cargo xtask bench`, the branch beside
+`main` round by round): warm, the four works are faster by 11% to 49%; but with no
+cache the branch is slower than `main` by 2% to 10%, and a lone cold process pays
+for writing its file. Not kept as it stands.**
+
+With no cache (`R64M_CACHE` not set), medians:
+
+| work | `main` | this | `main` / this |
+|---|---|---|---|
+| compile | 5.625 s | 5.746 s | 0.979 |
+| hello | 0.232 s | 0.256 s | 0.905 |
+| build | 365.3 s | 381.8 s | 0.957 |
+| start | 0.110 s | 0.123 s | 0.895 |
+
+With the cache warm (each r64m ran the work once first, untimed, the `cold` run),
+medians, and the cold run beside `main`'s first run:
+
+| work | `main` | this, warm | `main` / warm | `main`'s first | this, cold |
+|---|---|---|---|---|---|
+| compile | 5.494 s | 4.966 s | 1.106 | 5.496 s | 5.651 s |
+| hello | 0.230 s | 0.162 s | 1.420 | 0.229 s | 0.299 s |
+| build | 366.6 s | 316.3 s | 1.159 | 363.4 s | 327.8 s |
+| start | 0.105 s | 0.071 s | 1.487 | 0.106 s | 0.203 s |
+
+- Warm, the card's first half holds: a tenth or more on every work, the build 15.9%
+  (50 s, more than R079's 41.6 s of making, as the card guessed from what is no longer
+  translated). `hello` and `start`, almost all starting, gain most.
+- Cold, a build already gains (327.8 s against 363.4 s): its 137 `cc1`s fill the cache
+  for each other. A lone process does not: `start` cold is 1.9 times `main`, `hello`
+  1.3, `compile` 1.03. That is the writing out of the file (a merge and a write of all
+  that was made, at exit), which the card bounded by a hundredth. It is far over.
+- With no cache, slower by 2% to 10%. The card did not foresee it. With no cache
+  nothing is opened, read or written (`cache::open` is not called); what is in every
+  translation is the scan's note of what it read (`Built::read`, one vector per block),
+  and the build is otherwise a different binary. Each run is one launch, `start`'s
+  and `hello`'s slow side has outliers (spread 118% and 28%), but `build`, 4.3% over
+  three rounds of spread 1.6%, is not noise. Not yet known which; found first, on
+  the Mac by `--jit-stats` and on Graviton by the counters.
+- Owed, in this order: the cost with no cache found and taken away (the branch must
+  be no slower than `main` with the cache off); the cold write made cheap (what is
+  written, and when: perhaps only the new blocks appended, not the whole file merged);
+  then the measure again. The instance ran 17:40 to 19:07, 1 h 27 min.
