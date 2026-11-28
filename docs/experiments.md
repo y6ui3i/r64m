@@ -6338,3 +6338,33 @@ The card, written before the run.
   interpreter; a store into the code past the JMP forgets the block), the 62
   programs four ways, the suites by the JIT and three ways for GCC's, glibc's and
   Python's; the compilation eight rounds, the build three times.
+
+**Result (2026-11-28): arrivals fell as said and the compilation was slower:
+taken back. What following a jump costs is making more blocks: a guest
+instruction is translated for about 270 ns, and following jumps translated a
+quarter more of them.**
+
+| | before | going on through JMP |
+|---|---|---|
+| blocks begun | 842 million (8.4 each) | 741 million (9.5 each) |
+| the host's instructions run | 17.53 billion | 17.33 billion |
+| guest instructions translated | 1.34 million | 1.66 million |
+| code made | 37.9 MB | 43.3 MB |
+| the compilation, median of eight | 2.88 s | 2.96 s |
+
+- 101 million fewer arrivals (about 0.1 s by R077) and 1 in a hundred fewer
+  instructions run; and 0.32 million more instructions translated, the same code
+  made again where a jump's target is also a block of its own. Making blocks took
+  0.36 s for 1.34 million instructions in R070 (about 270 ns each): 0.32 million
+  more is about 0.09 s. The two nearly cancel; the rest of the 0.08 s lost may be
+  the larger code (14 in a hundred more) in the processor's caches. Not
+  separated.
+- The tests the change needed (a block across a jump forward and back, and two
+  older tests that used `jmp +0` to cut a block) passed; with the change taken
+  back they are not kept.
+
+What this says beyond itself: making blocks is not a small cost. A compiler is a
+short-lived process; the build of NetHack starts `cc1` 143 times, and each makes
+its blocks anew. If each spends a few tenths of a second making them, that is a
+quarter of the build. How much it is, summed over a whole build, is the next
+thing to count; keeping translations between processes is what it would be for.
