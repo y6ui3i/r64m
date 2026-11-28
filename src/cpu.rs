@@ -355,6 +355,30 @@ pub const REC_CARRY_SET: u64 = 1 << 25;
 /// UCOMIS and COMIS: the two operands' bits, singles (width 32) or doubles.
 pub const REC_FLOAT: u64 = 0x0a;
 
+/// Whether the count of instructions run (`Cpu::steps`) is kept whole (R083): by the
+/// options that say it or hold to it (`--count`, `--jit-stats`, `--jit-check`, a trace),
+/// by `R64M_ACCOUNT`, and in the tests. Otherwise generated code does not add to it,
+/// and RDTSC answers from the host's counter of time.
+pub static COUNT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(cfg!(test));
+
+/// The host's counter of time in nanoseconds, for RDTSC when instructions are not
+/// counted: a real processor's TSC goes on at a fixed rate whatever runs.
+fn host_ticks() -> u64 {
+    #[cfg(target_arch = "aarch64")]
+    {
+        let (count, rate): (u64, u64);
+        unsafe {
+            core::arch::asm!("mrs {}, cntvct_el0", out(reg) count);
+            core::arch::asm!("mrs {}, cntfrq_el0", out(reg) rate);
+        }
+        (count as u128 * 1_000_000_000 / rate.max(1) as u128) as u64
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64)
+    }
+}
+
 /// Works the flags out from the JIT's record, if generated code left one, so that
 /// RFLAGS is as the interpreter would have left it.
 pub fn settle(c: &mut Cpu) {
@@ -1408,8 +1432,11 @@ impl Run<'_> {
                     // The hints, the long NOP, ENDBR64: an operand that is not used.
                     0x0d | 0x18..=0x1f => self.modrm(0)?,
                     0x31 => {
-                        self.c.reg[RAX] = self.c.steps & 0xffff_ffff;
-                        self.c.reg[RDX] = self.c.steps >> 32;
+                        // RDTSC: the count of instructions where it is kept (the tests
+                        // hold r64m to itself by it), else the host's time (R083).
+                        let tsc = if COUNT.load(std::sync::atomic::Ordering::Relaxed) { self.c.steps } else { host_ticks() };
+                        self.c.reg[RAX] = tsc & 0xffff_ffff;
+                        self.c.reg[RDX] = tsc >> 32;
                     }
                     0x40..=0x4f => {
                         // The register is written either way: a 32-bit one loses its

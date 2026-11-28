@@ -1139,7 +1139,7 @@ impl Emit<'_> {
         self.put(a64::arith_imm(true, true, false, RCX, RCX, 1, false));
         let last = self.w.len();
         self.put(a64::nop());
-        self.put(a64::arith_imm(true, false, false, RAN, RAN, 1, false));
+        self.ran(1);
         self.put(a64::b(top as i32 - self.w.len() as i32));
         for from in [none, last] {
             self.w[from] = a64::cbz(true, false, RCX, (self.w.len() - from) as i32);
@@ -1203,6 +1203,14 @@ impl Emit<'_> {
         self.w[over] = a64::b((self.w.len() - over) as i32);
     }
 
+    /// `n` added to the count of instructions run, where it is kept (R083); nothing
+    /// otherwise. An addition that leaves the host's flags alone.
+    fn ran(&mut self, n: u32) {
+        if crate::cpu::COUNT.load(std::sync::atomic::Ordering::Relaxed) {
+            self.put(a64::arith_imm(true, false, false, RAN, RAN, n, false));
+        }
+    }
+
     /// One added to a counter (`--jit-count`), by T4 and T5, which are free wherever
     /// this is written.
     fn count(&mut self, counter: u32) {
@@ -1228,7 +1236,7 @@ impl Emit<'_> {
     /// begins there.
     fn bail_out(&mut self, at: u64, n: usize) {
         self.count_exit(n);
-        self.put(a64::arith_imm(true, false, false, RAN, RAN, n as u32, false));
+        self.ran(n as u32);
         self.put(a64::mem_imm(Size::X, Op::Store, a64::ZR, CPU, offset_of!(Cpu, left_from) as u32));
         self.constant(T0, at);
         self.put(a64::mem_imm(Size::X, Op::Store, T0, CPU, offset_of!(Cpu, rip) as u32));
@@ -1784,7 +1792,7 @@ impl Emit<'_> {
     /// jump it was; Rust rewrites the jump to go to the block at that address once
     /// there is one, and from then on this is one jump.
     fn leave(&mut self, rip: u64, n: usize) {
-        self.put(a64::arith_imm(true, false, false, RAN, RAN, n as u32, false));
+        self.ran(n as u32);
         self.leave_counted(rip);
     }
 
@@ -2342,7 +2350,7 @@ pub fn translate_as(m: &Mem, rip: u64, exact: bool, ordered: bool) -> Option<Bui
             0xe8 => {
                 e.constant(T0, next);
                 e.push(T0);
-                e.put(a64::arith_imm(true, false, false, RAN, RAN, starts.len() as u32, false));
+                e.ran(starts.len() as u32);
                 e.call_over_landing(next);
                 e.leave_counted(ins.imm as u64);
                 ended = true;
@@ -2362,7 +2370,7 @@ pub fn translate_as(m: &Mem, rip: u64, exact: bool, ordered: bool) -> Option<Bui
                     e.push(T0);
                 }
                 e.put(a64::mov(true, T0, T2));
-                e.put(a64::arith_imm(true, false, false, RAN, RAN, starts.len() as u32, false));
+                e.ran(starts.len() as u32);
                 if field == 2 {
                     e.call_over_landing(next);
                 }
@@ -2372,7 +2380,7 @@ pub fn translate_as(m: &Mem, rip: u64, exact: bool, ordered: bool) -> Option<Bui
             0xc3 => {
                 e.mem(Size::X, Op::Load, T0, RSP);
                 e.put(a64::arith_imm(true, false, false, RSP, RSP, 8, false));
-                e.put(a64::arith_imm(true, false, false, RAN, RAN, starts.len() as u32, false));
+                e.ran(starts.len() as u32);
                 e.look_up_t0(true);
                 ended = true;
             }
@@ -2381,7 +2389,6 @@ pub fn translate_as(m: &Mem, rip: u64, exact: bool, ordered: bool) -> Option<Bui
                 let target = ins.imm as u64;
                 // The block's instructions are counted once, before the jump, for both
                 // its ways (an addition that leaves the host's flags alone).
-                let count = a64::arith_imm(true, false, false, RAN, RAN, n as u32, false);
                 match e.flags.and_then(|f| condition(ins.op as u8 & 15, f)) {
                     // The host's flags do not say. (Never where a record was left for
                     // this jump: it was left because they do.)
@@ -2390,7 +2397,7 @@ pub fn translate_as(m: &Mem, rip: u64, exact: bool, ordered: bool) -> Option<Bui
                         not_here = true;
                     }
                     Some(Jump::Always) => {
-                        e.put(count);
+                        e.ran(n as u32);
                         e.leave_way(target, later);
                     }
                     // The block goes on past the jump (R018): the way taken is written
@@ -2421,7 +2428,7 @@ pub fn translate_as(m: &Mem, rip: u64, exact: bool, ordered: bool) -> Option<Bui
                         continue;
                     }
                     Some(Jump::Never) => {
-                        e.put(count);
+                        e.ran(n as u32);
                         e.leave_way(next, later);
                     }
                     // Back to this block's own start, with no record to write on the
@@ -2429,14 +2436,14 @@ pub fn translate_as(m: &Mem, rip: u64, exact: bool, ordered: bool) -> Option<Bui
                     // jump taken a round (R015). Not where each pass through a block
                     // is to be checked.
                     Some(Jump::If(cond)) if target == rip && !e.exact && e.way_needs(target, later).is_none() => {
-                        e.put(count);
+                        e.ran(n as u32);
                         e.put(a64::b_cond(cond, -(e.w.len() as i32)));
                         e.leave_way(next, later);
                     }
                     Some(Jump::If(cond)) => {
                         // Over the way out for "not taken" to the one for "taken": the
                         // jump is written when it is known how far that is.
-                        e.put(count);
+                        e.ran(n as u32);
                         let jump_at = e.w.len();
                         e.put(a64::nop());
                         e.leave_way(next, later);

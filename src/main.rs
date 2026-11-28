@@ -289,6 +289,13 @@ fn main() {
         fail(format_args!("a trace is of the interpreter: not with --jit"));
     }
     let jit = !interpret && !trace;
+    // The count of instructions kept whole only where something reads it (R083).
+    if count || jit_check || jit_stats || trace || interpret
+        || jit::translate::COUNTING.load(std::sync::atomic::Ordering::Relaxed)
+        || std::env::var_os("R64M_ACCOUNT").is_some()
+    {
+        cpu::COUNT.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     // The name the program is given for itself, if it is not to be its path: as
     // `execve` hands it on.
     let mut argv0 = None;
