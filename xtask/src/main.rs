@@ -571,15 +571,52 @@ fn bench(mut args: Vec<String>) -> bool {
     ok
 }
 
+/// Whether what is to be tested is of documents only: the paths a push to `main`
+/// is not run for (`paths-ignore` in .github/workflows/ci.yml), kept the same here.
+fn of_documents(path: &str) -> bool {
+    path.starts_with("docs/") || path.ends_with(".md") || path == "LICENSE"
+}
+
+/// For CI: says `code=true` or `code=false` (to `$GITHUB_OUTPUT` when it is set):
+/// whether the commit checked out changes anything but documents. A pull request's
+/// commit is GitHub's merge of it into `main`, and its first parent is `main`; a
+/// commit with one parent, or none that can be read, is taken as code.
+fn changed() {
+    let parents = Command::new("git").args(["rev-list", "--parents", "-n", "1", "HEAD"]).output();
+    let merge = parents.as_ref().is_ok_and(|o| String::from_utf8_lossy(&o.stdout).split_whitespace().count() == 3);
+    let names = Command::new("git").args(["diff", "--name-only", "HEAD^1", "HEAD"]).output();
+    let code = match names {
+        Ok(o) if merge && o.status.success() => {
+            let names = String::from_utf8_lossy(&o.stdout).into_owned();
+            for name in names.lines() {
+                eprintln!("xtask: changed: {name}");
+            }
+            names.lines().any(|name| !of_documents(name))
+        }
+        _ => true,
+    };
+    let line = format!("code={code}\n");
+    print!("{line}");
+    if let Some(file) = std::env::var_os("GITHUB_OUTPUT") {
+        use std::io::Write;
+        let written = std::fs::OpenOptions::new().append(true).open(&file).and_then(|mut f| f.write_all(line.as_bytes()));
+        written.unwrap_or_else(|e| fail(format_args!("$GITHUB_OUTPUT: {e}")));
+    }
+}
+
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
-        fail("test | guest | images | container | ci | install | uninstall | status | waits | bench (see xtask/src/main.rs)");
+        fail("test | guest | changed | images | container | ci | install | uninstall | status | waits | bench (see xtask/src/main.rs)");
     }
     let command = args.remove(0);
     let ok = match command.as_str() {
         "test" => test(&args),
         "guest" => guest(),
+        "changed" => {
+            changed();
+            true
+        }
         "images" => {
             images(&args);
             true
