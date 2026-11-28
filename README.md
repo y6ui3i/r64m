@@ -52,6 +52,9 @@ memory ordered between them as x86 orders it
 elsewhere, which costs a program with threads half again and more. There is no
 machine: no kernel is booted, no device is emulated.
 
+How an instruction goes from `docker run` through r64m to the kernel and the processor,
+in pictures: [docs/how-it-runs.md](docs/how-it-runs.md).
+
 Every result is held to the real CPU before it is timed, and every experiment has a
 card in [docs/experiments.md](docs/experiments.md) before it runs, with its result
 after, whether it worked or not.
