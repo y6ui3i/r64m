@@ -6640,3 +6640,36 @@ within one in a hundred; the first of each given):
   the interpreter and the checked JIT (counting) passed.
 - RDTSC: a program now sees time go on where it did not count. Nothing in the cases
   read it so as to differ.
+
+## R084: translations kept across processes, in `R64M_CACHE` (2026-11-28)
+
+ADR 0021, accepted with (a): 「(a) R64M_CACHEで」. R079: `cc1` makes blocks for 19% of
+its time, in each of the build's 137 processes, the same blocks every time; and until a
+block is made its code is interpreted (`HOT` = 4).
+
+The card, written before the run.
+
+- **Hypothesis**: with the blocks of one process kept and used by the next, a warm
+  NetHack build no longer pays for making `cc1`'s blocks nor for their first arrivals,
+  and is faster by a tenth or more on Graviton (R079's 41.6 s of making in 377 s).
+  `hello` and `start`, which are almost all starting, gain more as a share. A cold
+  build pays for writing the files, by no more than a hundredth.
+- **What is changed from before**: `R64M_CACHE=dir` (taken out of the guest's
+  environment and handed to children as r64m's option `--cache`). One file in it
+  for each program file (its device, inode, size and time) and r64m's own build; in
+  it, each block's `Built` as the translator gave it, with the guest's bytes it was
+  made from. A kept block is used at an address's first arrival if its bytes are the
+  guest's now, byte for byte; otherwise nothing changes. Blocks made and not kept
+  are added as the process ends or execs (a new file renamed over the old). Never
+  with `--jit-check` or `--jit-count`, never for code the guest may write; how it
+  was made (ordered, counted) is part of the key.
+- **Next move for each result**:
+  - Warm faster by a tenth or more, cold no slower than a hundredth → kept; then the
+    file's size and a limit, and whether (c) is worth its hiding
+  - Warm faster by less → what the warm build still spends (account: making,
+    interpreter, loading the file) decides the next card
+  - A case fails warm → a dependency of translation not in the key: found, put in
+- **Cut-off**: the unit tests (one that keeps and reuses, one whose bytes changed);
+  the container cases by the JIT twice with one cache, cold then warm; on Graviton
+  the four works with no cache, cold and warm, beside main, and the instance stopped
+  after.
