@@ -6368,3 +6368,33 @@ short-lived process; the build of NetHack starts `cc1` 143 times, and each makes
 its blocks anew. If each spends a few tenths of a second making them, that is a
 quarter of the build. How much it is, summed over a whole build, is the next
 thing to count; keeping translations between processes is what it would be for.
+
+## R079: making blocks over a whole build (2026-11-28)
+
+The owner: 「マージして進める」. R078 found a guest instruction is translated for about
+270 ns, and a compilation spends a tenth or more of its time making blocks. The
+build of NetHack starts GCC's compiler 143 times and every other program of the
+build many times; each process makes its blocks anew.
+
+The card, written before the run.
+
+- **Hypothesis**: over the whole build, making blocks is a fifth or more of the
+  time r64m's processes spend (the compiler's large share of its own code is
+  made again in each of 143 processes), and the same few programs (`cc1`, `as`,
+  `ld`, `make`, the shell) account for nearly all of it. Then keeping
+  translations between processes is worth a design of its own.
+- **What is changed from before**: a way to account for every process of a run:
+  with `R64M_ACCOUNT` set to a file, each process r64m runs adds one line to it
+  as it ends (the program, its time from start to end, the time making blocks,
+  the time in generated code, blocks made, guest instructions translated, and
+  instructions run). For measuring; the environment carries it to every process
+  the build starts.
+- **Next move for each result**:
+  - Making blocks a fifth of the build or more, in a few programs → a card on
+    translations kept between processes (by the program's file and its
+    contents), with what it would save
+  - Under a tenth → the build's time is in running, not making: the next card is
+    what the compiler runs (calls and returns, R076)
+  - Lines missing for some processes (they ended another way) → those ways of
+    ending are added before the sum is believed
+- **Cut-off**: one build with the account; the sums by program.
