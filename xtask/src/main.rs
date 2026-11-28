@@ -11,7 +11,7 @@
 //!   cargo xtask uninstall              and taken away again
 //!   cargo xtask status                 whether it is, and what else is registered
 //!   cargo xtask waits                  every process and thread here, and the call each is in
-//!   cargo xtask bench [--this FILE] [--against FILE] [--rounds N] [WORK ...]
+//!   cargo xtask bench [--this FILE] [--against FILE] [--rounds N] [--cache] [WORK ...]
 //!                                      the measure: GCC compiling, NetHack built, Python
 //!                                      started, each a number of times, by this tree's r64m
 //!                                      and, in turn with it, another's
@@ -459,6 +459,17 @@ fn load() -> f64 {
 fn bench_inside(args: &[String]) {
     let work = WORKS.iter().find(|w| Some(w.name) == args.first().map(String::as_str)).unwrap_or_else(|| fail("bench-inside WORK ROUNDS R64M..."));
     let rounds: usize = args.get(1).and_then(|n| n.parse().ok()).unwrap_or(work.rounds);
+    // With a cache of translations (`bench --cache`, R084): each r64m runs the work
+    // once first, untimed as a round, to fill it; that run is said as `cold`.
+    if let Some(dir) = std::env::var_os("R64M_CACHE") {
+        use std::os::unix::fs::DirBuilderExt;
+        let _ = std::fs::DirBuilder::new().mode(0o700).recursive(true).create(&dir);
+        for r64m in &args[2..] {
+            let begun = std::time::Instant::now();
+            let status = Command::new(format!("/r/{r64m}")).arg("--quiet").args(work.command).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+            println!("cold {r64m} {:.4} {}", begun.elapsed().as_secs_f64(), status.is_ok_and(|s| s.success()));
+        }
+    }
     println!("load {:.2}", load());
     for _ in 0..rounds {
         for r64m in &args[2..] {
@@ -504,6 +515,9 @@ fn bench(mut args: Vec<String>) -> bool {
     // With `--this FILE`, that r64m is measured as this tree's, and nothing is built:
     // the xtask that runs is the one staged (a host with no Rust, R082).
     let this = option(&mut args, "--this").map(PathBuf::from);
+    // With a cache of translations in the container (ADR 0021): the rounds are
+    // warm, after one cold run of each r64m (R084). An r64m without it ignores it.
+    let cache = args.iter().position(|a| a == "--cache").map(|i| args.remove(i)).is_some();
     let rounds: Option<usize> = option(&mut args, "--rounds").map(|n| n.parse().unwrap_or_else(|_| fail("--rounds N")));
     if let Some(unknown) = args.iter().find(|a| !WORKS.iter().any(|w| w.name == a.as_str())) {
         fail(format_args!("no work named {unknown}: there are {}", WORKS.iter().map(|w| w.name).collect::<Vec<_>>().join(", ")));
@@ -539,6 +553,9 @@ fn bench(mut args: Vec<String>) -> bool {
         let n = rounds.unwrap_or(work.rounds).to_string();
         let mut c = Command::new("docker");
         c.args(["run", "--rm", "--platform", "linux/amd64"]).arg("-v").arg(format!("{}:/r:ro", stage.display()));
+        if cache {
+            c.args(["-e", "R64M_CACHE=/var/cache/r64m"]);
+        }
         c.args(["--entrypoint", "/r/xtask", work.image, "bench-inside", work.name, &n]).args(&builds);
         eprintln!("xtask: {c:?}");
         let out = c.output().unwrap_or_else(|e| fail(format_args!("docker: {e}")));
@@ -556,7 +573,10 @@ fn bench(mut args: Vec<String>) -> bool {
             let (least, median, most) = spread(&mut times);
             medians.push(median);
             println!("{:<8} {:<6} {:>3} {:>9.3} {:>9.3} {:>9.3} {:>6.1}% {:>9}", work.name, build, times.len(), least, median, most, 100.0 * (most - least) / median, loads.join("→"));
-            history += &format!("{when},{rev},{host},{},{},{},{least:.4},{median:.4},{most:.4},{}\n", work.name, if *build == "a" { "this".to_string() } else { against.as_ref().map(|p| p.display().to_string()).unwrap_or_default() }, times.len(), loads.join(" "));
+            history += &format!("{when},{rev},{host},{},{},{},{least:.4},{median:.4},{most:.4},{}\n", work.name, if *build == "a" { if cache { "this, cache warm".to_string() } else { "this".to_string() } } else { against.as_ref().map(|p| p.display().to_string()).unwrap_or_default() }, times.len(), loads.join(" "));
+        }
+        for line in text.lines().filter(|l| l.starts_with("cold ")) {
+            println!("{:<8} {line}", work.name);
         }
         if let [a, b] = medians[..] {
             println!("{:<8} b / a {:>40.3}", work.name, b / a);

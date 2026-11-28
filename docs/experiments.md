@@ -6673,3 +6673,28 @@ The card, written before the run.
   the container cases by the JIT twice with one cache, cold then warm; on Graviton
   the four works with no cache, cold and warm, beside main, and the instance stopped
   after.
+
+Found on the way (2026-11-28, the Mac, Docker's arm64 VM):
+
+- The first file for `cc1` was 148 MB, 93 of it guest bytes: `seen` is the lowest and
+  highest address the scan for dead flags read, and a few blocks' span is 20 KB or
+  more. The scan now notes each instruction it reads (`Built::read`), and a block
+  keeps its own bytes and those pieces only: 64 MB, and less to compare.
+- One compilation, three rounds with one cache: the same output each time;
+  `cc1` translated 1,356,799 instructions, then 3,108, then 126.
+- All suites by the JIT twice with one cache: every case passed but one,
+  `keytool -genkeypair`, which failed cold and warm. Over four runs of the Java suite
+  with a warm cache it failed three times (the JVM's `hs_err`: SIGSEGV, si_code
+  SI_KERNEL, in `ld-musl` +0x4694a, in a native call from `BigInteger.passesMillerRabin`).
+  With no cache it passed four times in four.
+- Each kept block was translated again beside it and compared (`R64M_CACHE_CHECK`):
+  none differed, and keytool still failed two runs in four. A kept block is the
+  block; what differs is when it is used. A kept block was taken at an address's
+  first arrival, where without a cache it is made at the fourth (`HOT`).
+- With no cache and `--jit-hot=1` (every block made at its first arrival), keytool
+  failed two runs in four with this branch and one in four with `main` built apart:
+  a fault of the JIT's that is in `main` and shows when blocks are made early. Its
+  own card follows (R085).
+- So a kept block is now taken where it would have been made (the fourth arrival),
+  never before: the Java suite passed six runs in six (one cold, five warm). What the
+  cache saves is the translating, not yet the interpreted arrivals before it.

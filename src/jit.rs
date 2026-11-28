@@ -24,6 +24,7 @@
 // Some of its forms wait for the instructions that will use them.
 #[allow(dead_code)]
 pub mod a64;
+pub mod cache;
 pub mod run;
 pub mod translate;
 

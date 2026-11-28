@@ -110,7 +110,10 @@ fn thread(mut c: cpu::Cpu, mut mem: mem::Mem, mut system: sys::Sys) {
             Ok(Went::Signal) => sys::deliver(&mut c, &mut mem, &mut system),
             Ok(Went::Syscall) => {
                 match sys::call(&mut c, &mut mem, &mut system) {
-                    Some(sys::Exit::Group(code)) => std::process::exit(code),
+                    Some(sys::Exit::Group(code)) => {
+                        jit::cache::save();
+                        std::process::exit(code)
+                    }
                     // Its code is nobody's: a process ends with its first thread's.
                     Some(sys::Exit::Thread(_)) => {
                         sys::thread_ends(&mut mem, &system);
@@ -131,6 +134,7 @@ fn thread(mut c: cpu::Cpu, mut mem: mem::Mem, mut system: sys::Sys) {
 fn environment() -> Vec<Vec<u8>> {
     use std::os::unix::ffi::OsStrExt;
     std::env::vars_os()
+        .filter(|(k, _)| k != "R64M_CACHE")
         .map(|(k, v)| [k.as_bytes(), b"=", v.as_bytes()].concat())
         .collect()
 }
@@ -229,7 +233,16 @@ fn main() {
     }
     // The options as they were given, for a program that starts another (`execve`
     // is r64m started again with them, ADR 0017).
-    let own_options: Vec<String> = args.iter().take_while(|a| a.starts_with("--") && *a != "--argv0").cloned().collect();
+    let mut own_options: Vec<String> = args.iter().take_while(|a| a.starts_with("--") && *a != "--argv0").cloned().collect();
+    // Where translations are kept from one process to the next (ADR 0021): named by
+    // `R64M_CACHE` to the first r64m, which the guest is not shown, and by the option
+    // to every r64m a program starts.
+    let cache = args.iter().take_while(|a| a.starts_with("--")).position(|a| a.starts_with("--cache=")).map(|i| args.remove(i)["--cache=".len()..].to_string());
+    let cache = cache.or_else(|| {
+        let dir = std::env::var("R64M_CACHE").ok().filter(|d| !d.is_empty())?;
+        own_options.insert(0, format!("--cache={dir}"));
+        Some(dir)
+    });
     // For measuring: how often an address is arrived at before its block is made.
     let jit_hot = args.iter().take_while(|a| a.starts_with("--")).position(|a| a.starts_with("--jit-hot=")).map(|i| args.remove(i));
     let jit_hot: Option<u8> = jit_hot.and_then(|a| a["--jit-hot=".len()..].parse().ok());
@@ -331,6 +344,9 @@ fn main() {
         img = elf::File::open(&args[0]).unwrap_or_else(|e| fail(format_args!("{}: {e}", args[0])));
     }
     let path = &args[0].clone();
+    if let (true, false, Some(dir)) = (jit, jit_check || jit::translate::COUNTING.load(std::sync::atomic::Ordering::Relaxed), &cache) {
+        jit::cache::open(std::path::Path::new(dir), std::path::Path::new(path));
+    }
     // (With `--copy-files` a file's bytes are copied as they were before R053.)
     let copy = sys::COPY_FILES.load(std::sync::atomic::Ordering::Relaxed);
     let mut loaded = if copy { elf::load(&mut mem, &img) } else { elf::load_file(&mut mem, &img) }.unwrap_or_else(|e| fail(format_args!("{path}: {e}")));
@@ -498,6 +514,9 @@ fn main() {
             "r64m: jit: left for the interpreter {}, at a way out not yet joined {}, by an address not in the table {} (of which its place held another {}), by a fault {}",
             s.left_for_interpreter, s.left_unjoined, s.left_missed, s.missed_taken, s.faults
         );
+        if jit::cache::on() {
+            eprintln!("r64m: jit: {} blocks taken from the cache, {} instructions translated", s.from_cache, s.translated);
+        }
         eprintln!(
             "r64m: jit: a way out not yet joined arrived at a block {}, where no block begins {}, at an address not yet made {}; the table grew {} times",
             s.unjoined_to_block, s.unjoined_to_stood_in, s.unjoined_to_cold, s.grown
@@ -509,6 +528,7 @@ fn main() {
             s.running as f64 / 1e9
         );
     }
+    jit::cache::save();
     account(path, blocks.as_ref(), c.steps);
     std::process::exit(code);
 }

@@ -524,6 +524,8 @@ fn execve(m: &Mem, s: &Sys, path: u64, argv: u64, envp: u64) -> Result<u64, u64>
         all.iter().map(|a| a.as_ptr()).chain([std::ptr::null()]).collect()
     };
     let (args, env) = (list(&args), list(&env));
+    // What this process added to the cache of translations, before it is gone.
+    crate::jit::cache::save();
     unsafe { libc::execve(args[0], args.as_ptr(), env.as_ptr()) };
     Err(errno())
 }

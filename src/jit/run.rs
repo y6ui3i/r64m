@@ -163,6 +163,8 @@ pub struct Stats {
     /// nanoseconds: the rest of a run is the interpreter and r64m's own keeping.
     pub making: u64,
     pub running: u64,
+    /// Blocks taken from the cache of translations (ADR 0021), not translated.
+    pub from_cache: u64,
 }
 
 pub struct Jit {
@@ -413,10 +415,15 @@ impl Jit {
                             Some(Place::Heat(n)) => n + 1,
                             _ => 1,
                         };
+                        // A block kept by an earlier process (ADR 0021) is taken where
+                        // it would have been made, not before: made at an address's
+                        // first arrival, blocks fail Java's keytool (R084, R085).
                         if heat < self.hot {
                             if self.places.insert(c.rip, Place::Heat(heat)).is_none() {
                                 self.know(c.rip);
                             }
+                        } else if super::cache::on() && self.timed_from_cache(c.rip, m) {
+                            continue;
                         } else if self.timed_make(c.rip, m) {
                             continue;
                         } else {
@@ -684,6 +691,16 @@ impl Jit {
         whole.then_some((alone, written))
     }
 
+    fn timed_from_cache(&mut self, rip: u64, m: &mut Mem) -> bool {
+        if !self.timed {
+            return self.from_cache(rip, m);
+        }
+        let start = std::time::Instant::now();
+        let made = self.from_cache(rip, m);
+        self.stats.making += start.elapsed().as_nanos() as u64;
+        made
+    }
+
     fn timed_make(&mut self, rip: u64, m: &mut Mem) -> bool {
         if !self.timed {
             return self.make(rip, m);
@@ -700,9 +717,41 @@ impl Jit {
         if self.writes.get(&page).is_some_and(|&n| n >= GIVEN_UP) {
             return false;
         }
-        let Some(Built { mut words, starts, end, seen, pads, lookups, counted, body }) = translate_as(m, rip, self.check, self.ordered) else {
+        let Some(built) = translate_as(m, rip, self.check, self.ordered) else {
             return false;
         };
+        self.keep_block(rip, m, built, true)
+    }
+
+    /// The block at `rip` from the cache (ADR 0021), if one is kept there and the
+    /// guest's bytes are what it was made from.
+    fn from_cache(&mut self, rip: u64, m: &mut Mem) -> bool {
+        if self.check || translate::COUNTING.load(std::sync::atomic::Ordering::Relaxed) {
+            return false;
+        }
+        let page = m.host_pages(rip, rip + 1).0;
+        if self.writes.get(&page).is_some_and(|&n| n >= GIVEN_UP) {
+            return false;
+        }
+        let Some(built) = super::cache::find(super::cache::key(rip, self.ordered), m) else {
+            return false;
+        };
+        self.stats.from_cache += 1;
+        self.keep_block(rip, m, built, false)
+    }
+
+    /// Keeps a block: its code written, its lookups, landings and pages set up.
+    /// `fresh` if it was just translated (and not taken from the cache): then it is
+    /// kept for the next process too, if a cache is in use and the guest may not
+    /// write its code.
+    fn keep_block(&mut self, rip: u64, m: &mut Mem, built: Built, fresh: bool) -> bool {
+        if fresh && super::cache::on() && !self.check {
+            let (from, to) = built.seen.map_or((rip, built.end), |(lo, hi)| (lo.min(rip), hi.max(built.end)));
+            if !m.guest_may_write(from & !(PAGE - 1), to.next_multiple_of(PAGE)) {
+                super::cache::keep(super::cache::key(rip, self.ordered), rip, &built, m);
+            }
+        }
+        let Built { mut words, starts, end, seen, pads, lookups, counted, body, .. } = built;
         if std::env::var_os("R64M_JIT_DUMP").is_some() {
             // For looking at what was made: each block's address, its instructions'
             // addresses, and its code as words an assembler can be given.
@@ -783,7 +832,9 @@ impl Jit {
         let starts = starts.iter().map(|&(word, at)| (word, (at - rip) as u32)).collect();
         self.blocks.push(Block { code, starts, first: rip, pages, guest: (from, to), guarded, incoming: Vec::new(), pads });
         self.stats.blocks += 1;
-        self.stats.translated += self.blocks.last().map_or(0, |b| b.starts.len() as u64);
+        if fresh {
+            self.stats.translated += self.blocks.last().map_or(0, |b| b.starts.len() as u64);
+        }
         if SAY_MEMORY.load(std::sync::atomic::Ordering::Relaxed) && self.blocks.len().is_multiple_of(2000) {
             self.say_memory();
         }
@@ -2026,6 +2077,35 @@ mod tests {
         let m = guest(&across, &[]);
         let built = translate(&m, CODE, false).unwrap();
         assert_eq!((built.end, built.seen), (CODE + 4, Some((CODE + 2, CODE + 6))));
+    }
+
+    #[test]
+    fn a_kept_block_is_taken_only_where_every_byte_it_rests_on_is_the_same() {
+        use crate::jit::cache;
+        // add eax, ebx; jmp +0 | add ecx, edx; syscall: the block is the first two,
+        // and it read the third to find the add's flags dead (R084, ADR 0021).
+        let across = [0x01, 0xd8, 0xeb, 0x00, 0x01, 0xd1, 0x0f, 0x05];
+        let m = guest(&across, &[]);
+        let built = translate(&m, CODE, false).unwrap();
+        assert!(built.read.contains(&(CODE + 4, CODE + 6)), "{:x?}", built.read);
+        let e = cache::entry(CODE, &built, &m).unwrap();
+        let back = cache::read(&e, &m).expect("the same bytes: taken");
+        assert_eq!((&back.words, &back.starts, back.end, back.seen, &back.pads, &back.lookups, back.body), (&built.words, &built.starts, built.end, built.seen, &built.pads, &built.lookups, built.body));
+        // A byte of the block's own changed (add eax, ebx to add eax, edx), and one of
+        // what it read past its end (add ecx, edx to add ebx, edx): not taken.
+        for (at, byte) in [(1, 0xd0), (5, 0xd3)] {
+            let mut other = across;
+            other[at] = byte;
+            assert!(cache::read(&e, &guest(&other, &[])).is_none(), "byte {at} changed");
+        }
+        // In a file, by key; a second block added keeps the first.
+        let file = cache::merged(&[], 0, &[(cache::key(CODE, false), e.clone())]).unwrap();
+        assert!(cache::find_in(&file, 1, cache::key(CODE, false), &m).is_some());
+        assert!(cache::find_in(&file, 1, cache::key(CODE, true), &m).is_none(), "made ordered is another key");
+        let second = translate(&m, CODE + 4, false).unwrap();
+        let file = cache::merged(&file, 1, &[(cache::key(CODE + 4, false), cache::entry(CODE + 4, &second, &m).unwrap())]).unwrap();
+        assert_eq!(cache::find_in(&file, 2, cache::key(CODE, false), &m).map(|b| b.words), Some(built.words));
+        assert_eq!(cache::find_in(&file, 2, cache::key(CODE + 4, false), &m).map(|b| b.end), Some(second.end));
     }
 
     #[test]
