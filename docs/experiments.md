@@ -5980,3 +5980,30 @@ The card, written before the run.
     that are aligned alike): another way of choosing, in place of more places
 - **Cut-off**: the three sizes, the compilation eight rounds each in turn, the
   whole build three times at the size chosen.
+
+**Result (2026-11-28): the hypothesis held in its direction and fell short in its
+size: with 2^16 places the misses that put another out fall to a third and the
+compilation is 6 in a hundred faster, not a tenth; the whole build 3 in a
+hundred (205 s to 199 s). Kept at 2^16.**
+
+| places | misses | of which another put out | the compilation (median of eight) | a thread's table |
+|---|---|---|---|---|
+| 2^14 | 2.02 million | 1.97 million | 3.25 s | 256 KB |
+| 2^16 | 0.70 million | 0.60 million | 3.06 s | 1 MB |
+| 2^18 | 0.29 million | 0.15 million | 3.03 s | 4 MB |
+
+- About 125 ns a miss (1.73 million fewer from 2^14 to 2^18 for 0.22 s). What is
+  left at 2^18 is about 1 in a hundred of the compilation, and 0.13 million of it
+  is the first arrival at each address, which no size takes away.
+- The whole build, three of each in turn: 205, 206, 209 s with 2^14; 199, 198,
+  202 s with 2^16.
+- Why 2^16 and not 2^18: most of the gain for a quarter of the memory, which
+  every thread pays (a JVM has twenty and more).
+- The ways out left unjoined (2.73 million, the larger part) are untouched; their
+  own card.
+- Tests: 123 unit tests, 116 primitives, 39 traces; every container suite by the
+  JIT.
+
+The owner, on the result: 「でもVM１台に256とか可変で割り当てられるから、俺らも可変に
+したほうがいい気がするけどどうなんだろう？」: a table that grows with the thread's
+work, in place of one size for all. Noted for its own card.
