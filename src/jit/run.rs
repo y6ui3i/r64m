@@ -112,6 +112,11 @@ pub struct Stats {
     pub missed_taken: u64,
     /// How often the table was made larger (R074).
     pub grown: u64,
+    /// What a way out not yet joined arrived at (R075): a block (it is joined now),
+    /// an address where no block can begin, or one not arrived at often enough yet.
+    pub unjoined_to_block: u64,
+    pub unjoined_to_stood_in: u64,
+    pub unjoined_to_cold: u64,
     /// How long the making of blocks took, and the running of generated code, in
     /// nanoseconds: the rest of a run is the interpreter and r64m's own keeping.
     pub making: u64,
@@ -153,6 +158,9 @@ pub struct Jit {
     /// while the JIT was on, by the instruction's first bytes (its prefixes and
     /// opcode, and the ModRM byte's field where the opcode is a group).
     pub why: Option<HashMap<Vec<u8>, u64>>,
+    /// With it: of those, the ones run at an address where no block can begin, which
+    /// every way out to it leaves generated code for (R075).
+    pub why_stood: Option<HashMap<Vec<u8>, u64>>,
     /// How often an address is arrived at before its block is made.
     hot: u8,
     /// The jump the last block was left by, if it can be rewritten to go to the block
@@ -252,6 +260,7 @@ impl Jit {
             holds: HashMap::new(),
             check,
             why: None,
+            why_stood: None,
             hot: hot.max(1),
             from: 0,
             table: vec![[0, 0]; 1 << TABLE_BITS].into_boxed_slice(),
@@ -309,6 +318,13 @@ impl Jit {
             // ADC that could not be told its carry, in code written without jumps).
             let mut left_inside = false;
             if arrived {
+                if self.from != 0 {
+                    match self.places.get(&c.rip) {
+                        Some(Place::Block(_)) => self.stats.unjoined_to_block += 1,
+                        Some(Place::StoodIn) => self.stats.unjoined_to_stood_in += 1,
+                        _ => self.stats.unjoined_to_cold += 1,
+                    }
+                }
                 match self.places.get(&c.rip).copied() {
                     Some(Place::Block(id)) => {
                         // The block before left by a jump to this address: from now on
@@ -372,10 +388,18 @@ impl Jit {
             // that left a block for here is not one to the block that comes after this
             // instruction.
             self.from = 0;
+            let record = c.flag_rec[0];
             cpu::settle(c);
             let before = c.rip;
             if let Some(why) = &mut self.why {
                 *why.entry(key_of(m, before)).or_insert(0) += 1;
+            }
+            if let (true, Some(why)) = (stands_in, &mut self.why_stood) {
+                // With the kind of record the flags were left in (its kind and width),
+                // or none (RFLAGS has them), as two more bytes.
+                let mut key = key_of(m, before);
+                key.extend([0xee, (record >> 8) as u8, record as u8]);
+                *why.entry(key).or_insert(0) += 1;
             }
             // An instruction that faults at its store may have changed the flags or a
             // register on the way to it (ADC to memory has its carry, XADD its
@@ -2198,6 +2222,42 @@ mod tests {
     }
 
     #[test]
+    fn jumps_after_a_shift_and_a_multiplication_are_in_the_block() {
+        // R075. Each of the jumps on zero and sign after a shift by a constant (SHL,
+        // SHR, SAR of 32 and 64 bits), and on overflow and carry after MUL (32 and
+        // 64), by blocks checked against the interpreter, with values that take each
+        // way; and the jump in the block with the instruction before it.
+        //   <first>; j<cc> +3; add edx, 1; add edx, 16; syscall
+        let mut cases: Vec<Vec<u8>> = Vec::new();
+        for first in [&[0xc1, 0xe8, 0x03][..], &[0x48, 0xc1, 0xe8, 0x3f], &[0xc1, 0xe0, 0x1f], &[0x48, 0xc1, 0xf8, 0x05], &[0xd1, 0xe8], &[0x48, 0xd1, 0xe0]] {
+            for cc in [4u8, 5, 8, 9] {
+                let mut v = first.to_vec();
+                v.extend([0x70 | cc, 0x03, 0x83, 0xc2, 0x01, 0x83, 0xc2, 0x10, 0x0f, 0x05]);
+                cases.push(v);
+            }
+        }
+        for first in [&[0xf7, 0xe3][..], &[0x48, 0xf7, 0xe3]] {
+            for cc in [0u8, 1, 2, 3] {
+                let mut v = first.to_vec();
+                v.extend([0x70 | cc, 0x03, 0x83, 0xc2, 0x01, 0x83, 0xc2, 0x10, 0x0f, 0x05]);
+                cases.push(v);
+            }
+        }
+        for code in &cases {
+            for (a, b) in [(0u64, 0u64), (1, 1), (8, 3), (0x8000_0000, 2), (0xffff_ffff, 0xffff_ffff), (1 << 63, 2), (u64::MAX, 1), (7, 1 << 40)] {
+                let set = |c: &mut Cpu| {
+                    c.reg[RAX] = a;
+                    c.reg[RBX] = b;
+                    c.reg[RDX] = 0;
+                };
+                checked(code, &[], &set);
+            }
+            let m = guest(code, &[]);
+            assert!(translate(&m, CODE, false).is_some_and(|b| b.starts.len() >= 2), "{code:02x?}: the jump is not in the block");
+        }
+    }
+
+    #[test]
     fn conditions_read_by_setcc_and_cmovcc() {
         // After CMP, ADD and TEST of EAX and EBX (and of RAX and RBX): SETcc of DL, of
         // DH and of a byte of memory, CMOVcc of ECX and RCX from ESI, RSI and memory,
@@ -2237,14 +2297,15 @@ mod tests {
             });
         }
         // That they are in the block where the host's flags answer, and are not where
-        // they do not (parity; any condition after a shift).
+        // they do not (parity; after a shift, any condition but zero and sign: R075).
         let block_of = |code: &[u8]| {
             let m = guest(code, &[]);
             translate(&m, CODE, false).map(|b| b.starts.len())
         };
         assert_eq!(block_of(&[0x39, 0xd8, 0x0f, 0x94, 0xc2, 0x0f, 0x44, 0xcf, 0x0f, 0x05]), Some(3));
         assert_eq!(block_of(&[0x39, 0xd8, 0x0f, 0x9a, 0xc2, 0x0f, 0x05]), Some(1));
-        assert_eq!(block_of(&[0xc1, 0xe0, 0x03, 0x0f, 0x94, 0xc2, 0x0f, 0x05]), Some(1));
+        assert_eq!(block_of(&[0xc1, 0xe0, 0x03, 0x0f, 0x94, 0xc2, 0x0f, 0x05]), Some(2));
+        assert_eq!(block_of(&[0xc1, 0xe0, 0x03, 0x0f, 0x92, 0xc2, 0x0f, 0x05]), Some(1));
         assert_eq!(block_of(&[0x0f, 0x94, 0xc2, 0x0f, 0x05]), None);
         // Read by the interpreter, they read the record: so an instruction before
         // them must have written it, though one after them writes the flags again.

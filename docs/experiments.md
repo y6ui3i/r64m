@@ -6068,3 +6068,87 @@ a miss still leaves generated code for r64m's own (about 125 ns); QEMU, FEX-Emu
 and box64 each have a second level that does not. Which to borrow, by this
 ledger's numbers, is the next card of this kind; the ways out not yet joined
 (2.73 million in the compilation) are the larger part still.
+
+### R075, before its card: where the ways out not yet joined go (2026-11-28)
+
+Counted on the compilation of R070 (`--jit-stats`, `--jit-why`), before any card:
+of 2.73 million leavings at a way out not yet joined, 2.48 million arrived where no
+block can begin, 0.18 million at a block (joined then), 0.14 million at an address
+not made yet. Where no block can begin is nearly always a conditional jump whose
+condition the host's flags do not say, with the flags in a record: JE after a
+shift's record of 32 bits (0.62 million), JO after a multiplication's of 64 bits
+(0.37 million), JNE after a shift's of 64 (0.14 million), and the jumps after a
+subtraction's. Each is a way out, the interpreter for one instruction, and a way
+in. The card follows; the owner asked meanwhile for a picture of how an
+instruction goes, which comes first.
+
+## R075: conditional jumps after a shift and a multiplication, in the block (2026-11-28)
+
+The owner: 「マージして戻る」. What the count before this card found: of 2.73
+million leavings of generated code at a way out not yet joined, 2.48 million
+arrived at a conditional jump that no block can begin with, because the host's
+flags do not say what it asks. The two largest: JE and JNE after a shift (0.76
+million: SHR of 32 bits, then 64), JO after an unsigned multiplication of 64
+bits (0.37 million). A shift is translated with arm64's shifts, which set no
+flags, and a multiplication with `umulh` and `mul`; both leave a record and say
+the host's flags are nothing. So the block ends before the jump, the jump is the
+interpreter's at every pass, and the way back into generated code is by Rust.
+
+The card, written before the run.
+
+- **Hypothesis**: the host's flags can say these two at the cost of one
+  instruction. After a shift by a constant that is not zero, of 32 or 64 bits,
+  x86's ZF and SF are the result's: an `ands` of the result with itself gives the
+  host's Z and N, which answer JE, JNE, JS and JNS. After MUL (unsigned) CF and
+  OF are both "the upper half is not zero": a `subs` of the D register less
+  nothing gives the host's Z, which answers JO, JNO, JB and JAE. With those the
+  jumps are in their blocks; the leavings at a conditional jump fall by 1.1
+  million or more, and the compilation is faster by a tenth (2.48 million of
+  them cost, by R073's 125 ns, about 0.3 s of 3).
+- **What is changed from before**: two kinds of host flags (`ZeroSign`,
+  `HighHalf`) the translator knows, the instruction after the shift and the
+  MUL, and what a jump asks of each. Where a record was written for a jump that
+  is now answered by the host, it is not written (the scan of what is dead sees
+  the host answers).
+- **Next move for each result**:
+  - The leavings fall as said and the compilation by a twentieth or more →
+    kept; what is left of 2.48 million is counted again for the next kinds
+    (the jumps after a subtraction that begin blocks)
+  - They fall and the time does not → the interpreter's single step was cheap
+    and the arrivals were not: said, and kept for the leavings
+  - A case fails → the condition is wrong for some width or count: found by
+    the case, put right
+- **Cut-off**: unit tests of each jump after each instruction against the
+  interpreter; the 62 programs four ways; the suites by the JIT; the
+  compilation eight rounds; the build three times.
+
+**Result (2026-11-28): the leavings fell as said and the time hardly did: a
+compilation 2 in a hundred faster, the build 1 to 2 (190 s to 187). Kept, for the
+leavings. The hypothesis of a tenth was wrong: the interpreter's single step and
+the way back in were cheap.**
+
+| | before (R074) | after |
+|---|---|---|
+| generated code entered (the compilation) | 4.90 million | 2.08 million |
+| leavings that arrived where no block begins | 2.48 million | 1.33 million |
+| the compilation, median of eight | 2.90 s | 2.83 s |
+| the whole build, three of each in turn | 190, 190, 191 s | 186, 188, 188 s |
+
+- 2.8 million fewer times in and out for 0.07 s: about 25 ns each, a fifth of what
+  a miss in the table cost (R073: there r64m looks the address up in its map and
+  fills the table; here the interpreter runs one jump).
+- What is left where no block begins: MOVSB (`a4`) after a subtraction's record
+  and after a logic's (0.27 million), JNE, JA and JL after a subtraction's record
+  of 32 bits (0.24 million), SHUFPD (0.13 million), LOCK OR (0.08), MOVLPS (0.06),
+  a shift by one of 64 bits with SAR's short form (0.06), CMOVE after a BSF's
+  record (0.05). Each is small; together 1.3 million at 25 ns is under a twentieth
+  of a second. Not worth a card each by this ledger.
+- So the 37 in a hundred at blocks' beginnings is still not explained, and it is
+  not the arrivals by r64m. What is left to look at is in generated code itself:
+  arrivals by joined branches and by the table, which the processor cannot be
+  asked about on this VM. The next look needs a machine with its counters (hal is
+  x86-64; an arm64 Linux machine with `perf` is needed).
+- Tests: 125 unit tests on macOS and 126 on Linux, among them a test of every jump
+  on zero, sign, overflow and carry after each shift and MUL against the
+  interpreter; 116 primitives, 39 traces; the 62 programs four ways; every suite
+  by the JIT; GCC's, glibc's and Python's suites three ways.

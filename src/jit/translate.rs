@@ -478,6 +478,9 @@ fn host_flags_of(ins: &Ins) -> Option<HostFlags> {
         }),
         0xf7 if field == 0 => Some(HostFlags::Logic),
         0xf7 if field == 3 => Some(HostFlags::Sub),
+        0xf7 if field == 4 && ins.size >= 32 => Some(HostFlags::HighHalf),
+        // A shift of 32 or 64 bits by a constant that is not zero (R075).
+        0xc1 | 0xd1 if field >= 4 && ins.size >= 32 && (ins.op == 0xd1 || ins.imm as u32 & (ins.size - 1) != 0) => Some(HostFlags::ZeroSign),
         0xff if field < 2 => Some(HostFlags::IncDec),
         0x12e | 0x12f => Some(HostFlags::Float),
         _ => None,
@@ -699,6 +702,12 @@ enum HostFlags {
     /// (ADR 0015, point 4; the table there has two branches for equality, which the
     /// 0111 saves).
     Float,
+    /// Of an ANDS of a shift's result with itself (R075): zero and sign are x86's,
+    /// and nothing else is (a shift's carry and overflow are not the host's).
+    ZeroSign,
+    /// Of a SUBS of the upper half of MUL's product less nothing (R075): x86's CF
+    /// and OF are both "it is not zero", which is the host's Z turned over.
+    HighHalf,
 }
 
 /// How one of x86's sixteen conditions is asked of the host's flags.
@@ -713,6 +722,11 @@ fn condition(cc: u8, flags: HostFlags) -> Option<Jump> {
     use HostFlags::*;
     // By pairs: the odd one of each is the even one's opposite.
     let even = match (cc >> 1, flags) {
+        (2, ZeroSign) => Jump::If(Eq),
+        (4, ZeroSign) => Jump::If(Mi),
+        (_, ZeroSign) => return None,
+        (0 | 1, HighHalf) => Jump::If(Ne),
+        (_, HighHalf) => return None,
         (1, Bit) => Jump::If(Lo),
         (_, Bit) => return None,
         // After a comparison of floats OF and SF are clear, CF is "less or not
@@ -1488,6 +1502,12 @@ impl Emit<'_> {
             self.put(a64::lsr(true, 2, T4, 32));
         }
         self.flags = None;
+        // MUL's CF and OF are "the upper half is not zero": a jump on them is
+        // answered by the D register compared with nothing (R075).
+        if !signed {
+            self.put(a64::arith_imm(true, true, true, a64::ZR, 2, 0, false));
+            self.flags = Some(HostFlags::HighHalf);
+        }
     }
 
     /// DIV (unsigned) and IDIV: the D and A registers together by `b`, the quotient
@@ -2086,8 +2106,14 @@ pub fn translate_as(m: &Mem, rip: u64, exact: bool, ordered: bool) -> Option<Bui
                             _ => a64::asr(wide, d, d, n),
                         });
                     }
-                    // What a jump after it asks is not in the host's flags.
+                    // By a constant that is not zero, a jump after it on zero or
+                    // sign is answered by the result tested (R075). Else what a jump
+                    // after it asks is not in the host's flags.
                     e.flags = None;
+                    if !by_cl && n != 0 {
+                        e.put(a64::logic(wide, Logic::Ands, a64::ZR, d, d));
+                        e.flags = Some(HostFlags::ZeroSign);
+                    }
                 }
             }
             0x140..=0x14f | 0x190..=0x19f => {
