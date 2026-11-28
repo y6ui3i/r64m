@@ -11,6 +11,10 @@
 //!   cargo xtask uninstall              and taken away again
 //!   cargo xtask status                 whether it is, and what else is registered
 //!   cargo xtask waits                  every process and thread here, and the call each is in
+//!   cargo xtask bench [--against FILE] [--rounds N] [WORK ...]
+//!                                      the measure: GCC compiling, NetHack built, Python
+//!                                      started, each a number of times, by this tree's r64m
+//!                                      and, in turn with it, another's
 //!
 //! The same commands are what the CI runs (.github/workflows/ci.yml): what passes
 //! here passes there.
@@ -407,10 +411,156 @@ fn in_the_container(command: &str) {
     say_the_list(&dir);
 }
 
+// ---- The measure (R081) -----------------------------------------------------------------
+//
+// What is timed, where, and how often. Each is run by r64m in its own x86-64 image, the
+// clock read by a program of the host's own inside the container (this one, built for
+// arm64 Linux), so that neither Docker's starting a container nor a shell of the
+// guest's is in the time. With `--against` another r64m runs each round in turn with
+// this tree's: the two meet the same load.
+
+/// The image of the measures that need GCC and NetHack's source: tools/images/bench.
+const BENCH_IMAGE: &str = "r64m-bench:amd64";
+/// NetHack 3.6.7's source: where it is looked for if `R64M_NETHACK_SRC` does not say.
+const NETHACK_SRC: &str = "target/bench/nethack-367-src.tgz";
+
+/// A measure: its name, its image, how many rounds, and the program run each time.
+struct Work {
+    name: &'static str,
+    image: &'static str,
+    rounds: usize,
+    command: &'static [&'static str],
+}
+
+const WORKS: [Work; 4] = [
+    // One compilation alone: GCC's cc1 -O2 on a file of NetHack's (R070).
+    Work { name: "compile", image: BENCH_IMAGE, rounds: 8, command: &["/usr/libexec/gcc/x86_64-alpine-linux-musl/14.2.0/cc1", "-quiet", "-O2", "-std=gnu17", "-w", "/bench/apply.i", "-o", "/tmp/out.s"] },
+    // A small program compiled and linked: many short processes (the driver, cc1, as, ld).
+    Work { name: "hello", image: BENCH_IMAGE, rounds: 10, command: &["/bin/sh", "-c", "cd /tmp && printf 'int main(void) { return 0; }\\n' > h.c && gcc -O2 h.c -o h"] },
+    // NetHack built by make with one job (R030, R069).
+    Work { name: "build", image: BENCH_IMAGE, rounds: 3, command: &["/bin/sh", "-c", "rm -rf /tmp/nh && cp -a /src/NetHack-3.6.7 /tmp/nh && cd /tmp/nh && make all > /dev/null 2>&1"] },
+    // Python started and ended at once (R080).
+    Work { name: "start", image: "python@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90", rounds: 10, command: &["/usr/local/bin/python3", "-c", "pass"] },
+];
+
+/// The load the kernel says, the mean of the last minute: a measure taken while
+/// something else ran is not one (R080's spoilt round).
+fn load() -> f64 {
+    std::fs::read_to_string("/proc/loadavg").ok().and_then(|s| s.split_whitespace().next()?.parse().ok()).unwrap_or(-1.0)
+}
+
+/// Inside the container: each round runs the work once by each r64m named, in turn,
+/// and says how long each took.
+fn bench_inside(args: &[String]) {
+    let work = WORKS.iter().find(|w| Some(w.name) == args.first().map(String::as_str)).unwrap_or_else(|| fail("bench-inside WORK ROUNDS R64M..."));
+    let rounds: usize = args.get(1).and_then(|n| n.parse().ok()).unwrap_or(work.rounds);
+    println!("load {:.2}", load());
+    for _ in 0..rounds {
+        for r64m in &args[2..] {
+            let begun = std::time::Instant::now();
+            let status = Command::new(format!("/r/{r64m}")).arg("--quiet").args(work.command).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+            let took = begun.elapsed().as_secs_f64();
+            match status {
+                Ok(s) if s.success() => println!("time {r64m} {took:.4}"),
+                other => println!("failed {r64m} {other:?}"),
+            }
+        }
+    }
+    println!("load {:.2}", load());
+}
+
+/// The bench image, made if it is not there.
+fn bench_image() {
+    if Command::new("docker").args(["image", "inspect", BENCH_IMAGE]).output().is_ok_and(|o| o.status.success()) {
+        return;
+    }
+    let src = std::env::var_os("R64M_NETHACK_SRC").map(PathBuf::from).unwrap_or_else(|| root().join(NETHACK_SRC));
+    if !src.exists() {
+        fail(format_args!("{}: NetHack 3.6.7's source is needed (https://www.nethack.org/download/3.6.7/nethack-367-src.tgz, sha256 98cf67df...), put there or named by R64M_NETHACK_SRC", src.display()));
+    }
+    let context = root().join("target/bench/context");
+    std::fs::create_dir_all(&context).unwrap_or_else(|e| fail(format_args!("{}: {e}", context.display())));
+    for (from, to) in [(root().join("tools/images/bench/Dockerfile"), "Dockerfile"), (src, "nethack-367-src.tgz")] {
+        std::fs::copy(&from, context.join(to)).unwrap_or_else(|e| fail(format_args!("{}: {e}", from.display())));
+    }
+    must(Command::new("docker").args(["build", "--platform", "linux/amd64", "--tag", BENCH_IMAGE]).arg(&context));
+}
+
+/// The least, the median and the most of some times.
+fn spread(times: &mut [f64]) -> (f64, f64, f64) {
+    times.sort_by(|a, b| a.total_cmp(b));
+    let n = times.len();
+    let median = if n % 2 == 1 { times[n / 2] } else { (times[n / 2 - 1] + times[n / 2]) / 2.0 };
+    (times[0], median, times[n - 1])
+}
+
+fn bench(mut args: Vec<String>) -> bool {
+    let against = option(&mut args, "--against").map(PathBuf::from);
+    let rounds: Option<usize> = option(&mut args, "--rounds").map(|n| n.parse().unwrap_or_else(|_| fail("--rounds N")));
+    if let Some(unknown) = args.iter().find(|a| !WORKS.iter().any(|w| w.name == a.as_str())) {
+        fail(format_args!("no work named {unknown}: there are {}", WORKS.iter().map(|w| w.name).collect::<Vec<_>>().join(", ")));
+    }
+    must(cargo().args(["build", "--release", "--target", LINUX]));
+    must(cargo().args(["build", "--release", "--manifest-path", "xtask/Cargo.toml", "--target", LINUX]));
+    let stage = root().join("target/bench/stage");
+    std::fs::create_dir_all(&stage).unwrap_or_else(|e| fail(format_args!("{}: {e}", stage.display())));
+    let mut files = vec![(root().join("target").join(LINUX).join("release/r64m"), "a"), (root().join("xtask/target").join(LINUX).join("release/xtask"), "xtask")];
+    if let Some(b) = &against {
+        files.push((b.clone(), "b"));
+    }
+    for (from, to) in files {
+        std::fs::copy(&from, stage.join(to)).unwrap_or_else(|e| fail(format_args!("{}: {e}", from.display())));
+    }
+    let builds: Vec<&str> = if against.is_some() { vec!["a", "b"] } else { vec!["a"] };
+    let rev = Command::new("git").args(["rev-parse", "--short", "HEAD"]).current_dir(root()).output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+    let host = Command::new("uname").args(["-sm"]).output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+    let when = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let mut history = String::new();
+    let mut ok = true;
+    println!("{:<8} {:<6} {:>3} {:>9} {:>9} {:>9} {:>7} {:>9}", "work", "r64m", "n", "least s", "median s", "most s", "spread", "load");
+    for work in WORKS.iter().filter(|w| args.is_empty() || args.iter().any(|a| a == w.name)) {
+        if work.image == BENCH_IMAGE {
+            bench_image();
+        }
+        let n = rounds.unwrap_or(work.rounds).to_string();
+        let mut c = Command::new("docker");
+        c.args(["run", "--rm", "--platform", "linux/amd64"]).arg("-v").arg(format!("{}:/r:ro", stage.display()));
+        c.args(["--entrypoint", "/r/xtask", work.image, "bench-inside", work.name, &n]).args(&builds);
+        eprintln!("xtask: {c:?}");
+        let out = c.output().unwrap_or_else(|e| fail(format_args!("docker: {e}")));
+        let text = String::from_utf8_lossy(&out.stdout);
+        let loads: Vec<String> = text.lines().filter_map(|l| l.strip_prefix("load ")).map(str::to_string).collect();
+        let mut medians = Vec::new();
+        for build in &builds {
+            let mut times: Vec<f64> = text.lines().filter_map(|l| l.strip_prefix("time ")?.strip_prefix(build)?.trim().parse().ok()).collect();
+            let failed = text.lines().filter(|l| l.starts_with(&format!("failed {build} "))).count();
+            if times.is_empty() || failed > 0 {
+                ok = false;
+                eprintln!("xtask: {} by {build}: {failed} runs failed\n{text}{}", work.name, String::from_utf8_lossy(&out.stderr));
+                continue;
+            }
+            let (least, median, most) = spread(&mut times);
+            medians.push(median);
+            println!("{:<8} {:<6} {:>3} {:>9.3} {:>9.3} {:>9.3} {:>6.1}% {:>9}", work.name, build, times.len(), least, median, most, 100.0 * (most - least) / median, loads.join("→"));
+            history += &format!("{when},{rev},{host},{},{},{},{least:.4},{median:.4},{most:.4},{}\n", work.name, if *build == "a" { "this".to_string() } else { against.as_ref().map(|p| p.display().to_string()).unwrap_or_default() }, times.len(), loads.join(" "));
+        }
+        if let [a, b] = medians[..] {
+            println!("{:<8} b / a {:>40.3}", work.name, b / a);
+        }
+    }
+    let file = root().join("target/bench/history.csv");
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&file) {
+        let _ = f.write_all(history.as_bytes());
+    }
+    eprintln!("xtask: written to {}", file.display());
+    ok
+}
+
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
-        fail("test | guest | images | container | ci | install | uninstall | status | waits (see xtask/src/main.rs)");
+        fail("test | guest | images | container | ci | install | uninstall | status | waits | bench (see xtask/src/main.rs)");
     }
     let command = args.remove(0);
     let ok = match command.as_str() {
@@ -421,6 +571,11 @@ fn main() {
             true
         }
         "container" => container(args),
+        "bench" => bench(args),
+        "bench-inside" => {
+            bench_inside(&args);
+            true
+        }
         "install" => in_the_kernels_world("registers"),
         "uninstall" => in_the_kernels_world("unregisters"),
         "status" => in_the_kernels_world("says"),

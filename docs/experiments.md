@@ -6432,3 +6432,31 @@ clock read around every run of generated code, which costs; 187 s without).
   again).
 - The account stays: `R64M_ACCOUNT=file` (it turns on the clock that times
   making blocks, as `--jit-stats` does).
+
+### R081: the measure, in the repository (2026-11-28)
+
+The owner, asked whether the measures were enough: 「物差しは足りている？」, and of
+the order: 「benchを先に作る」. Not an experiment: the tool. Until now every timing of
+R068 to R080 was run by shell scripts in a scratch folder (an arm64 shell timing r64m
+under `chroot` into an x86-64 image's files), which no one else could run and which
+the rule of Rust alone (ADR 0012) does not allow.
+
+`cargo xtask bench` (docs/bench.md): four works (one compilation, a small program
+compiled and linked, the NetHack build, Python's start), each a number of times, by
+this tree's r64m and, in turn with it round by round, another's; the least, the
+median, the most, the spread, the load; a line for each in `target/bench/history.csv`.
+The image of the works that need GCC and NetHack is `tools/images/bench`.
+
+Tried on the Mac, two rounds of three works, this tree's r64m against R079's (they
+differ in nothing that is run): `compile` 4.46 s and 4.49 (spreads of 11 and 20 in a
+hundred: the Mac's antivirus was at work, as in R080), `hello` 0.22 and 0.21,
+`start` 0.15 and 0.10.
+
+Two things it showed at once:
+
+- `python3 -c pass` takes 0.10 to 0.19 s when r64m is started for it directly; R080's
+  0.60 s was timed by a shell loop under r64m, and most of it was the loop: the shell
+  forking itself, `date` started, each under r64m. What a fork and an exec cost under
+  r64m is its own question, now owed.
+- The load the container sees on the Mac is the Docker VM's (1.00 throughout),
+  not the Mac's (5.4): the spread is what shows other work there.
