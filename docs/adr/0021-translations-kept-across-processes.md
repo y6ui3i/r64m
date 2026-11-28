@@ -78,8 +78,10 @@ What makes this possible:
      (chosen by the file's device, inode, size and time, and r64m's build). It
      holds the blocks of every region that program's processes ran, its libraries'
      too: point 2 makes the choice of file a matter of finding, never of trust.
-   - A kept block is used at its first arrival, not after `HOT` arrivals: it costs
-     no translation.
+   - A kept block is used where it would have been made (the `HOT`-th arrival),
+     and costs no translation there. Using it at the first arrival would also save
+     the interpreted arrivals before it, but made that early, blocks show a fault of
+     the JIT's that is in `main` (R084, R085): that waits for R085.
    - At its end (and before an `execve`), a process adds the blocks it made that
      the file did not have. It writes a new file and renames it over the old one,
      so a reader never sees half a file, and of two writers the last wins: a lost
