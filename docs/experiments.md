@@ -6121,3 +6121,34 @@ The card, written before the run.
 - **Cut-off**: unit tests of each jump after each instruction against the
   interpreter; the 62 programs four ways; the suites by the JIT; the
   compilation eight rounds; the build three times.
+
+**Result (2026-11-28): the leavings fell as said and the time hardly did: a
+compilation 2 in a hundred faster, the build 1 to 2 (190 s to 187). Kept, for the
+leavings. The hypothesis of a tenth was wrong: the interpreter's single step and
+the way back in were cheap.**
+
+| | before (R074) | after |
+|---|---|---|
+| generated code entered (the compilation) | 4.90 million | 2.08 million |
+| leavings that arrived where no block begins | 2.48 million | 1.33 million |
+| the compilation, median of eight | 2.90 s | 2.83 s |
+| the whole build, three of each in turn | 190, 190, 191 s | 186, 188, 188 s |
+
+- 2.8 million fewer times in and out for 0.07 s: about 25 ns each, a fifth of what
+  a miss in the table cost (R073: there r64m looks the address up in its map and
+  fills the table; here the interpreter runs one jump).
+- What is left where no block begins: MOVSB (`a4`) after a subtraction's record
+  and after a logic's (0.27 million), JNE, JA and JL after a subtraction's record
+  of 32 bits (0.24 million), SHUFPD (0.13 million), LOCK OR (0.08), MOVLPS (0.06),
+  a shift by one of 64 bits with SAR's short form (0.06), CMOVE after a BSF's
+  record (0.05). Each is small; together 1.3 million at 25 ns is under a twentieth
+  of a second. Not worth a card each by this ledger.
+- So the 37 in a hundred at blocks' beginnings is still not explained, and it is
+  not the arrivals by r64m. What is left to look at is in generated code itself:
+  arrivals by joined branches and by the table, which the processor cannot be
+  asked about on this VM. The next look needs a machine with its counters (hal is
+  x86-64; an arm64 Linux machine with `perf` is needed).
+- Tests: 125 unit tests on macOS and 126 on Linux, among them a test of every jump
+  on zero, sign, overflow and carry after each shift and MUL against the
+  interpreter; 116 primitives, 39 traces; the 62 programs four ways; every suite
+  by the JIT; GCC's, glibc's and Python's suites three ways.

@@ -2222,6 +2222,42 @@ mod tests {
     }
 
     #[test]
+    fn jumps_after_a_shift_and_a_multiplication_are_in_the_block() {
+        // R075. Each of the jumps on zero and sign after a shift by a constant (SHL,
+        // SHR, SAR of 32 and 64 bits), and on overflow and carry after MUL (32 and
+        // 64), by blocks checked against the interpreter, with values that take each
+        // way; and the jump in the block with the instruction before it.
+        //   <first>; j<cc> +3; add edx, 1; add edx, 16; syscall
+        let mut cases: Vec<Vec<u8>> = Vec::new();
+        for first in [&[0xc1, 0xe8, 0x03][..], &[0x48, 0xc1, 0xe8, 0x3f], &[0xc1, 0xe0, 0x1f], &[0x48, 0xc1, 0xf8, 0x05], &[0xd1, 0xe8], &[0x48, 0xd1, 0xe0]] {
+            for cc in [4u8, 5, 8, 9] {
+                let mut v = first.to_vec();
+                v.extend([0x70 | cc, 0x03, 0x83, 0xc2, 0x01, 0x83, 0xc2, 0x10, 0x0f, 0x05]);
+                cases.push(v);
+            }
+        }
+        for first in [&[0xf7, 0xe3][..], &[0x48, 0xf7, 0xe3]] {
+            for cc in [0u8, 1, 2, 3] {
+                let mut v = first.to_vec();
+                v.extend([0x70 | cc, 0x03, 0x83, 0xc2, 0x01, 0x83, 0xc2, 0x10, 0x0f, 0x05]);
+                cases.push(v);
+            }
+        }
+        for code in &cases {
+            for (a, b) in [(0u64, 0u64), (1, 1), (8, 3), (0x8000_0000, 2), (0xffff_ffff, 0xffff_ffff), (1 << 63, 2), (u64::MAX, 1), (7, 1 << 40)] {
+                let set = |c: &mut Cpu| {
+                    c.reg[RAX] = a;
+                    c.reg[RBX] = b;
+                    c.reg[RDX] = 0;
+                };
+                checked(code, &[], &set);
+            }
+            let m = guest(code, &[]);
+            assert!(translate(&m, CODE, false).is_some_and(|b| b.starts.len() >= 2), "{code:02x?}: the jump is not in the block");
+        }
+    }
+
+    #[test]
     fn conditions_read_by_setcc_and_cmovcc() {
         // After CMP, ADD and TEST of EAX and EBX (and of RAX and RBX): SETcc of DL, of
         // DH and of a byte of memory, CMOVcc of ECX and RCX from ESI, RSI and memory,
@@ -2261,14 +2297,15 @@ mod tests {
             });
         }
         // That they are in the block where the host's flags answer, and are not where
-        // they do not (parity; any condition after a shift).
+        // they do not (parity; after a shift, any condition but zero and sign: R075).
         let block_of = |code: &[u8]| {
             let m = guest(code, &[]);
             translate(&m, CODE, false).map(|b| b.starts.len())
         };
         assert_eq!(block_of(&[0x39, 0xd8, 0x0f, 0x94, 0xc2, 0x0f, 0x44, 0xcf, 0x0f, 0x05]), Some(3));
         assert_eq!(block_of(&[0x39, 0xd8, 0x0f, 0x9a, 0xc2, 0x0f, 0x05]), Some(1));
-        assert_eq!(block_of(&[0xc1, 0xe0, 0x03, 0x0f, 0x94, 0xc2, 0x0f, 0x05]), Some(1));
+        assert_eq!(block_of(&[0xc1, 0xe0, 0x03, 0x0f, 0x94, 0xc2, 0x0f, 0x05]), Some(2));
+        assert_eq!(block_of(&[0xc1, 0xe0, 0x03, 0x0f, 0x92, 0xc2, 0x0f, 0x05]), Some(1));
         assert_eq!(block_of(&[0x0f, 0x94, 0xc2, 0x0f, 0x05]), None);
         // Read by the interpreter, they read the record: so an instruction before
         // them must have written it, though one after them writes the flags again.
