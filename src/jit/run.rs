@@ -112,6 +112,11 @@ pub struct Stats {
     pub missed_taken: u64,
     /// How often the table was made larger (R074).
     pub grown: u64,
+    /// What a way out not yet joined arrived at (R075): a block (it is joined now),
+    /// an address where no block can begin, or one not arrived at often enough yet.
+    pub unjoined_to_block: u64,
+    pub unjoined_to_stood_in: u64,
+    pub unjoined_to_cold: u64,
     /// How long the making of blocks took, and the running of generated code, in
     /// nanoseconds: the rest of a run is the interpreter and r64m's own keeping.
     pub making: u64,
@@ -153,6 +158,9 @@ pub struct Jit {
     /// while the JIT was on, by the instruction's first bytes (its prefixes and
     /// opcode, and the ModRM byte's field where the opcode is a group).
     pub why: Option<HashMap<Vec<u8>, u64>>,
+    /// With it: of those, the ones run at an address where no block can begin, which
+    /// every way out to it leaves generated code for (R075).
+    pub why_stood: Option<HashMap<Vec<u8>, u64>>,
     /// How often an address is arrived at before its block is made.
     hot: u8,
     /// The jump the last block was left by, if it can be rewritten to go to the block
@@ -252,6 +260,7 @@ impl Jit {
             holds: HashMap::new(),
             check,
             why: None,
+            why_stood: None,
             hot: hot.max(1),
             from: 0,
             table: vec![[0, 0]; 1 << TABLE_BITS].into_boxed_slice(),
@@ -309,6 +318,13 @@ impl Jit {
             // ADC that could not be told its carry, in code written without jumps).
             let mut left_inside = false;
             if arrived {
+                if self.from != 0 {
+                    match self.places.get(&c.rip) {
+                        Some(Place::Block(_)) => self.stats.unjoined_to_block += 1,
+                        Some(Place::StoodIn) => self.stats.unjoined_to_stood_in += 1,
+                        _ => self.stats.unjoined_to_cold += 1,
+                    }
+                }
                 match self.places.get(&c.rip).copied() {
                     Some(Place::Block(id)) => {
                         // The block before left by a jump to this address: from now on
@@ -372,10 +388,18 @@ impl Jit {
             // that left a block for here is not one to the block that comes after this
             // instruction.
             self.from = 0;
+            let record = c.flag_rec[0];
             cpu::settle(c);
             let before = c.rip;
             if let Some(why) = &mut self.why {
                 *why.entry(key_of(m, before)).or_insert(0) += 1;
+            }
+            if let (true, Some(why)) = (stands_in, &mut self.why_stood) {
+                // With the kind of record the flags were left in (its kind and width),
+                // or none (RFLAGS has them), as two more bytes.
+                let mut key = key_of(m, before);
+                key.extend([0xee, (record >> 8) as u8, record as u8]);
+                *why.entry(key).or_insert(0) += 1;
             }
             // An instruction that faults at its store may have changed the flags or a
             // register on the way to it (ADC to memory has its carry, XADD its

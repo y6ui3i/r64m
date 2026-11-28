@@ -344,6 +344,7 @@ fn main() {
             .unwrap_or_else(|e| fail(format_args!("no memory for generated code: {e}")));
         if jit_why {
             made.why = Some(Default::default());
+            made.why_stood = Some(Default::default());
         }
         made.timed = jit_stats;
         made.ordered = jit_ordered;
@@ -437,6 +438,14 @@ fn main() {
             eprintln!("r64m: why: {n:>12} {}", bytes.join(" "));
         }
     }
+    if let Some(why) = blocks.as_ref().and_then(|b| b.why_stood.as_ref()) {
+        let mut by_count: Vec<_> = why.iter().collect();
+        by_count.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+        for (key, n) in by_count.into_iter().take(20) {
+            let bytes: Vec<String> = key.iter().map(|b| format!("{b:02x}")).collect();
+            eprintln!("r64m: why, where no block begins: {n:>12} {}", bytes.join(" "));
+        }
+    }
     if let (true, Some(blocks)) = (jit_stats, &blocks) {
         let s = &blocks.stats;
         eprintln!(
@@ -446,6 +455,10 @@ fn main() {
         eprintln!(
             "r64m: jit: left for the interpreter {}, at a way out not yet joined {}, by an address not in the table {} (of which its place held another {}), by a fault {}",
             s.left_for_interpreter, s.left_unjoined, s.left_missed, s.missed_taken, s.faults
+        );
+        eprintln!(
+            "r64m: jit: a way out not yet joined arrived at a block {}, where no block begins {}, at an address not yet made {}; the table grew {} times",
+            s.unjoined_to_block, s.unjoined_to_stood_in, s.unjoined_to_cold, s.grown
         );
         // (Timed only when this is asked for: the clock is read twice for each.)
         eprintln!(

@@ -6068,3 +6068,16 @@ a miss still leaves generated code for r64m's own (about 125 ns); QEMU, FEX-Emu
 and box64 each have a second level that does not. Which to borrow, by this
 ledger's numbers, is the next card of this kind; the ways out not yet joined
 (2.73 million in the compilation) are the larger part still.
+
+### R075, before its card: where the ways out not yet joined go (2026-11-28)
+
+Counted on the compilation of R070 (`--jit-stats`, `--jit-why`), before any card:
+of 2.73 million leavings at a way out not yet joined, 2.48 million arrived where no
+block can begin, 0.18 million at a block (joined then), 0.14 million at an address
+not made yet. Where no block can begin is nearly always a conditional jump whose
+condition the host's flags do not say, with the flags in a record: JE after a
+shift's record of 32 bits (0.62 million), JO after a multiplication's of 64 bits
+(0.37 million), JNE after a shift's of 64 (0.14 million), and the jumps after a
+subtraction's. Each is a way out, the interpreter for one instruction, and a way
+in. The card follows; the owner asked meanwhile for a picture of how an
+instruction goes, which comes first.
