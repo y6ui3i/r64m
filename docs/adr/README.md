@@ -33,4 +33,4 @@ Each file has: **Status** (accepted, or replaced by which), **Context**, **Decis
 | [0018](0018-one-thing-well.md) | r64m does one thing: on Arm, it behaves as x86-64; a machine may come of it by a fork |
 | [0019](0019-threads-and-signals.md) | A thread is the host's thread; a signal is the host's signal, delivered between blocks; memory ordered between threads as x86 orders it |
 | [0020](0020-what-done-means.md) | What done means: it runs in unchanged images, it is twice QEMU by the client's clock, a list of images is compatible; the primitives are a tool |
-| [0021](0021-translations-kept-across-processes.md) | Translations kept from one process to the next (proposed) |
+| [0021](0021-translations-kept-across-processes.md) | Translations kept from one process to the next, in a directory named by `R64M_CACHE` |

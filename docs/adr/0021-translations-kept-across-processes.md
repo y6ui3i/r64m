@@ -1,8 +1,8 @@
 # 0021: Translations kept from one process to the next
 
-**Status**: proposed (2026-11-28; the owner: 「翻訳キャッシュのADRから」). Points 2 to 5
-are proposed as written. Point 1, where the translations are kept, is put to the
-owner as a choice; the proposal is (a), with (c) as a later step.
+**Status**: accepted (2026-11-28). The owner asked for it (「翻訳キャッシュのADRから」) and
+chose (a) for point 1 (「(a) R64M_CACHEで」). Points 2 to 5 as written. (c) stays a
+later step, to be weighed only after (a) has been measured.
 
 ## Context
 
@@ -44,7 +44,7 @@ What makes this possible:
 ## Decision
 
 1. **Where the translations are kept: a choice for the owner.**
-   - **(a) A directory named by `R64M_CACHE`. Proposed first.** Nothing is kept
+   - **(a) A directory named by `R64M_CACHE`. Chosen.** Nothing is kept
      unless the variable is set. In Docker the directory is a volume, given with
      `-v` and `-e`. r64m takes the variable out of the environment the guest sees,
      so the guest finds no difference, and children are given it again by r64m.
